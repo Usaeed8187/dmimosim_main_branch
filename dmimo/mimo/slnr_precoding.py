@@ -116,8 +116,8 @@ def mumimo_slnr_equalizer(y, h, no, ue_indices):
         P_k = tf.matmul(Q_k, u_k)  # [..., num_tx_ant, num_tx_ant]
         F_k = P_k[..., :, :num_rx_ant]  # [..., num_tx_ant, num_rx_ant]
         # normalization to unit power
-        norm = tf.sqrt(tf.reduce_sum(tf.abs(F_k)**2, axis=-2, keepdims=True))
-        F_k = F_k/tf.cast(num_rx_ant*norm, F_k.dtype)
+        norm = tf.sqrt(tf.reduce_sum(tf.abs(F_k)**2, axis=[-2, -1], keepdims=True))
+        F_k = F_k/tf.cast(norm, F_k.dtype)
         # compute equalizer matrix
         G_k = tf.linalg.adjoint(tf.matmul(H_k, F_k))  # [..., num_rx_ant, num_rx_ant]
         G_all.append(G_k)
