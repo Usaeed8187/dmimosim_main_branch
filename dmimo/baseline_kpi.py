@@ -15,7 +15,7 @@ from sionna.utils.metrics import compute_ber, compute_bler
 
 from dmimo.config import Ns3Config, SimConfig, NetworkConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation, standard_rc_pred_freq_mimo
-from dmimo.mimo import SVDPrecoder, SVDEqualizer, rankAdaptation, linkAdaptation, CSI_feedback
+from dmimo.mimo import SVDPrecoder, SVDEqualizer, rankAdaptation, linkAdaptation
 from dmimo.mimo import ZFPrecoder
 from dmimo.utils import add_frequency_offset, add_timing_offset, cfo_val, sto_val
 
