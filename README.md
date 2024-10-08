@@ -64,14 +64,16 @@ make -j4 scratch_dMIMO_channel_extraction_main
 ```
 
 Generate the dMIMO channel data including MIMO channel coefficients and 
-propagation losses.
+propagation losses. An example usage is shown in the following.
 
 ```
 cd VT_dmimo_ns3/scratch/dMIMO_channel_extraction/
-python main.py --seed 3007 --scenario V2V-Urban --small_scale_fading --num_subframes 50 \
- --squad1_speed_km_h=3.0 --squad2_speed_km_h=3.0 --intra_sq1_rw_speed_km_h=0.3 \
- --intra_sq2_rw_speed_km_h=0.3 --buildings_file 1narrow.txt
+python main.py --seed 3007 --scenario V2V-Urban --small_scale_fading --num_subframes 100 \
+--squad1_speed_km_h=3.0 --squad2_speed_km_h=3.0 --intra_sq1_rw_speed_km_h=0.3 --intra_sq2_rw_speed_km_h=0.3 \
+--buildings_file 1narrow.txt --squad1_direction=0 --squad2_direction=0.785398
 ```
+
+Scripts to generate channels for different mobility scenarios are provided in the "ns3/scritps" folder.
 
 ## Development
 
