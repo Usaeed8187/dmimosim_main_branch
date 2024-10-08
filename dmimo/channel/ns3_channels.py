@@ -18,10 +18,10 @@ class LoadNs3Channel:
         self._Lrs = None  # RxSquad pathloss in dB, shape is [num_rxue,num_ofdm_sym]
         self._Ldm = None  # dMIMO pathloss in dB, shape is [num_rxue+1,num_txue+1,num_ofdm_sym]
 
-    def __call__(self, channel_type, slot_idx=None, batch_size=1):
+    def __call__(self, channel_type, slot_idx=None, batch_size=1, ue_selection=True):
         if slot_idx is None:
             slot_idx = self._current_slot + 1  # advance to next slot by default
-        slot_idx = slot_idx % self._cfg.total_slots
+        slot_idx = slot_idx % self._cfg.total_slots  # for test purpose only
 
         for batch_idx in range(batch_size):
             # Load channel data for current slot when needed
@@ -39,7 +39,7 @@ class LoadNs3Channel:
 
                 # Apply UE selection masks
                 # Note that the TxBS and RxBS are always selected
-                if self._cfg.txue_mask is not None:
+                if ue_selection and (self._cfg.txue_mask is not None):
                     assert self._cfg.num_txue == np.count_nonzero(self._cfg.txue_mask)
                     tx_ue_mask = self._cfg.txue_mask
                     tx_ant_mask = np.repeat(self._cfg.txue_mask, self._cfg.num_ue_ant)
@@ -52,7 +52,7 @@ class LoadNs3Channel:
                     self._Lts = self._Lts[tx_ue_mask]
                     self._Ldm = self._Ldm[:, txs_mask]
 
-                if self._cfg.rxue_mask is not None:
+                if ue_selection and (self._cfg.rxue_mask is not None):
                     assert self._cfg.num_rxue == np.count_nonzero(self._cfg.rxue_mask)
                     rx_ue_mask = self._cfg.rxue_mask
                     rx_ant_mask = np.repeat(self._cfg.rxue_mask, self._cfg.num_ue_ant)

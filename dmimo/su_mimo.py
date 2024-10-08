@@ -239,8 +239,6 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
         print("\n", "Code-rate per stream (SU-MIMO) = ", cfg.code_rate, "\n")
     else:
         qam_order_arr = mcs_feedback_report[0]
-        code_rate_arr = []
-
         modulation_order = int(np.min(qam_order_arr))
         code_rate = []  # FIXME update code rate
 
@@ -263,7 +261,7 @@ def sim_su_mimo(cfg: SimConfig):
 
     # UE selection
     if cfg.enable_ue_selection is True:
-        tx_ue_mask, rx_ue_mask = update_node_selection(cfg)
+        tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
         ns3cfg.update_ue_mask(tx_ue_mask, rx_ue_mask)
 
     # Total number of antennas in the TxSquad, always use all gNB antennas

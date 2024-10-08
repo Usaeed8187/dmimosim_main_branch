@@ -46,9 +46,10 @@ class dMIMOChannels(Layer):
     def channel_type(self):
         return self._channel_type
 
-    def load_channel(self, slot_idx, batch_size=1):
+    def load_channel(self, slot_idx, batch_size=1, ue_selection=True):
         assert slot_idx >= 0, "Slot indices must be non-negative integers"
-        h_freq, snrdb = self._load_channel(self._channel_type, slot_idx=slot_idx, batch_size=batch_size)
+        h_freq, snrdb = self._load_channel(self._channel_type, slot_idx=slot_idx, batch_size=batch_size,
+                                           ue_selection=ue_selection)
         return h_freq, snrdb
 
     def call(self, inputs):
