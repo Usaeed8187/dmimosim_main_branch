@@ -97,12 +97,13 @@ class Baseline(Model):
         # The resource grid mapper maps symbols onto an OFDM resource grid
         self.rg_mapper = ResourceGridMapper(self.rg)
 
-        # The zero forcing precoder
-        self.zf_precoder = ZFPrecoder(self.rg, sm, return_effective_channel=True)
-
-        # SVD-based precoder and equalizer
-        self.svd_precoder = SVDPrecoder(self.rg, sm, return_effective_channel=True)
-        self.svd_equalizer = SVDEqualizer(self.rg, sm)
+        if self.cfg.precoding_method == "ZF":
+            # the zero forcing precoder
+            self.zf_precoder = ZFPrecoder(self.rg, sm, return_effective_channel=True)
+        elif self.cfg.precoding_method == "SVD":
+            # SVD-based precoder and equalizer
+            self.svd_precoder = SVDPrecoder(self.rg, sm, return_effective_channel=True)
+            self.svd_equalizer = SVDEqualizer(self.rg, sm)
 
         # The LS channel estimator will provide channel estimates and error variances
         self.ls_estimator = LSChannelEstimator(self.rg, interpolation_type="lin")
@@ -161,7 +162,7 @@ class Baseline(Model):
             y = self.svd_equalizer([y, h_freq_csi, self.num_streams_per_tx])
 
         # LS channel estimation with linear interpolation
-        no = 0.1  # initial noise estimation (tunable param)
+        no = 5e-2  # initial noise estimation (tunable param)
         h_hat, err_var = self.ls_estimator([y, no])
 
         # LMMSE equalization
@@ -243,7 +244,7 @@ def sim_baseline(cfg: SimConfig):
     Simulation of baseline scenarios using 4x4 MIMO channels
 
     :param cfg: simulation settings
-    :return: [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits]
+    :return: [uncoded_ber, coded_ber], [goodbits, userbits]
     """
 
     # dMIMO channels from ns-3 simulator
@@ -309,9 +310,8 @@ def sim_baseline(cfg: SimConfig):
     # Goodput and throughput estimation
     goodbits = (1.0 - coded_ber) * baseline.num_bits_per_frame
     userbits = (1.0 - coded_bler) * baseline.num_bits_per_frame
-    ratedbits = (1.0 - uncoded_ser) * baseline.num_uncoded_bits_per_frame
 
-    return [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits]
+    return [uncoded_ber, coded_ber], [goodbits, userbits]
 
 
 def sim_baseline_all(cfg: SimConfig):
@@ -320,7 +320,7 @@ def sim_baseline_all(cfg: SimConfig):
     """
 
     total_cycles = 0
-    uncoded_ber, ldpc_ber, goodput, throughput, bitrate = 0, 0, 0, 0, 0
+    uncoded_ber, ldpc_ber, goodput, throughput = 0, 0, 0, 0
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p2):
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
@@ -329,11 +329,9 @@ def sim_baseline_all(cfg: SimConfig):
         ldpc_ber += bers[1]
         goodput += bits[0]
         throughput += bits[1]
-        bitrate += bits[2]
 
     slot_time = cfg.slot_duration  # default 1ms subframe/slot duration
     goodput = goodput / (total_cycles * slot_time * 1e6)  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6)  # Mbps
-    bitrate = bitrate / (total_cycles * slot_time * 1e6)  # Mbps
 
-    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate]
+    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput]

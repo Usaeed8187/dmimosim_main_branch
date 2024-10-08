@@ -278,7 +278,7 @@ def sim_mu_mimo(cfg: SimConfig):
     Simulation of MU-MIMO scenarios using different settings
 
     :param cfg: simulation settings
-    :return: [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits]
+    :return: [uncoded_ber, coded_ber], [goodbits, userbits]
     """
 
     # dMIMO channels from ns-3 simulator
@@ -383,9 +383,8 @@ def sim_mu_mimo(cfg: SimConfig):
     # Goodput and throughput estimation
     goodbits = (1.0 - coded_ber) * mu_mimo.num_bits_per_frame
     userbits = (1.0 - coded_bler) * mu_mimo.num_bits_per_frame
-    ratedbits = (1.0 - uncoded_ser) * mu_mimo.num_uncoded_bits_per_frame
 
-    return [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits]
+    return [uncoded_ber, coded_ber], [goodbits, userbits]
 
 
 def sim_mu_mimo_all(cfg: SimConfig):
@@ -394,7 +393,7 @@ def sim_mu_mimo_all(cfg: SimConfig):
     """
 
     total_cycles = 0
-    uncoded_ber, ldpc_ber, goodput, throughput, bitrate = 0, 0, 0, 0, 0
+    uncoded_ber, ldpc_ber, goodput, throughput = 0, 0, 0, 0
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
@@ -403,12 +402,10 @@ def sim_mu_mimo_all(cfg: SimConfig):
         ldpc_ber += bers[1]
         goodput += bits[0]
         throughput += bits[1]
-        bitrate += bits[2]
 
     slot_time = cfg.slot_duration  # default 1ms subframe/slot duration
     overhead = cfg.num_slots_p2/(cfg.num_slots_p1 + cfg.num_slots_p2)
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
-    bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
-    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate]
+    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput]

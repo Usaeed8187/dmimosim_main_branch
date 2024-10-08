@@ -7,7 +7,6 @@ This scripts should be called from the "sims" folder
 import sys
 import os
 import numpy as np
-import tensorflow as tf
 import matplotlib.pyplot as plt
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
@@ -16,6 +15,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
 
 # Configure to use only a single GPU and allocate only as much memory as needed
+import tensorflow as tf
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     try:
@@ -60,7 +60,6 @@ if __name__ == "__main__":
         ldpc_ber = np.zeros((2, num_modulations))
         goodput = np.zeros((2, num_modulations))
         throughput = np.zeros((2, num_modulations))
-        bitrate = np.zeros((2, num_modulations))
 
         for k in range(num_modulations):
             cfg.modulation_order = modulation_orders[k]
@@ -71,7 +70,6 @@ if __name__ == "__main__":
             ldpc_ber[0, k] = rst_svd[1]
             goodput[0, k] = rst_svd[2]
             throughput[0, k] = rst_svd[3]
-            bitrate[0, k] = rst_svd[4]
 
             cfg.precoding_method = "ZF"
             rst_zf = sim_baseline_all(cfg)
@@ -79,7 +77,6 @@ if __name__ == "__main__":
             ldpc_ber[1, k] = rst_zf[1]
             goodput[1, k] = rst_zf[2]
             throughput[1, k] = rst_zf[3]
-            bitrate[1, k] = rst_zf[4]
 
         fig, ax = plt.subplots(1, 3, figsize=(15, 4))
 
@@ -100,11 +97,8 @@ if __name__ == "__main__":
         ax[2].set_ylabel('Goodput/Throughput (Mbps)')
         ax[2].plot(modulation_orders, goodput.transpose(), 's-')
         ax[2].plot(modulation_orders, throughput.transpose(), 'd-')
-        ax[2].plot(modulation_orders, bitrate.transpose(), '*-')
-        ax[2].legend(['Goodput-SVD', 'Goodput-ZF', 'Throughput-SVD', 'Throughput-ZF', 'Bitrate-SVD', 'Bitrate-ZF'])
+        ax[2].legend(['Goodput-SVD', 'Goodput-ZF', 'Throughput-SVD', 'Throughput-ZF'])
 
-        plt.savefig("../results/{}/baseline_results_s{}.png".format(folder_name, cfg.num_tx_streams))
-
-        np.savez("../results/{}/baseline_results_s{}.npz".format(folder_name, cfg.num_tx_streams),
-                 ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput)
-
+        basename = "../results/{}/baseline_results_s{}".format(folder_name, cfg.num_tx_streams)
+        plt.savefig(f"{basename}.png")
+        np.savez(f"{basename}.npz", ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput)

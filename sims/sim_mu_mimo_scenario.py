@@ -41,19 +41,18 @@ if __name__ == "__main__":
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.rank_adapt = False      # disable rank adaptation
     cfg.link_adapt = False      # disable link adaptation
-    cfg.cfo_sigma = 0.0         # in Hz
-    cfg.sto_sigma = 0.0         # in nanosecond
     cfg.ns3_folder = "../ns3/channels_medium_mobility/"
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("../results", folder_name), exist_ok=True)
     print("Using channels in {}".format(folder_name))
 
-    # manual rank adaptation (assuming 2 antennas per UE)
-    cfg.num_tx_streams = 4     # total number of streams
-    cfg.num_rx_ue_sel = cfg.num_tx_streams - 2  # BS has two streams
+    num_rx_antennas = 6    # total rx antennas used
+    # Test case 1:  no rank adaptation, assuming 2 antennas per UE and treating BS as two UEs
+    cfg.num_tx_streams = num_rx_antennas
+    cfg.num_rx_ue_sel = (num_rx_antennas - 4) // 2
     cfg.ue_indices = np.reshape(np.arange((cfg.num_rx_ue_sel + 2) * 2), (cfg.num_rx_ue_sel + 2, -1))
-    cfg.ue_ranks = [1]  # same rank for all UEs
+    cfg.ue_ranks = [2]  # same rank for all UEs
 
     # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
     modulation_orders = [2, 4, 6]
@@ -62,7 +61,6 @@ if __name__ == "__main__":
     ldpc_ber = np.zeros((2, num_modulations))
     goodput = np.zeros((2, num_modulations))
     throughput = np.zeros((2, num_modulations))
-    bitrate = np.zeros((2, num_modulations))
 
     for k in range(num_modulations):
         cfg.modulation_order = modulation_orders[k]
@@ -73,7 +71,6 @@ if __name__ == "__main__":
         ldpc_ber[0, k] = rst_bd[1]
         goodput[0, k] = rst_bd[2]
         throughput[0, k] = rst_bd[3]
-        bitrate[0, k] = rst_bd[4]
 
         cfg.precoding_method = "ZF"
         rst_zf = sim_mu_mimo_all(cfg)
@@ -81,7 +78,6 @@ if __name__ == "__main__":
         ldpc_ber[1, k] = rst_zf[1]
         goodput[1, k] = rst_zf[2]
         throughput[1, k] = rst_zf[3]
-        bitrate[1, k] = rst_zf[4]
 
     fig, ax = plt.subplots(1, 3, figsize=(15, 4))
 
@@ -102,10 +98,8 @@ if __name__ == "__main__":
     ax[2].set_ylabel('Goodput/Throughput (Mbps)')
     ax[2].plot(modulation_orders, goodput.transpose(), 's-')
     ax[2].plot(modulation_orders, throughput.transpose(), 'd-')
-    ax[2].plot(modulation_orders, bitrate.transpose(), '*-')
-    ax[2].legend(['Goodput-BD', 'Goodput-ZF', 'Throughput-BD', 'Throughput-ZF', 'Bitrate-SVD', 'Bitrate-ZF'])
+    ax[2].legend(['Goodput-BD', 'Goodput-ZF', 'Throughput-BD', 'Throughput-ZF'])
 
     basename = "../results/{}/mu_mimo_results".format(folder_name)
     plt.savefig(f"{basename}.png")
-    np.savez(f"{basename}.npz", ber=ber, ldpc_ber=ldpc_ber,
-             goodput=goodput, throughput=throughput, bitrate=bitrate)
+    np.savez(f"{basename}.npz", ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput)
