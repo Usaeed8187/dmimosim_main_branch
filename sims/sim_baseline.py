@@ -1,5 +1,5 @@
 """
-Simulation of baseline scenario with ns-3 channels
+Simulation of Baseline scenario with ns-3 channels
 
 This scripts should be called from the "sims" folder
 """
@@ -41,8 +41,6 @@ if __name__ == "__main__":
     cfg.csi_delay = 2           # feedback delay in number of subframe
     cfg.rank_adapt = False      # disable rank adaptation
     cfg.link_adapt = False      # disable link adaptation
-    cfg.cfo_sigma = 0.0         # in Hz
-    cfg.sto_sigma = 0.0         # in nanosecond
     cfg.ns3_folder = "../ns3/channels_medium_mobility/"
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))

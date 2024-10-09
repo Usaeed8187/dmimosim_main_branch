@@ -7,7 +7,6 @@ This scripts should be called from the "sims" folder
 import sys
 import os
 import numpy as np
-import tensorflow as tf
 import matplotlib.pyplot as plt
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
@@ -16,6 +15,7 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
 
 # Configure to use only a single GPU and allocate only as much memory as needed
+import tensorflow as tf
 gpus = tf.config.list_physical_devices('GPU')
 if gpus:
     try:
@@ -42,9 +42,7 @@ if __name__ == "__main__":
     cfg.csi_delay = 2           # feedback delay in number of subframe
     cfg.rank_adapt = False      # disable rank adaptation
     cfg.link_adapt = False      # disable link adaptation
-    cfg.cfo_sigma = 0.0         # in Hz
-    cfg.sto_sigma = 0.0         # in nanosecond
-    cfg.ns3_folder = "../ns3/channels/"
+    cfg.ns3_folder = "../ns3/channels_medium_mobility/"
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("../results", folder_name), exist_ok=True)

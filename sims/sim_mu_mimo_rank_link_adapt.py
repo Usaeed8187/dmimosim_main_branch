@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-# os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
+os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
 
 # Configure to use only a single GPU and allocate only as much memory as needed
 import tensorflow as tf
@@ -39,8 +39,6 @@ if __name__ == "__main__":
     cfg.total_slots = 35        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
-    cfg.cfo_sigma = 0.0         # in Hz
-    cfg.sto_sigma = 0.0         # in nanosecond
     cfg.ns3_folder = "../ns3/channels_medium_mobility/"
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
