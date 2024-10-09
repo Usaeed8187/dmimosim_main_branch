@@ -91,7 +91,7 @@ class standard_rc_pred_freq_mimo:
             self.RLS_lambda = rc_config.RLS_lambda
             self.RLS_w = 1
 
-    def get_csi_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans):
+    def get_csi_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0]):
 
         first_csi_history_idx = first_slot_idx - (csi_delay * self.history_len)
         channel_history_slots = np.arange(first_csi_history_idx, first_slot_idx, csi_delay)
@@ -99,7 +99,8 @@ class standard_rc_pred_freq_mimo:
         h_freq_csi_list = []
         for loop_idx, slot_idx in enumerate(channel_history_slots):
             # h_freq_csi has shape [batch_size, num_rx, num_rx_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
-            h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi, slot_idx=slot_idx)
+            h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi, slot_idx=slot_idx,
+                                                               cfo_vals=cfo_vals, sto_vals=sto_vals)
             # h_freq_csi = h_freq_csi[:, :, :self.num_rx_ant, ...]  # TODO: use node selection mask
             h_freq_csi_list.append(np.expand_dims(h_freq_csi, axis=0))
 

@@ -86,8 +86,8 @@ def estimate_freq_time_cov(dmimo_chans: dMIMOChannels, rg: ResourceGrid, start_s
     return freq_cov_mat, time_cov_mat
 
 
-def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_idx, cache_slots=5, ebno_db=10.0,
-                             cfo_sigma=0.0, sto_sigma=0.0):
+def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_idx, cache_slots=5, ebno_db=12.0,
+                             cfo_vals=[0], sto_vals=[0]):
 
     # Only allow channel estimation from slot 1 onward
     assert slot_idx > 0, "Current slot index must be a positive integer"
@@ -103,7 +103,6 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
     rg_mapper = ResourceGridMapper(rg)
 
     freq_cov_mat = estimate_freq_cov(dmimo_chans, rg, start_slot=start_slot, total_slots=cache_slots)
-
     lmmse_int = LMMSELinearInterp(rg.pilot_pattern, freq_cov_mat)
     ls_estimator = LSChannelEstimator(rg, interpolator=lmmse_int)
 
@@ -116,10 +115,10 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
     dx_rg = rg_mapper(dx)
 
     # add CFO/STO to simulate synchronization errors
-    if sto_sigma > 0:
-        dx_rg = add_timing_offset(dx_rg, sto_sigma)
-    if cfo_sigma > 0:
-        dx_rg = add_frequency_offset(dx_rg, cfo_sigma)
+    if np.any(np.not_equal(sto_vals, 0)):
+        dx_rg = add_timing_offset(dx_rg, sto_vals)
+    if np.any(np.not_equal(cfo_vals, 0)):
+        dx_rg = add_frequency_offset(dx_rg, cfo_vals)
 
     # Pass through ns3 channels
     # output has shape: [1, num_rx, num_rx_ant, num_ofdm_sym, fft_size]

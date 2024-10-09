@@ -22,12 +22,15 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._ue_ranks = None                   # UE ranks for MU-MIMO precoding
         self._perfect_csi = False               # Use perfect CSI for debugging
         self._csi_prediction = False            # Use CSI prediction
-        self._sto_sigma = 0.0                   # standard deviation of STO in nanoseconds
-        self._cfo_sigma = 0.0                   # standard deviation of CFO in Hz
         self._rank_adapt = True                 # turn on rank adaptation
         self._link_adapt = True                 # turn on link adaptation
         self._enable_txsquad = False            # enable simulation of TxSquad transmission
         self._enable_rxsquad = False            # enable simulation of TxSquad transmission
+        self._cfo_sigma = [0.0]                 # standard deviation of CFO in Hz (vector for multiple nodes)
+        self._sto_sigma = [0.0]                 # standard deviation of STO in nanoseconds (vector for multiple nodes)
+        self._gen_sync_errors = False           # auto-generate random CFO/STO values for each phase/cycle
+        self._random_cfo_vals = [0.0]           # random STO values in nanoseconds (temporary values for simulation)
+        self._random_sto_vals = [0.0]           # random CFO values in Hz (temporary values for simulation)
         super().__init__(**kwargs)
 
     @property
@@ -151,22 +154,6 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._csi_prediction = val
 
     @property
-    def sto_sigma(self):
-        return self._sto_sigma
-
-    @sto_sigma.setter
-    def sto_sigma(self, val):
-        self._sto_sigma = val
-
-    @property
-    def cfo_sigma(self):
-        return self._cfo_sigma
-
-    @cfo_sigma.setter
-    def cfo_sigma(self, val):
-        self._cfo_sigma = val
-    
-    @property
     def rank_adapt(self):
         return self._rank_adapt
 
@@ -197,3 +184,44 @@ class SimConfig(CarrierConfig, MCSConfig):
     @enable_rxsquad.setter
     def enable_rxsquad(self, val):
         self._enable_rxsquad = val
+
+    @property
+    def cfo_sigma(self):
+        return self._cfo_sigma
+
+    @cfo_sigma.setter
+    def cfo_sigma(self, val):
+        self._cfo_sigma = val
+
+    @property
+    def sto_sigma(self):
+        return self._sto_sigma
+
+    @sto_sigma.setter
+    def sto_sigma(self, val):
+        self._sto_sigma = val
+
+    @property
+    def gen_sync_errors(self):
+        return self._gen_sync_errors
+
+    @gen_sync_errors.setter
+    def gen_sync_errors(self, val):
+        self._gen_sync_errors = val
+
+    @property
+    def random_sto_vals(self):
+        return self._random_sto_vals
+
+    @random_sto_vals.setter
+    def random_sto_vals(self, val):
+        self._random_sto_vals = val
+
+    @property
+    def random_cfo_vals(self):
+        return self._random_cfo_vals
+
+    @random_cfo_vals.setter
+    def random_cfo_vals(self, val):
+        self._random_cfo_vals = val
+
