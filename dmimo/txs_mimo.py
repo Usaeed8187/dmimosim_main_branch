@@ -82,7 +82,8 @@ class TxSquad(Model):
                           pilot_ofdm_symbol_indices=[2, 11])
 
         self.coderate = 11/12  # fixed code rate for current design
-        num_bits_per_stream = np.ceil(txs_bits_per_frame * (cfg.num_slots_p2 / cfg.num_slots_p1) / self.num_streams_per_tx)
+        num_bits_per_stream = np.ceil(txs_bits_per_frame * (cfg.num_slots_p2 / cfg.num_slots_p1)
+                                      / self.num_streams_per_tx)
         bits_per_symbol = int(np.ceil(num_bits_per_stream / self.coderate / rg.num_data_symbols.numpy()))
         self.num_bits_per_symbol = max(2, bits_per_symbol)
         if self.num_bits_per_symbol % 2 != 0:

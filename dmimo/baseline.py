@@ -17,7 +17,7 @@ from dmimo.config import Ns3Config, SimConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
 from dmimo.mimo import SVDPrecoder, SVDEqualizer, rankAdaptation, linkAdaptation
 from dmimo.mimo import ZFPrecoder
-from dmimo.utils import add_frequency_offset, add_timing_offset, cfo_val, sto_val
+from dmimo.utils import add_frequency_offset, add_timing_offset
 
 
 class Baseline(Model):
@@ -38,10 +38,6 @@ class Baseline(Model):
         # dMIMO configuration
         self.num_bs_ant = 4  # Tx squad BB
         self.num_ue_ant = 4  # Rx squad BB
-
-        # CFO and STO settings
-        self.sto_sigma = sto_val(cfg, cfg.sto_sigma)
-        self.cfo_sigma = cfo_val(cfg, cfg.cfo_sigma)
 
         # The number of transmitted streams is less than or equal to the number of UE antennas
         assert cfg.num_tx_streams <= self.num_ue_ant
@@ -149,10 +145,10 @@ class Baseline(Model):
             ValueError("unsupported precoding method")
 
         # add CFO/STO to simulate synchronization errors
-        if self.sto_sigma > 0:
-            x_precoded = add_timing_offset(x_precoded, self.sto_sigma)
-        if self.cfo_sigma > 0:
-            x_precoded = add_frequency_offset(x_precoded, self.cfo_sigma)
+        if np.any(np.not_equal(self.cfg.random_sto_vals, 0)):
+            x_precoded = add_timing_offset(x_precoded, self.cfg.random_sto_vals)
+        if np.any(np.not_equal(self.cfg.random_cfo_vals, 0)):
+            x_precoded = add_frequency_offset(x_precoded, self.cfg.first_slot_idx, self.cfg.random_cfo_vals)
 
         # apply dMIMO channels to the resource grid in the frequency domain.
         y = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
@@ -277,8 +273,8 @@ def sim_baseline(cfg: SimConfig):
         # LMMSE channel estimation
         h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi,
                                                            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                           cfo_sigma=cfo_val(cfg, cfg.cfo_sigma),
-                                                           sto_sigma=sto_val(cfg, cfg.sto_sigma))
+                                                           cfo_vals=cfg.random_cfo_vals,
+                                                           sto_vals=cfg.random_sto_vals)
 
     # Rank and link adaptation
     if cfg.rank_adapt and cfg.link_adapt and cfg.first_slot_idx == cfg.start_slot_idx:

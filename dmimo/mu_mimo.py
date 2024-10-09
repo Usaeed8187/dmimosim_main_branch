@@ -19,7 +19,7 @@ from dmimo.channel import standard_rc_pred_freq_mimo
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, SLNREqualizer
 from dmimo.mimo import rankAdaptation, linkAdaptation
 from dmimo.mimo import update_node_selection
-from dmimo.utils import add_frequency_offset, add_timing_offset, cfo_val, sto_val
+from dmimo.utils import add_frequency_offset, add_timing_offset
 
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
@@ -39,10 +39,6 @@ class MU_MIMO(Model):
         self.cfg = cfg
         self.rg_csi = rg_csi
         self.batch_size = cfg.num_slots_p2  # batch processing for all slots in phase 2
-
-        # CFO and STO settings
-        self.sto_sigma = sto_val(cfg, cfg.sto_sigma)
-        self.cfo_sigma = cfo_val(cfg, cfg.cfo_sigma)
 
         # To use sionna-compatible interface, regard TxSquad as one BS transmitter
         # A 4-antennas basestation is regarded as the combination of two 2-antenna UEs
@@ -173,10 +169,10 @@ class MU_MIMO(Model):
             ValueError("unsupported precoding method")
 
         # add CFO/STO to simulate synchronization errors
-        if self.sto_sigma > 0:
-            x_precoded = add_timing_offset(x_precoded, self.sto_sigma)
-        if self.cfo_sigma > 0:
-            x_precoded = add_frequency_offset(x_precoded, self.cfo_sigma)
+        if np.any(np.not_equal(self.cfg.random_sto_vals, 0)):
+            x_precoded = add_timing_offset(x_precoded, self.cfg.random_sto_vals)
+        if np.any(np.not_equal(self.cfg.random_cfo_vals, 0)):
+            x_precoded = add_frequency_offset(x_precoded, self.cfg.random_cfo_vals)
 
         # apply dMIMO channels to the resource grid in the frequency domain.
         y = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
@@ -191,7 +187,7 @@ class MU_MIMO(Model):
             y = self.slnr_equalizer([y, h_freq_csi, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
 
         # LS channel estimation with linear interpolation
-        no = 0.1  # initial noise estimation (tunable param)
+        no = 5e-2  # initial noise estimation (tunable param)
         h_hat, err_var = self.ls_estimator([y, no])
 
         # LMMSE equalization
@@ -281,6 +277,11 @@ def sim_mu_mimo(cfg: SimConfig):
     :return: [uncoded_ber, coded_ber], [goodbits, userbits]
     """
 
+    # CFO and STO settings
+    if cfg.gen_sync_errors:
+        cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(cfg.num_tx_ue_sel, 1))
+        cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(cfg.num_tx_ue_sel, 1))
+
     # dMIMO channels from ns-3 simulator
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
@@ -320,15 +321,17 @@ def sim_mu_mimo(cfg: SimConfig):
         # Get CSI history
         # TODO: optimize channel estimation and optimization procedures (currently very slow)
         h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
-                                                          rg_csi, dmimo_chans)
+                                                          rg_csi, dmimo_chans, 
+                                                          cfo_vals=cfg.random_cfo_vals,
+                                                          sto_vals=cfg.random_sto_vals)
         # Do channel prediction
         h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
     else:
         # LMMSE channel estimation
         h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi,
                                                            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                           cfo_sigma=cfo_val(cfg, cfg.cfo_sigma),
-                                                           sto_sigma=sto_val(cfg, cfg.sto_sigma))
+                                                           cfo_vals=cfg.random_cfo_vals,
+                                                           sto_vals=cfg.random_sto_vals)
 
     # Rank and link adaptation
     if cfg.rank_adapt and cfg.link_adapt and cfg.first_slot_idx == cfg.start_slot_idx:
