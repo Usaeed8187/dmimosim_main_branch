@@ -20,7 +20,7 @@ class RCConfig(Config):
         self._regularization = 1
         self._type = 'complex' # real, complex
         self._DF_rls = False
-        self._history_len = 3 # number of subframes that we use to train
+        self._history_len = 8 # number of subframes that we use to train
         self._prediction_on = True
         self._treatment = 'SISO' # SISO, vectorized_MIMO, piece_wise_vectorized_MIMO, TODO: piece_wise_MIMO not currently implemented
 
