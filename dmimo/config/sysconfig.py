@@ -87,6 +87,7 @@ class CarrierConfig(Config):
         self._subcarrier_spacing = 15e3     # subcarrier spacing in Hz
         self._slot_duration = 1e-3          # slot duration in seconds
         self._symbols_per_slot = 14         # number of OFDM symbols per slot
+        self._pilot_indices = [2, 11]       # pilot symbol indices in each slot
         super().__init__(**kwargs)
 
     @property
@@ -130,6 +131,14 @@ class CarrierConfig(Config):
     @symbols_per_slot.setter
     def symbols_per_slot(self, val):
         self._symbols_per_slot = val
+
+    @property
+    def pilot_indices(self):
+        return self._pilot_indices
+
+    @pilot_indices.setter
+    def pilot_indices(self, val):
+        self._pilot_indices = val
 
 
 class MCSConfig(Config):
