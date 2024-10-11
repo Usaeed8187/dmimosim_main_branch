@@ -175,28 +175,6 @@ class LoadNs3Channel:
                 rx_snr_db = np.concatenate((np.repeat(rx_snr_db[:1], self._cfg.num_bs_ant, axis=0),
                                             np.repeat(best_snr, self._cfg.num_bs_ant, axis=0)), axis=0)  # [num_rxs_ant,num_ofdm_sym]
 
-        elif channel_type == "dMIMO-Simple":  # for testing only
-            # expand according to number of Tx/Rx nodes
-            tx_pwr_dbm = np.concatenate((np.repeat(tx_pwr_bs, self._cfg.num_bs),
-                                         np.repeat(tx_pwr_ue, self._cfg.num_txue)))
-            rx_ant_gain = np.concatenate((np.repeat(self._cfg.bs_ant_gain, self._cfg.num_bs),
-                                          np.repeat(self._cfg.ue_ant_gain, self._cfg.num_rxue)))
-            rx_pwr_path = np.reshape(tx_pwr_dbm, (1, -1, 1)) + np.reshape(rx_ant_gain, (-1, 1, 1)) - self._Ldm  # [num_rxue+1,num_txue+1,num_ofdm_sym]
-
-            # received power is sum of all transmitter antennas
-            rx_pwr_dbm = np.log10(np.sum(np.power(10.0, rx_pwr_path), axis=1, keepdims=True))  # [num_rxue+1,1,num_ofdm_sym]
-            # normalized received power assuming perfect AGC (per path)
-            dm_rx_agc = rx_pwr_path - rx_pwr_dbm  # [num_rxue+1,num_txue+1,num_ofdm_sym]
-            rx_snr_db = np.squeeze(rx_pwr_dbm, axis=1) - (self._cfg.thermal_noise + self._cfg.noise_figure)  # [num_rxue+1,num_ofdm+sym]
-
-            # expand according to the number of tx/rx antennas
-            dm_rx_agc = np.concatenate((np.repeat(dm_rx_agc[:1], self._cfg.num_bs_ant, axis=0),
-                                        np.repeat(dm_rx_agc[1:], self._cfg.num_ue_ant, axis=0)), axis=0)
-            dm_rx_agc = np.concatenate((np.repeat(dm_rx_agc[:, :1], self._cfg.num_bs_ant, axis=1),
-                                        np.repeat(dm_rx_agc[:, 1:], self._cfg.num_ue_ant, axis=1)), axis=1)
-
-            rx_snr_db = np.concatenate((np.repeat(rx_snr_db[:1], self._cfg.num_bs_ant, axis=0),
-                                        np.repeat(rx_snr_db[1:], self._cfg.num_ue_ant, axis=0)), axis=0)  # [num_rxs_ant,num_ofdm_sym]
         elif channel_type == "dMIMO-Raw":
             pass
 
@@ -247,19 +225,6 @@ class LoadNs3Channel:
             # h_fw = np.sqrt(1.0/self._cfg.num_txue) * np.matmul(h_rs, h_dm[:, :, self._cfg.num_bs_ant:, :])
             h_fw = np.sqrt(1.0/self._cfg.num_bs_ant) * np.matmul(h_rs, h_dm[:, :, self._cfg.num_bs_ant:, :])
             h_freq = np.concatenate((h_dm[:, :, :self._cfg.num_bs_ant, :], h_fw), 2)  # (num_ofdm_symbol,fft_size,2*num_bs_ant,total_squad_ant)
-            h_freq = np.transpose(h_freq, (2, 3, 0, 1))
-
-        elif channel_type == "dMIMO-Simple":  # for testing only
-            # Obtain effective channel of dMIMO and forwarding channels
-            h_rs = np.transpose(self._Hrs, (2, 3, 0, 1))  # (num_ofdm_sym,num_subcarrier,num_bs_ant,total_ue_ant)
-            h_dm = np.transpose(self._Hdm, (2, 3, 0, 1))  # (num_ofdm_sym,num_subcarrier,num_rxs_ant,num_txs_ant)
-
-            # forward channel via RxSq UEs, normalize according to total_ue_ant
-            # scaling = np.sqrt(1.0/self._cfg.num_txue)
-            h_fw = np.matmul(h_rs, h_dm[:, :, self._cfg.num_bs_ant:, :])
-            # (num_ofdm_symbol,fft_size,2*num_bs_ant,total_squad_ant)
-            h_freq = np.concatenate((h_dm[:, :, :self._cfg.num_bs_ant, :], h_fw), 2)
-            # (2*num_bs_ant,total_squad_ant, num_ofdm_symbol,fft_size)
             h_freq = np.transpose(h_freq, (2, 3, 0, 1))
 
         elif channel_type == "dMIMO-Raw":
