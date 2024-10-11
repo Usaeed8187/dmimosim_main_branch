@@ -36,22 +36,20 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 90        # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 70     # starting slots (must be greater than csi_delay + 5)
+    cfg.csi_prediction = False  # use channel prediction or not
+    cfg.total_slots = 95        # total number of slots in ns-3 channels
+    cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 8           # feedback delay in number of subframe
     cfg.rank_adapt = False      # disable rank adaptation
     cfg.link_adapt = False      # disable link adaptation
-    cfg.cfo_sigma = [0.0]       # in Hz
-    cfg.sto_sigma = [0.0]       # in nanosecond
+    cfg.gen_sync_errors = True  # random CFO/STO errors in each simulation cycle
     cfg.ns3_folder = "../ns3/channels_medium_mobility/"
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("../results", folder_name), exist_ok=True)
     print("Using channels in {}".format(folder_name))
 
-    cfg.gen_sync_errors = True
-    cfg.csi_prediction = False
-    cfg.num_tx_streams = 6      # 2/4/6 equal to total number of streams
+    cfg.num_tx_streams = 6      # total number of streams
 
     # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
     modulation_orders = [2, 4, 6]
@@ -106,4 +104,6 @@ if __name__ == "__main__":
 
             basename = "../results/{}/su_mimo_results_cfo{}_sto{}".format(folder_name, cfo, sto)
             plt.savefig(f"{basename}.png")
+            plt.close(fig)
             np.savez(f"{basename}.npz", ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput)
+

@@ -36,11 +36,13 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 90        # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 70     # starting slots (must be greater than csi_delay + 5)
+    cfg.csi_prediction = False  # use channel prediction or not
+    cfg.total_slots = 95        # total number of slots in ns-3 channels
+    cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.rank_adapt = False      # disable rank adaptation
     cfg.link_adapt = False      # disable link adaptation
+    cfg.gen_sync_errors = True  # random CFO/STO errors in each simulation cycle
     cfg.ns3_folder = "../ns3/channels_medium_mobility/"
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
@@ -48,14 +50,12 @@ if __name__ == "__main__":
     print("Using channels in {}".format(folder_name))
 
     num_rx_antennas = 6    # total rx antennas used
+
     # Test case 1:  no rank adaptation, assuming 2 antennas per UE and treating BS as two UEs
     cfg.num_tx_streams = num_rx_antennas
     cfg.num_rx_ue_sel = (num_rx_antennas - 4) // 2
     cfg.ue_indices = np.reshape(np.arange((cfg.num_rx_ue_sel + 2) * 2), (cfg.num_rx_ue_sel + 2, -1))
     cfg.ue_ranks = [2]  # same rank for all UEs
-
-    cfg.gen_sync_errors = True
-    cfg.csi_prediction = False
 
     # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
     modulation_orders = [2, 4, 6]
@@ -87,28 +87,29 @@ if __name__ == "__main__":
                 goodput[1, k] = rst_zf[2]
                 throughput[1, k] = rst_zf[3]
 
-                fig, ax = plt.subplots(1, 3, figsize=(15, 4))
+            fig, ax = plt.subplots(1, 3, figsize=(15, 4))
 
-                ax[0].set_title("MU-MIMO")
-                ax[0].set_xlabel('Modulation (bits/symbol)')
-                ax[0].set_ylabel('BER')
-                ax[0].plot(modulation_orders, ber.transpose(), 'o-')
-                ax[0].legend(['BD', 'ZF'])
+            ax[0].set_title("MU-MIMO")
+            ax[0].set_xlabel('Modulation (bits/symbol)')
+            ax[0].set_ylabel('BER')
+            ax[0].plot(modulation_orders, ber.transpose(), 'o-')
+            ax[0].legend(['BD', 'ZF'])
 
-                ax[1].set_title("MU-MIMO")
-                ax[1].set_xlabel('Modulation (bits/symbol)')
-                ax[1].set_ylabel('Coded BER')
-                ax[1].plot(modulation_orders, ldpc_ber.transpose(), 'd-')
-                ax[1].legend(['BD', 'ZF'])
+            ax[1].set_title("MU-MIMO")
+            ax[1].set_xlabel('Modulation (bits/symbol)')
+            ax[1].set_ylabel('Coded BER')
+            ax[1].plot(modulation_orders, ldpc_ber.transpose(), 'd-')
+            ax[1].legend(['BD', 'ZF'])
 
-                ax[2].set_title("MU-MIMO")
-                ax[2].set_xlabel('Modulation (bits/symbol)')
-                ax[2].set_ylabel('Goodput/Throughput (Mbps)')
-                ax[2].plot(modulation_orders, goodput.transpose(), 's-')
-                ax[2].plot(modulation_orders, throughput.transpose(), 'd-')
-                ax[2].legend(['Goodput-BD', 'Goodput-ZF', 'Throughput-BD', 'Throughput-ZF'])
+            ax[2].set_title("MU-MIMO")
+            ax[2].set_xlabel('Modulation (bits/symbol)')
+            ax[2].set_ylabel('Goodput/Throughput (Mbps)')
+            ax[2].plot(modulation_orders, goodput.transpose(), 's-')
+            ax[2].plot(modulation_orders, throughput.transpose(), 'd-')
+            ax[2].legend(['Goodput-BD', 'Goodput-ZF', 'Throughput-BD', 'Throughput-ZF'])
 
-                basename = "../results/{}/mu_mimo_results_cfo{}_sto{}".format(folder_name, cfo, sto)
-                plt.savefig(f"{basename}.png")
-                np.savez(f"{basename}.npz", ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput)
+            basename = "../results/{}/mu_mimo_results_cfo{}_sto{}".format(folder_name, cfo, sto)
+            plt.savefig(f"{basename}.png")
+            plt.close(fig)
+            np.savez(f"{basename}.npz", ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput)
 
