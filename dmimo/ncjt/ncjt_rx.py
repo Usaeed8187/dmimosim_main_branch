@@ -45,8 +45,6 @@ class NCJT_RxUE(Model):
 
         # Using perfect CSI
         if self.cfg.perfect_csi is True:
-            # noise variance lower bound
-            nvar = 1e-3
             # h_freq_ns3_estimated has shape
             #   (num_subframes, num_subcarriers, num_ofdm_symbols, total_rx_antennas, total_tx_antennas)
             h_freq_ns3_estimated = h_freq_ns3
@@ -68,15 +66,17 @@ class NCJT_RxUE(Model):
         # (num_subframes, num_subcarriers, len(data_syms), total_rx_antennas, 1)
         ry_stbc = tf.gather(ry_noisy, indices=self.data_syms, axis=2)
 
+        # TODO: accurate noise variance estimation
+        nvar = tf.cast(5e-2, tf.float32)
+
         # Channel estimation
         if self.cfg.perfect_csi is False:
             ry_noisy = tf.transpose(ry_noisy, (0, 4, 3, 2, 1))
             # ry_noise shape [batch_size, num_rx_ant, num_tx_ant, num_ofdm_sym, nfft]
             h_hat = []
-            noise_var = []
             for k in range(ry_noisy.shape[0]):
                 # h_est shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, num_pilot_sym * nfft]
-                h_est, err_var = self.ls_est([ry_noisy[k:k + 1], tf.cast(5e-3, tf.float32)])
+                h_est, err_var = self.ls_est([ry_noisy[k:k + 1], nvar])
                 # new shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, num_pilot_sym, nfft]
                 h_est = split_dim(h_est, [-1, self.rg.num_effective_subcarriers], axis=5)
                 # average over time-domain, new shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, nfft]
@@ -94,12 +94,10 @@ class NCJT_RxUE(Model):
                 y_post = h_est[..., -num_pt:] @ self.Wf[:, (num_pt + 2):]
                 y_hat = tf.concat((y_pre, y_main, y_post), axis=-1)
                 h_hat.append(y_hat)
-                noise_var.append(tf.reduce_mean(err_var))
 
             h_hat = tf.concat(h_hat, axis=0)  # [num_batch, num_rx, num_rx_ant, num_tx, num_tx_stream, nfft]
             h_hat = tf.transpose(h_hat[:, 0], (0, 4, 2, 1, 3))  # [num_batch, nfft, 1, num_rx_ant, num_tx_stream]
             h_hat_averaged = tf.repeat(h_hat, len(self.data_syms)//2, axis=2)
-            nvar = tf.reduce_mean(noise_var)
 
         # Reshape ry_stbc of shape [num_subframes, num_subcarriers, num_ofdm_symbols/2, 2, total_rx_antennas]
         num_ofdm_symbols = ry_stbc.shape[-3]

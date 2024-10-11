@@ -38,7 +38,7 @@ class SC_NCJT(Model):
 
         self.binary_source = BinarySource()
         self.encoder = LDPC5GEncoder(self.ldpc_k, self.ldpc_n)
-        self.decoder = LDPC5GDecoder(self.encoder, hard_out=True, num_iter=6)
+        self.decoder = LDPC5GDecoder(self.encoder, hard_out=True, num_iter=8)
 
         # Fixed interleaver design for current RG setting
         self.intlvr = RowColumnInterleaver(self.num_data_symbols // 2, axis=-1)
@@ -52,7 +52,7 @@ class SC_NCJT(Model):
 
         self.ncjt_tx = NCJT_TxUE(cfg)
         self.ncjt_rx = NCJT_RxUE(cfg, lmmse_weights=self.Wf)
-        self.ncjt_combination = NCJT_PostCombination(cfg)
+        self.ncjt_combination = NCJT_PostCombination(cfg, return_LLRs=True)
 
     def call(self, dmimo_chans: dMIMOChannels):
 
@@ -98,7 +98,8 @@ class SC_NCJT(Model):
             gains_list.append(gains)
             nvar_list.append(nvar)
 
-        nvar = np.mean(nvar_list)  # FIXME
+        llr_scaling = tf.cast(10.0, tf.float32)  # FIXME
+        nvar = llr_scaling * np.mean(nvar_list)  # FIXME
 
         # Phase 3 uplink transmission
         # TODO: assuming ideal transmission for now
