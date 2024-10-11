@@ -67,7 +67,7 @@ class NCJT_RxUE(Model):
         ry_stbc = tf.gather(ry_noisy, indices=self.data_syms, axis=2)
 
         # TODO: accurate noise variance estimation
-        nvar = tf.cast(5e-2, tf.float32)
+        nvar = tf.cast(4e-1, tf.float32)
 
         # Channel estimation
         if self.cfg.perfect_csi is False:

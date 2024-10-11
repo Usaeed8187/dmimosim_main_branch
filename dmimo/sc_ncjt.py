@@ -98,14 +98,11 @@ class SC_NCJT(Model):
             gains_list.append(gains)
             nvar_list.append(nvar)
 
-        llr_scaling = tf.cast(10.0, tf.float32)  # FIXME
-        nvar = llr_scaling * np.mean(nvar_list)  # FIXME
-
         # Phase 3 uplink transmission
         # TODO: assuming ideal transmission for now
 
         # Post-detection combining
-        combination_output = self.ncjt_combination(y_list, gains_list, nvar)
+        combination_output = self.ncjt_combination(y_list, gains_list, nvar_list)
         detected_bits = tf.cast(combination_output > 0, tf.float32)
         # [batch_size, num_subcarriers, num_data_syms*num_bits_per_symbol]
         detected_bits = tf.reshape(detected_bits, tx_bit_stream.shape)
