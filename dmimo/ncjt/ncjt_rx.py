@@ -106,7 +106,6 @@ class NCJT_RxUE(Model):
         total_rx_antennas = ry_stbc.shape[-2]
         ry_stbc = tf.reshape(ry_stbc, (*ry_stbc.shape[:-3], num_ofdm_symbols // 2, 2, total_rx_antennas))
 
-        # tic = time.time()
         if self.cfg.perfect_csi:
             y, gains = alamouti_decode(ry_stbc[..., :], h_freq_ns3_averaged[..., :, :])
         else:

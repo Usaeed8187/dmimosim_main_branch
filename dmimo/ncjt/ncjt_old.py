@@ -7,10 +7,11 @@ from sionna.channel import AWGN
 from sionna.ofdm import ResourceGrid, ResourceGridMapper
 from sionna.utils.metrics import compute_ber
 
-from dmimo.config import Ns3Config, NcjtSimConfig
+from dmimo.config import Ns3Config
+from dmimo.config.ncjtsimconfig import NcjtSimConfig
 from dmimo.channel import LoadNs3Channel
-from dmimo.stbc import alamouti_decode, alamouti_encode
-from dmimo.stbc import hard_log_likelihood
+from .stbc import alamouti_decode, alamouti_encode
+from .likelihood import hard_log_likelihood
 
 
 def adjust_channel(h: tf.Tensor, pathloss_dB: tf.Tensor, nAntTxList, nAntRxList, cfg: NcjtSimConfig):

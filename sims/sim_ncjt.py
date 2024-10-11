@@ -20,8 +20,8 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import matplotlib.pyplot as plt
 import numpy as np
 
-from dmimo.config import NcjtSimConfig
-from dmimo.ncjt import ncjt_sim_all_phases
+from dmimo.config.ncjtsimconfig import NcjtSimConfig
+from dmimo.ncjt.ncjt_old import ncjt_sim_all_phases
 
 
 # Main function
