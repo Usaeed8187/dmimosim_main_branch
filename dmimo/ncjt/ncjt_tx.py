@@ -51,11 +51,11 @@ class NCJT_TxUE(Model):
         batch_size = bit_stream_dmimo.shape[0]
 
         # Map data stream to QAM symbols
-        x = self.mapper(bit_stream_dmimo)  # [num_subframes, num_subcarriers, num_data_ofdm_syms]
-        x = alamouti_encode(x)  # [num_subframes, num_subcarriers, num_data_ofdm_syms, 2]
+        x = self.mapper(bit_stream_dmimo)  # [batch_size, num_subcarriers, num_data_ofdm_syms]
+        x = alamouti_encode(x)  # [batch_size, num_subcarriers, num_data_ofdm_syms, 2]
 
         # Transpose to make the signal compatible with rg_mapper
-        # New shape: [num_subframes, 2, num_data_ofdm_syms, num_subcarriers]
+        # New shape: [batch_size, 2, num_data_ofdm_syms, num_subcarriers]
         x = tf.transpose(x, [0, 3, 2, 1])
         # New shape: [batch_size, num_tx, num_streams_per_tx, num_data_ofdm_syms * num_subcarriers]
         x = self.rg_mapper(tf.reshape(x, [batch_size, 1, 2, -1]))

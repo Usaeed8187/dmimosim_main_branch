@@ -3,7 +3,6 @@ Simulation of NCJT scenario with ns-3 channels
 
 """
 
-# add system folder for the dmimo library
 import os
 import sys
 # import numpy as np
@@ -37,7 +36,7 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 35        # total number of slots in ns-3 channels
+    cfg.total_slots = 65        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
     cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels_medium_mobility/")
 
@@ -54,7 +53,7 @@ if __name__ == "__main__":
     # Run the simulation
     uncoded_ber, coded_ber, coded_bler, goodput, throughput = sim_sc_ncjt(cfg)
 
-    # show results
+    # Show results
     print(f"Average uncoded/coded BER: {uncoded_ber}  {coded_ber}")
     print(f"Average coded BLER: {coded_bler}")
     print(f"Average goodput/throughput: {goodput}  {throughput}")

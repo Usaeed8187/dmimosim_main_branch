@@ -45,6 +45,7 @@ class SC_NCJT(Model):
         self.dintlvr = Deinterleaver(interleaver=self.intlvr)
 
         if self.cfg.perfect_csi is False:
+            # TODO: Auto generate LMMSE weights
             filename = os.path.abspath(os.path.join(self.cfg.ns3_folder + "/../lmmse_weight.npy"))
             self.Wf = np.load(filename)
             self.Wf = tf.constant(tf.convert_to_tensor(self.Wf, dtype=tf.complex64))
