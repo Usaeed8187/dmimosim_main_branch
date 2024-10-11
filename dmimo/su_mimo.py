@@ -43,6 +43,8 @@ class SU_MIMO(Model):
         # The number of transmitted streams is less than or equal to the number of Rx UE antennas
         assert cfg.num_tx_streams <= self.num_rx_ant
         self.num_streams_per_tx = cfg.num_tx_streams
+        # The number of Tx/Rx UE must be at least 2
+        assert cfg.num_tx_ue_sel >= 2 and cfg.num_rx_ue_sel >= 2
 
         # Create an RX-TX association matrix
         # rx_tx_association[i,j]=1 means that receiver i gets at least one stream from transmitter j.
