@@ -101,7 +101,7 @@ def hard_log_likelihood(received_symbol: tf.Tensor,
                   (tf.math.erf( (intervals[...,3]-tf.math.imag(candidate_symbols_reshaped))*(tf.sqrt(SNRs)) ) - # imag part, right of interval
                    tf.math.erf( (intervals[...,2]-tf.math.imag(candidate_symbols_reshaped))*(tf.sqrt(SNRs)) ))) # imag part, left of interval
     prob = prob[...,0] # (...,N,2**k)
-    log_prob = tf.math.log(prob)/tf.math.log(2.0) # Equivalent to log2. Shape= (...,N,2**k)
+    log_prob = tf.math.log(prob)
     if return_bit_LLRs == False:
         if sum_over_Rx_Syms:
             log_prob_summed = tf.reduce_sum(log_prob,axis=-2) # (...,2**k)

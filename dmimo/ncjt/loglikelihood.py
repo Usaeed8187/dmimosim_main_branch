@@ -101,7 +101,7 @@ class HardLogLikelihood(Layer):
                  tf.math.erf((intervals[..., 2] - tf.math.imag(self.candidate_symbols_reshaped)) * (
                      tf.sqrt(SNRs)))))  # imag part, left of interval
         prob = prob[..., 0]  # (...,N,2**k)
-        log_prob = tf.math.log(prob) / tf.math.log(2.0)  # Equivalent to log2. Shape= (...,N,2**k)
+        log_prob = tf.math.log(prob)
         if self.return_bit_llrs is False:
             if self.sum_over_rx_syms:
                 log_prob_summed = tf.reduce_sum(log_prob, axis=-2)  # (...,2**k)
