@@ -1,7 +1,6 @@
 """
 Simulation of NCJT scenario with ns-3 channels
 
-This scripts should be called from the "sims" folder
 """
 
 # add system folder for the dmimo library
@@ -25,8 +24,9 @@ if gpus:
         print(e)
 tf.get_logger().setLevel('ERROR')
 
-# add system folder for the dmimo library
-sys.path.append(os.path.join('..'))
+# Add system path for the dmimo library
+dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
+sys.path.append(dmimo_root)
 
 from dmimo.config import SimConfig
 from dmimo.sc_ncjt import sim_sc_ncjt
@@ -39,22 +39,23 @@ if __name__ == "__main__":
     cfg = SimConfig()
     cfg.total_slots = 35        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
-    cfg.ns3_folder = "../ns3/channels_medium_mobility/"
+    cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels_medium_mobility/")
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
-    os.makedirs(os.path.join("../results", folder_name), exist_ok=True)
+    os.makedirs(os.path.join(dmimo_root, "results", folder_name), exist_ok=True)
     print("Using channels in {}".format(folder_name))
 
     # Select different number of Tx/Rx nodes
     cfg.num_tx_ue_sel = 8
-    cfg.num_rx_ue_sel = 4
+    cfg.num_rx_ue_sel = 6
     cfg.modulation_order = 4
     cfg.code_rate = 0.5
 
     # Run the simulation
-    uncoded_ber, coded_ber, goodput, throughput = sim_sc_ncjt(cfg)
+    uncoded_ber, coded_ber, coded_bler, goodput, throughput = sim_sc_ncjt(cfg)
 
     # show results
     print(f"Average uncoded/coded BER: {uncoded_ber}  {coded_ber}")
+    print(f"Average coded BLER: {coded_bler}")
     print(f"Average goodput/throughput: {goodput}  {throughput}")
 

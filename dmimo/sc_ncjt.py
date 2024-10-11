@@ -1,5 +1,5 @@
 """
-Simulation of NCJT scenario with ns-3 channels
+Simulation of single-cluster NCJT scenario
 
 """
 
@@ -28,20 +28,20 @@ class SC_NCJT(Model):
         self.cfg = cfg
         self.batch_size = cfg.num_slots_p2  # batch processing for all slots in phase 2
 
-        # Update number of data bits and LDPC params
+        # Update number of QAM symbols for data and LDPC params
         self.num_data_symbols = cfg.fft_size * (cfg.symbols_per_slot - len(cfg.pilot_indices))
         self.ldpc_n = int(2 * self.num_data_symbols)  # Number of coded bits
         self.ldpc_k = int(self.ldpc_n * cfg.code_rate)  # Number of information bits
         self.num_codewords = cfg.modulation_order // 2  # number of codewords per frame
         self.num_bits_per_frame = self.ldpc_k * self.num_codewords
-        self.num_uncoded_bits_per_frame = cfg.ldpc_n * self.num_codewords
+        self.num_uncoded_bits_per_frame = self.ldpc_n * self.num_codewords
 
         self.binary_source = BinarySource()
         self.encoder = LDPC5GEncoder(self.ldpc_k, self.ldpc_n)
         self.decoder = LDPC5GDecoder(self.encoder, hard_out=True, num_iter=6)
 
         # Fixed interleaver design for current RG setting
-        self.intlvr = RowColumnInterleaver(3072, axis=-1)
+        self.intlvr = RowColumnInterleaver(self.num_data_symbols // 2, axis=-1)
         self.dintlvr = Deinterleaver(interleaver=self.intlvr)
 
         if self.cfg.perfect_csi is False:
@@ -122,7 +122,7 @@ class SC_NCJT(Model):
         goodbits = (1.0 - coded_ber) * self.num_bits_per_frame
         userbits = (1.0 - coded_bler) * self.num_bits_per_frame
 
-        return [uncoded_ber, coded_ber], [goodbits, userbits]
+        return [uncoded_ber, coded_ber, coded_bler], [goodbits, userbits]
 
 
 def sim_sc_ncjt(cfg: SimConfig):
@@ -145,21 +145,26 @@ def sim_sc_ncjt(cfg: SimConfig):
 
     # Loop over channels for all transmission cycles
     total_cycles = 0
-    uncoded_ber, coded_ber, goodput, throughput = 0, 0, 0, 0
+    uncoded_ber, coded_ber, coded_bler, goodput, throughput = 0, 0, 0, 0, 0
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
         # Run simulation for one cycle
         bers, bits = sc_ncjt(dmimo_chans)
-        # Update statistics
+        # Update statistics (per slot)
         uncoded_ber += bers[0]
         coded_ber += bers[1]
+        coded_bler += bers[2]
         goodput += bits[0]
         throughput += bits[1]
+
+    uncoded_ber /= total_cycles
+    coded_ber /= total_cycles
+    coded_bler /= total_cycles
 
     slot_time = cfg.slot_duration  # default 1ms subframe/slot duration
     overhead = cfg.num_slots_p2 / (cfg.num_slots_p1 + cfg.num_slots_p2)
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
-    return [uncoded_ber/total_cycles, coded_ber/total_cycles, goodput, throughput]
+    return [uncoded_ber, coded_ber, coded_bler, goodput, throughput]

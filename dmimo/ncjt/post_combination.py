@@ -40,12 +40,12 @@ class NCJT_PostCombination(Model):
 
         # y_combined has shape [cfg.num_subframes_phase2, num_ofdm_symbols]
         y_combined = self.loglikelihood(tf.stack(symbol_streams_at_RxBs, axis=-1), snrs)
-        # detected_bits has shape [num_subframes, num_subcarriers, num_ofdm_symbols * cfg.num_bits_per_symbol]
 
         if self.return_LLRs:
             LLRs = y_combined
             return LLRs
         else:
+            # detected_bits has shape [num_subframes, num_subcarriers, num_ofdm_symbols * cfg.num_bits_per_symbol]
             detected_bits = self.demapper([y_combined, no])
             # detected_bits = tf.reshape(detected_bits, (self.cfg.modulation_order, self.cfg.num_subcarriers, -1))
             return detected_bits
