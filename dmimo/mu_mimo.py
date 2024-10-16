@@ -87,14 +87,14 @@ class MU_MIMO(Model):
                                pilot_ofdm_symbol_indices=[2, 11])
 
         # Update number of data bits and LDPC params
-        cfg.ldpc_n = int(2 * self.rg.num_data_symbols)  # Number of coded bits
-        cfg.ldpc_k = int(cfg.ldpc_n * cfg.code_rate)  # Number of information bits
+        self.ldpc_n = int(2 * self.rg.num_data_symbols)  # Number of coded bits
+        self.ldpc_k = int(self.ldpc_n * cfg.code_rate)  # Number of information bits
         self.num_codewords = cfg.modulation_order // 2  # number of codewords per frame
-        self.num_bits_per_frame = cfg.ldpc_k * self.num_codewords * self.num_streams_per_tx
-        self.num_uncoded_bits_per_frame = cfg.ldpc_n * self.num_codewords * self.num_streams_per_tx
+        self.num_bits_per_frame = self.ldpc_k * self.num_codewords * self.num_streams_per_tx
+        self.num_uncoded_bits_per_frame = self.ldpc_n * self.num_codewords * self.num_streams_per_tx
 
         # The encoder maps information bits to coded bits
-        self.encoder = LDPC5GEncoder(cfg.ldpc_k, cfg.ldpc_n)
+        self.encoder = LDPC5GEncoder(self.ldpc_k, self.ldpc_n)
 
         # LDPC interleaver
         self.intlvr = RowColumnInterleaver(3072, axis=-1)  # fixed design for current RG config
