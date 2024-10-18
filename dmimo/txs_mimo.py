@@ -150,7 +150,7 @@ class TxSquad(Model):
 
         # Perfect channel estimation or LMMSE channel estimation for precoding
         if self.cfg.perfect_csi:
-            h_freq_csi, rx_snr_db = txs_chans.load_channel(slot_idx=self.cfg.first_slot_idx, batch_size=self.batch_size)
+            h_freq_csi, rx_snr_db, _ = txs_chans.load_channel(slot_idx=self.cfg.first_slot_idx, batch_size=self.batch_size)
         else:
             # LMMSE channel estimation
             h_freq_csi, err_var_csi = lmmse_channel_estimation(txs_chans, self.rg_csi, slot_idx=self.cfg.first_slot_idx)

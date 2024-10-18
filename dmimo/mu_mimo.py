@@ -175,7 +175,7 @@ class MU_MIMO(Model):
             x_precoded = add_frequency_offset(x_precoded, self.cfg.random_cfo_vals)
 
         # apply dMIMO channels to the resource grid in the frequency domain.
-        y = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
+        y, _ = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
 
         # make proper shape
         y = y[:, :, :self.num_rxs_ant, :, :]
@@ -314,8 +314,8 @@ def sim_mu_mimo(cfg: SimConfig):
     # Channel CSI estimation using channels in previous frames/slots
     if cfg.perfect_csi is True:
         # Perfect channel estimation
-        h_freq_csi, rx_snr_db = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                         batch_size=cfg.num_slots_p2)
+        h_freq_csi, rx_snr_db, rx_pwr_dbm = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+                                                                     batch_size=cfg.num_slots_p2)
     elif cfg.csi_prediction is True:
         rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams)
         # Get CSI history
@@ -335,8 +335,8 @@ def sim_mu_mimo(cfg: SimConfig):
 
     # Rank and link adaptation
     if cfg.rank_adapt and cfg.link_adapt and cfg.first_slot_idx == cfg.start_slot_idx:
-        _, rx_snr_db = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                batch_size=cfg.num_slots_p2)
+        _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+                                                   batch_size=cfg.num_slots_p2)
         rank, rate, modulation_order, code_rate = \
             do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
 

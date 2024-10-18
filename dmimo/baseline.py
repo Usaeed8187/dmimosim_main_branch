@@ -74,14 +74,14 @@ class Baseline(Model):
                                pilot_ofdm_symbol_indices=[2, 11])
 
         # Update number of data bits and LDPC params
-        cfg.ldpc_n = int(2 * self.rg.num_data_symbols)  # Number of coded bits
-        cfg.ldpc_k = int(cfg.ldpc_n * cfg.code_rate)  # Number of information bits
+        self.ldpc_n = int(2 * self.rg.num_data_symbols)  # Number of coded bits
+        self.ldpc_k = int(self.ldpc_n * cfg.code_rate)  # Number of information bits
         self.num_codewords = cfg.modulation_order // 2  # number of codewords per frame
-        self.num_bits_per_frame = cfg.ldpc_k * self.num_codewords * self.num_streams_per_tx
-        self.num_uncoded_bits_per_frame = cfg.ldpc_n * self.num_codewords * self.num_streams_per_tx
+        self.num_bits_per_frame = self.ldpc_k * self.num_codewords * self.num_streams_per_tx
+        self.num_uncoded_bits_per_frame = self.ldpc_n * self.num_codewords * self.num_streams_per_tx
 
         # The encoder maps information bits to coded bits
-        self.encoder = LDPC5GEncoder(cfg.ldpc_k, cfg.ldpc_n)
+        self.encoder = LDPC5GEncoder(self.ldpc_k, self.ldpc_n)
 
         # LDPC interleaver
         self.intlvr = RowColumnInterleaver(3072, axis=-1)  # fixed design for current RG config
@@ -148,10 +148,10 @@ class Baseline(Model):
         if np.any(np.not_equal(self.cfg.random_sto_vals, 0)):
             x_precoded = add_timing_offset(x_precoded, self.cfg.random_sto_vals)
         if np.any(np.not_equal(self.cfg.random_cfo_vals, 0)):
-            x_precoded = add_frequency_offset(x_precoded, self.cfg.first_slot_idx, self.cfg.random_cfo_vals)
+            x_precoded = add_frequency_offset(x_precoded, self.cfg.random_cfo_vals)
 
         # apply dMIMO channels to the resource grid in the frequency domain.
-        y = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
+        y, _ = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
 
         # SVD equalization
         if self.cfg.precoding_method == "SVD":
@@ -267,8 +267,8 @@ def sim_baseline(cfg: SimConfig):
 
     if cfg.perfect_csi is True:
         # Perfect channel estimation
-        h_freq_csi, rx_snr_db = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                         batch_size=cfg.num_slots_p2)
+        h_freq_csi, rx_snr_db, rx_pwr_dbm = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+                                                                     batch_size=cfg.num_slots_p2)
     else:
         # LMMSE channel estimation
         h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi,
@@ -278,8 +278,8 @@ def sim_baseline(cfg: SimConfig):
 
     # Rank and link adaptation
     if cfg.rank_adapt and cfg.link_adapt and cfg.first_slot_idx == cfg.start_slot_idx:
-        _, rx_snr_db = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                batch_size=cfg.num_slots_p2)
+        _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+                                                   batch_size=cfg.num_slots_p2)
         rank, rate, modulation_order, code_rate = \
             do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
 
