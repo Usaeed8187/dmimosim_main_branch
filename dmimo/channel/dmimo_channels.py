@@ -19,8 +19,8 @@ class dMIMOChannels(Layer):
     dMIMOChannels apply inputs the specific type of channels and generate received output signals.
     """
 
-    def __init__(self, config: Ns3Config, channel_type, resource_grid: ResourceGrid=None,
-                 add_noise=True, normalize_channel=False, return_channel=False,
+    def __init__(self, config: Ns3Config, channel_type, resource_grid: ResourceGrid = None,
+                 add_noise=True, normalize_channel=False, return_channel=False, return_rxpwr=False,
                  dtype=tf.complex64, **kwargs):
         super().__init__(trainable=False, dtype=dtype, **kwargs)
 
@@ -30,6 +30,7 @@ class dMIMOChannels(Layer):
         self._add_noise = add_noise
         self._normalize_channel = normalize_channel
         self._return_channel = return_channel
+        self._return_rxpwr = return_rxpwr
         self._load_channel = LoadNs3Channel(self._config)
         self._apply_channel = ApplyOFDMChannel(add_awgn=False, dtype=tf.as_dtype(self.dtype))
         self._awgn = AWGN(dtype=dtype)
@@ -48,9 +49,8 @@ class dMIMOChannels(Layer):
 
     def load_channel(self, slot_idx, batch_size=1, ue_selection=True):
         assert slot_idx >= 0, "Slot indices must be non-negative integers"
-        h_freq, snrdb = self._load_channel(self._channel_type, slot_idx=slot_idx, batch_size=batch_size,
-                                           ue_selection=ue_selection)
-        return h_freq, snrdb
+        return self._load_channel(self._channel_type, slot_idx=slot_idx, batch_size=batch_size,
+                                  ue_selection=ue_selection)
 
     def call(self, inputs):
 
@@ -69,8 +69,8 @@ class dMIMOChannels(Layer):
 
         # load pre-generated ns-3 channels
         # h_freq shape: [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_sym, fft_size]
-        # snrdb shape: [batch_size, 1, num_rx/num_tx, num_ofdm_sym]
-        h_freq, snrdb = self._load_channel(self._channel_type, slot_idx=sidx, batch_size=batch_size)
+        # rx_snr_db shape: [batch_size, 1, num_rx_ant, num_ofdm_sym]
+        h_freq, rx_snr_db, rx_pwr_dbm = self._load_channel(self._channel_type, slot_idx=sidx, batch_size=batch_size)
 
         # Prune data and channel subcarriers according to the resource grid
         if self._rg and x.shape[-1] != h_freq.shape[-1]:
@@ -94,11 +94,13 @@ class dMIMOChannels(Layer):
 
         # Add thermal noise
         if self._add_noise:
-            no = np.power(10.0, snrdb / (-10.0))
-            no = np.expand_dims(no, -1)  # [batch_size, num_rx, num_rx_ant, num_ofdm_sym, 1]
+            no = tf.cast(np.power(10.0, rx_snr_db / (-10.0)), tf.float32)
+            no = tf.expand_dims(no, -1)  # [batch_size, num_rx, num_rx_ant, num_ofdm_sym, 1]
             y = self._awgn([y, no])
 
         if self._return_channel:
             return y, h_freq
+        elif self._return_rxpwr:
+            return y, rx_pwr_dbm
         else:
-            return y
+            return y, None

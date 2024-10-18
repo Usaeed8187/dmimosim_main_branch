@@ -9,7 +9,7 @@ def update_node_selection(cfg: SimConfig, ns3cfg: Ns3Config):
     Select TxSquad and RxSquad UEs using ns-3 channel statistics
 
     :param cfg: simulation configuration
-    :parm ns3cfg: ns-3 configuration
+    :param ns3cfg: ns-3 configuration
     :return: Tx/Rx squad UE selection masks
     """
 
@@ -19,9 +19,9 @@ def update_node_selection(cfg: SimConfig, ns3cfg: Ns3Config):
 
     # load statistics for previous ns-3 channels
     # shape: [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]
-    h_freq, snr_db = dmimo_chans.load_channel(slot_idx=cfg.start_slot_idx - cfg.csi_delay,
-                                              batch_size=cfg.num_slots_p1 + cfg.num_slots_p2,
-                                              ue_selection=False)
+    h_freq, snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.start_slot_idx - cfg.csi_delay,
+                                                 batch_size=cfg.num_slots_p1 + cfg.num_slots_p2,
+                                                 ue_selection=False)
 
     # average over symbols and subcarrier in all subframes
     h_gain = np.mean(np.abs(h_freq), axis=(0, 1, 3, 5, 6), keepdims=False)

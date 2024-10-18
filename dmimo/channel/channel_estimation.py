@@ -22,7 +22,7 @@ def estimate_freq_cov(dmimo_chans: dMIMOChannels, rg: ResourceGrid, start_slot, 
 
     for slot_idx in np.arange(start_slot, start_slot+total_slots, 1):
         # [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]
-        h_freq, snrdb = dmimo_chans.load_channel(slot_idx=slot_idx)
+        h_freq, snrdb, rxpwr = dmimo_chans.load_channel(slot_idx=slot_idx)
         # [batch_size, num_rx_ant, num_tx_ant, num_ofdm_symbols, fft_size]
         h_freq = np.squeeze(h_freq, axis=(1, 3))
         if trim_h_freq:
@@ -32,11 +32,11 @@ def estimate_freq_cov(dmimo_chans: dMIMOChannels, rg: ResourceGrid, start_slot, 
         h_samples = tf.transpose(h_freq, (0, 2, 1, 3, 4))
 
         # [num_batch, num_tx_ant, num_rx_ant, num_sc, num_ofdm_symbols]
-        h_samples_ = tf.transpose(h_samples, [0,1,2,4,3])
+        h_samples_ = tf.transpose(h_samples, [0, 1, 2, 4, 3])
         # [num_tx_ant, num_rx_ant, num_sc, num_sc]
         freq_cov_mat_ = tf.matmul(h_samples_, h_samples_, adjoint_b=True)
         # [num_sc, num_sc]
-        freq_cov_mat_ = tf.reduce_mean(freq_cov_mat_, axis=(0,1,2))
+        freq_cov_mat_ = tf.reduce_mean(freq_cov_mat_, axis=(0, 1, 2))
         # [num_sc, num_sc]
         freq_cov_mat += freq_cov_mat_
 
@@ -55,7 +55,7 @@ def estimate_freq_time_cov(dmimo_chans: dMIMOChannels, rg: ResourceGrid, start_s
 
     for slot_idx in np.arange(start_slot, start_slot+total_slots, 1):
         # [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]
-        h_freq, snrdb = dmimo_chans.load_channel(slot_idx=slot_idx)
+        h_freq, snrdb, rxpwr = dmimo_chans.load_channel(slot_idx=slot_idx)
         # [batch_size, num_rx_ant, num_tx_ant, num_ofdm_symbols, fft_size]
         h_freq = np.squeeze(h_freq, axis=(1, 3))
         if trim_h_freq:
@@ -65,18 +65,18 @@ def estimate_freq_time_cov(dmimo_chans: dMIMOChannels, rg: ResourceGrid, start_s
         h_samples = tf.transpose(h_freq, (0, 2, 1, 3, 4))
 
         # [num_batch, num_tx_ant, num_rx_ant, fft_size, num_ofdm_symbols]
-        h_samples_ = tf.transpose(h_samples, [0,1,2,4,3])
+        h_samples_ = tf.transpose(h_samples, [0, 1, 2, 4, 3])
         # [num_tx_ant, num_rx_ant, num_sc, num_sc]
         freq_cov_mat_ = tf.matmul(h_samples_, h_samples_, adjoint_b=True)
         # [num_sc, num_sc]
-        freq_cov_mat_ = tf.reduce_mean(freq_cov_mat_, axis=(0,1,2))
+        freq_cov_mat_ = tf.reduce_mean(freq_cov_mat_, axis=(0, 1, 2))
         # [num_sc, num_sc]
         freq_cov_mat += freq_cov_mat_
 
         # [batch size, num_rx_ant, num_ofdm_symbols, num_sc]
         time_cov_mat_ = tf.matmul(h_samples, h_samples, adjoint_b=True)
         # [num_ofdm_symbols, num_ofdm_symbols]
-        time_cov_mat_ = tf.reduce_mean(time_cov_mat_, axis=(0,1,2))
+        time_cov_mat_ = tf.reduce_mean(time_cov_mat_, axis=(0, 1, 2))
         # [num_ofdm_symbols, num_ofdm_symbols]
         time_cov_mat += time_cov_mat_
 
@@ -122,7 +122,7 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
 
     # Pass through ns3 channels
     # output has shape: [1, num_rx, num_rx_ant, num_ofdm_sym, fft_size]
-    ry = dmimo_chans([dx_rg, slot_idx])
+    ry, _ = dmimo_chans([dx_rg, slot_idx])
 
     #
     # LMMSE channel estimation
