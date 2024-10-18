@@ -18,7 +18,7 @@ import tensorflow as tf
 gpus = tf.config.list_physical_devices('GPU')
 if gpus and gpu_num != "":
     try:
-        tf.config.experimental.set_memory_growth(gpus[gpu_num], True)
+        tf.config.experimental.set_memory_growth(gpus[0], True)
     except RuntimeError as e:
         print(e)
 tf.get_logger().setLevel('ERROR')

@@ -18,7 +18,7 @@ import tensorflow as tf
 gpus = tf.config.list_physical_devices('GPU')
 if gpus and gpu_num != "":
     try:
-        tf.config.experimental.set_memory_growth(gpus[gpu_num], True)
+        tf.config.experimental.set_memory_growth(gpus[0], True)
     except RuntimeError as e:
         print(e)
 tf.get_logger().setLevel('ERROR')
@@ -96,6 +96,6 @@ if __name__ == "__main__":
     goodput[2] = rst_svd[2]
     throughput[2] = rst_svd[3]
 
-    basename = dmimo_root + /results/{}/su_mimo_results_adapt.npz".format(folder_name)
+    basename = dmimo_root + "/results/{}/su_mimo_results_adapt.npz".format(folder_name)
     plt.savefig(f"{basename}.png")
     np.savez(f"{basename}.npz", ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput)
