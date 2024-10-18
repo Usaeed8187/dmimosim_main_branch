@@ -1,7 +1,6 @@
 """
 Simulation of MU-MIMO scenario with ns-3 channels
 
-This scripts should be called from the "sims" folder
 """
 
 import sys
@@ -17,15 +16,16 @@ os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
 # Configure to use only a single GPU and allocate only as much memory as needed
 import tensorflow as tf
 gpus = tf.config.list_physical_devices('GPU')
-if gpus:
+if gpus and gpu_num != "":
     try:
-        tf.config.experimental.set_memory_growth(gpus[0], True)
+        tf.config.experimental.set_memory_growth(gpus[gpu_num], True)
     except RuntimeError as e:
         print(e)
 tf.get_logger().setLevel('ERROR')
 
-# add system folder for the dmimo library
-sys.path.append(os.path.join('..'))
+# Add system path for the dmimo library
+dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
+sys.path.append(dmimo_root)
 
 from dmimo.config import SimConfig
 from dmimo.mu_mimo import sim_mu_mimo_all
@@ -43,10 +43,11 @@ if __name__ == "__main__":
     cfg.rank_adapt = False      # disable rank adaptation
     cfg.link_adapt = False      # disable link adaptation
     cfg.gen_sync_errors = True  # random CFO/STO errors in each simulation cycle
-    cfg.ns3_folder = "../ns3/channels_medium_mobility/"
+
+    cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels_medium_mobility/")
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
-    os.makedirs(os.path.join("../results", folder_name), exist_ok=True)
+    os.makedirs(os.path.join(dmimo_root, "results", folder_name), exist_ok=True)
     print("Using channels in {}".format(folder_name))
 
     num_rx_antennas = 6    # total rx antennas used
@@ -108,7 +109,7 @@ if __name__ == "__main__":
             ax[2].plot(modulation_orders, throughput.transpose(), 'd-')
             ax[2].legend(['Goodput-BD', 'Goodput-ZF', 'Throughput-BD', 'Throughput-ZF'])
 
-            basename = "../results/{}/mu_mimo_results_cfo{}_sto{}".format(folder_name, cfo, sto)
+            basename = dmimo_root + "/results/{}/mu_mimo_results_cfo{}_sto{}".format(folder_name, cfo, sto)
             plt.savefig(f"{basename}.png")
             plt.close(fig)
             np.savez(f"{basename}.npz", ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput)

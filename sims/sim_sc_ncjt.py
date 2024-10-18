@@ -38,6 +38,7 @@ if __name__ == "__main__":
     cfg = SimConfig()
     cfg.total_slots = 65        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
+
     cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels_medium_mobility/")
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))

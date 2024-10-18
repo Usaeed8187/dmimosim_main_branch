@@ -24,8 +24,9 @@ if gpus:
         print(e)
 tf.get_logger().setLevel('ERROR')
 
-# add system folder for the dmimo library
-sys.path.append(os.path.join('..'))
+# Add system path for the dmimo library
+dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
+sys.path.append(dmimo_root)
 
 from dmimo.config import SimConfig
 from dmimo.baseline import sim_baseline_all
