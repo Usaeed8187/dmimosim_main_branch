@@ -1,5 +1,5 @@
 """
-Simulation of SU-MIMO scenario with ns-3 channels
+Simulation of MU-MIMO scenario with ns-3 channels
 
 """
 
@@ -28,7 +28,7 @@ dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
 from dmimo.config import SimConfig
-from dmimo.su_mimo import sim_su_mimo
+from dmimo.mu_mimo import sim_mu_mimo
 
 
 # Main function
@@ -38,8 +38,8 @@ if __name__ == "__main__":
     cfg = SimConfig()
     cfg.total_slots = 90        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 70     # starting slots (must be greater than csi_delay + 5)
-    cfg.csi_delay = 8           # feedback delay in number of subframe
-    cfg.num_tx_streams = 6      # 4/6 equal to total number of streams
+    cfg.csi_delay = 4           # feedback delay in number of subframe
+    cfg.num_tx_streams = 8      # 4/6/8/12 equal to total number of streams
     cfg.link_adapt = False      # disable link adaptation
     cfg.rank_adapt = False      # disable rank adaptation
 
@@ -55,7 +55,7 @@ if __name__ == "__main__":
         cfg.first_slot_idx = first_slot_idx
         cfg.csi_prediction = False
         cfg.precoding_method = "ZF"
-        bers, bits = sim_su_mimo(cfg)
+        bers, bits = sim_mu_mimo(cfg)
         avg_ber += bers[0]
         avg_goodput += bits[0]
         avg_tput += bits[1]
@@ -65,7 +65,7 @@ if __name__ == "__main__":
 
         cfg.csi_prediction = True
         cfg.precoding_method = "ZF"
-        bers, bits = sim_su_mimo(cfg)
+        bers, bits = sim_mu_mimo(cfg)
         avg_ber_pred += bers[0]
         avg_goodput_pred += bits[0]
         avg_tput_pred += bits[1]
