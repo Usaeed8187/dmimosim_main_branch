@@ -8,8 +8,6 @@ class SimConfig(CarrierConfig, MCSConfig):
     def __init__(self, **kwargs):
         self._name = "Simulation Configuration"
         self._enable_ue_selection = True        # Enable Tx/Rx UE selection
-        self._num_tx_ue_sel = 8                 # number of Tx UE selected
-        self._num_rx_ue_sel = 8                 # number of Rx UE selected
         self._start_slot_idx = 15               # start slot index for simulation
         self._csi_delay = 2                     # CSI estimation delay
         self._first_slot_idx = 0                # first slot index for phase 2 in simulation
@@ -40,22 +38,6 @@ class SimConfig(CarrierConfig, MCSConfig):
     @enable_ue_selection.setter
     def enable_ue_selection(self, val):
         self._enable_ue_selection = val
-
-    @property
-    def num_tx_ue_sel(self):
-        return self._num_tx_ue_sel
-
-    @num_tx_ue_sel.setter
-    def num_tx_ue_sel(self, val):
-        self._num_tx_ue_sel = val
-
-    @property
-    def num_rx_ue_sel(self):
-        return self._num_rx_ue_sel
-
-    @num_rx_ue_sel.setter
-    def num_rx_ue_sel(self, val):
-        self._num_rx_ue_sel = val
 
     @property
     def start_slot_idx(self):

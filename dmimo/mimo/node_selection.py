@@ -14,7 +14,6 @@ def update_node_selection(cfg: SimConfig, ns3cfg: Ns3Config):
     """
 
     # Instantiate dMIMO channel
-    # ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=False)
 
     # load statistics for previous ns-3 channels
@@ -39,8 +38,8 @@ def update_node_selection(cfg: SimConfig, ns3cfg: Ns3Config):
     rx_gain = np.mean(rx_gain, axis=0, keepdims=False)
 
     # select the UEs with best link quality
-    tx_ue_sort_idx = np.argsort(tx_gain)[-cfg.num_tx_ue_sel:]
-    rx_ue_sort_idx = np.argsort(rx_gain)[-cfg.num_rx_ue_sel:]
+    tx_ue_sort_idx = np.argsort(tx_gain)[-ns3cfg.num_txue_sel:]
+    rx_ue_sort_idx = np.argsort(rx_gain)[-ns3cfg.num_rxue_sel:]
 
     # update selection masks
     tx_ue_mask = np.zeros(len(tx_gain))

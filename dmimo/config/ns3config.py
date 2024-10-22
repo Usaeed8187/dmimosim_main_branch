@@ -20,9 +20,14 @@ class Ns3Config(NetworkConfig):
         self._ue_txpwr_ctrl = True  # enable RxSquad UE transmit power control
         super().__init__(**kwargs)
 
-    def update_ue_mask(self, tx_ue_mask, rx_ue_mask):
-        self.num_txue = np.count_nonzero(tx_ue_mask)
-        self.num_rxue = np.count_nonzero(rx_ue_mask)
+    def reset_ue_selection(self):
+        self.num_txue_sel = self.num_txue
+        self.num_rxue_sel = self.num_rxue
+        self.txue_mask, self.rxue_mask = None, None
+
+    def update_ue_selection(self, tx_ue_mask, rx_ue_mask):
+        self.num_txue_sel = np.count_nonzero(tx_ue_mask)
+        self.num_rxue_sel = np.count_nonzero(rx_ue_mask)
         self.txue_mask = tx_ue_mask
         self.rxue_mask = rx_ue_mask
 

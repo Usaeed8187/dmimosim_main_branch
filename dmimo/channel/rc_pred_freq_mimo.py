@@ -122,12 +122,12 @@ class standard_rc_pred_freq_mimo:
         first_csi_history_idx = first_slot_idx - (csi_delay * self.history_len)  # TODO: currently only for self.history_len = 2
         channel_history_slots = np.arange(first_csi_history_idx, first_slot_idx, csi_delay)
 
-        h_freq_csi_history_0, _ = dmimo_chans.load_channel(slot_idx=channel_history_slots[0], batch_size=batch_size)
+        h_freq_csi_history_0, _, _ = dmimo_chans.load_channel(slot_idx=channel_history_slots[0], batch_size=batch_size)
             
         h_freq_csi_history = np.zeros(np.concatenate((channel_history_slots.shape, np.asarray(h_freq_csi_history_0.shape))), dtype=complex)
         h_freq_csi_history[0, ...] = h_freq_csi_history_0
         for loop_idx, slot_idx in enumerate(channel_history_slots[1:]):
-            h_freq_csi_history[loop_idx+1, ...], _ = dmimo_chans.load_channel(slot_idx=slot_idx, batch_size=batch_size)
+            h_freq_csi_history[loop_idx+1, ...], _, _ = dmimo_chans.load_channel(slot_idx=slot_idx, batch_size=batch_size)
 
         return h_freq_csi_history
 

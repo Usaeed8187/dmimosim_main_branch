@@ -9,10 +9,12 @@ class NetworkConfig(Config):
     def __init__(self, **kwargs):
         self._name = "Network Configuration"
         self._num_bs = 1            # number of basestation per squad, always 1
-        self._num_txue = 10         # number of transmit squad UEs
-        self._num_rxue = 10         # number of receiving squad UEs
+        self._num_txue = 10         # total number of transmit squad UEs
+        self._num_rxue = 10         # total number of receiving squad UEs
         self._num_bs_ant = 4        # number of antennas per BS
         self._num_ue_ant = 2        # number of antennas per UE
+        self._num_txue_sel = 8      # number of Tx UE selected
+        self._num_rxue_sel = 8      # number of Rx UE selected
         self._txue_mask = None      # selection mask for transmitting squad UEs
         self._rxue_mask = None      # selection mask for receiving squad UEs
         super().__init__(**kwargs)
@@ -58,14 +60,33 @@ class NetworkConfig(Config):
         self._num_ue_ant = val
 
     @property
+    def num_txue_sel(self):
+        return self._num_txue_sel
+
+    @num_txue_sel.setter
+    def num_txue_sel(self, val):
+        self._num_txue_sel = val
+
+    @property
+    def num_rxue_sel(self):
+        return self._num_rxue_sel
+
+    @num_rxue_sel.setter
+    def num_rxue_sel(self, val):
+        self._num_rxue_sel = val
+
+    @property
     def txue_mask(self):
         return self._txue_mask
 
     @txue_mask.setter
     def txue_mask(self, val):
-        assert isinstance(val, list) or isinstance(val, np.ndarray), "Invalid Tx UE selection mask"
-        val = np.reshape(val, -1)
-        self._txue_mask = (val != 0)
+        if val is not None:
+            assert isinstance(val, list) or isinstance(val, np.ndarray), "Invalid Tx UE selection mask"
+            val = np.reshape(val, -1)
+            self._txue_mask = (val != 0)
+        else:
+            self._txue_mask = None
 
     @property
     def rxue_mask(self):
@@ -73,9 +94,12 @@ class NetworkConfig(Config):
 
     @rxue_mask.setter
     def rxue_mask(self, val):
-        assert isinstance(val, list) or isinstance(val, np.ndarray), "Invalid Rx UE selection mask"
-        val = np.reshape(val, -1)
-        self._rxue_mask = (val != 0)
+        if val is not None:
+            assert isinstance(val, list) or isinstance(val, np.ndarray), "Invalid Rx UE selection mask"
+            val = np.reshape(val, -1)
+            self._rxue_mask = (val != 0)
+        else:
+            self._rxue_mask = None
 
 
 class CarrierConfig(Config):

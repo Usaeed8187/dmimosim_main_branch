@@ -53,7 +53,8 @@ class LoadNs3Channel:
                 # Apply UE selection masks
                 # Note that the TxBS and RxBS are always selected
                 if ue_selection and (self._cfg.txue_mask is not None):
-                    assert self._cfg.num_txue == np.count_nonzero(self._cfg.txue_mask)
+                    assert self._cfg.num_txue_sel == np.count_nonzero(self._cfg.txue_mask)
+                    assert self._Hdm.shape[1] == self._cfg.num_bs_ant + self._cfg.num_ue_ant * self._cfg.txue_mask.size
                     tx_ue_mask = self._cfg.txue_mask
                     tx_ant_mask = np.repeat(self._cfg.txue_mask, self._cfg.num_ue_ant)
                     txs_mask = np.concatenate(([True], tx_ue_mask), axis=0)
@@ -66,7 +67,8 @@ class LoadNs3Channel:
                     self._Ldm = self._Ldm[:, txs_mask]
 
                 if ue_selection and (self._cfg.rxue_mask is not None):
-                    assert self._cfg.num_rxue == np.count_nonzero(self._cfg.rxue_mask)
+                    assert self._cfg.num_rxue_sel == np.count_nonzero(self._cfg.rxue_mask)
+                    assert self._Hdm.shape[0] == self._cfg.num_bs_ant + self._cfg.num_ue_ant * self._cfg.rxue_mask.size
                     rx_ue_mask = self._cfg.rxue_mask
                     rx_ant_mask = np.repeat(self._cfg.rxue_mask, self._cfg.num_ue_ant)
                     rxs_mask = np.concatenate(([True], rx_ue_mask), axis=0)
@@ -139,13 +141,13 @@ class LoadNs3Channel:
                 # pathloss from different UEs are normalized according to the maximum-loss (weakest) path as reference
 
                 # total received power is num_rxue * weakest_path_power
-                rx_pwr_dbm = tx_pwr_ue + 10.0 * np.log10(self._cfg.num_rxue) + self._cfg.bs_ant_gain \
+                rx_pwr_dbm = tx_pwr_ue + 10.0 * np.log10(self._cfg.num_rxue_sel) + self._cfg.bs_ant_gain \
                     - np.max(self._Lrs, axis=0, keepdims=True)  # [1, num_ofdm_sym]
                 rx_snr_db = rx_pwr_dbm - (self._cfg.thermal_noise + self._cfg.noise_figure)  # [1, num_ofdm_sym]
                 rx_snr_db = np.repeat(rx_snr_db, self._cfg.num_bs_ant, axis=0)  # [num_bs_ant, num_ofdm_sym]
 
                 # no need for agc gain compensation
-                rs_rx_agc = np.zeros((self._cfg.num_rxue * self._cfg.num_ue_ant, 1))
+                rs_rx_agc = np.zeros((self._cfg.num_rxue_sel * self._cfg.num_ue_ant, 1))
 
             else:
                 # assuming perfect AGC on BS and no power control on each UE, pathloss from different UEs
@@ -171,7 +173,7 @@ class LoadNs3Channel:
 
             # expand according to number of Tx/Rx nodes
             tx_pwr_dbm = np.concatenate((np.repeat(tx_pwr_bs, self._cfg.num_bs),
-                                         np.repeat(tx_pwr_ue, self._cfg.num_txue)))
+                                         np.repeat(tx_pwr_ue, self._cfg.num_txue_sel)))
             rx_ant_gain = np.concatenate((np.repeat(self._cfg.bs_ant_gain, self._cfg.num_bs),
                                          np.repeat(self._cfg.ue_ant_gain, self._cfg.num_rxue)))
             # new shape [num_rxue+1,num_txue+1,num_ofdm_sym]
@@ -248,7 +250,7 @@ class LoadNs3Channel:
 
             # forward channel via RxSq UEs, normalize according to total_ue_ant
             # TODO: determine power scaling method
-            # h_fw = np.sqrt(1.0/self._cfg.num_txue) * np.matmul(h_rs, h_dm[:, :, self._cfg.num_bs_ant:, :])
+            # h_fw = np.sqrt(1.0/self._cfg.num_txue_sel) * np.matmul(h_rs, h_dm[:, :, self._cfg.num_bs_ant:, :])
             h_fw = np.sqrt(1.0/self._cfg.num_bs_ant) * np.matmul(h_rs, h_dm[:, :, self._cfg.num_bs_ant:, :])
             # new shape (num_ofdm_symbol,fft_size,2*num_bs_ant,total_squad_ant)
             h_freq = np.concatenate((h_dm[:, :, :self._cfg.num_bs_ant, :], h_fw), 2)
