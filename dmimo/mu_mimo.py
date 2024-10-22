@@ -269,30 +269,31 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
     return rank, rate, modulation_order, code_rate
 
 
-def sim_mu_mimo(cfg: SimConfig):
+def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
     """
     Simulation of MU-MIMO scenarios using different settings
 
     :param cfg: simulation settings
+    :param ns3cfg: ns-3 channel settings
     :return: [uncoded_ber, coded_ber], [goodbits, userbits]
     """
 
     # CFO and STO settings
     if cfg.gen_sync_errors:
-        cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(cfg.num_tx_ue_sel, 1))
-        cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(cfg.num_tx_ue_sel, 1))
+        cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
+        cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
 
     # dMIMO channels from ns-3 simulator
-    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
 
-    # UE selection
+    # Update UE selection
+    ns3cfg.reset_ue_selection()
     if cfg.enable_ue_selection is True:
         tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
-        ns3cfg.update_ue_mask(tx_ue_mask, rx_ue_mask)
+        ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
 
     # Total number of antennas in the TxSquad, always use all gNB antennas
-    num_txs_ant = 2 * cfg.num_tx_ue_sel + ns3cfg.num_bs_ant
+    num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
 
     # Adjust guard subcarriers for channel estimation grid
     csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
@@ -342,7 +343,7 @@ def sim_mu_mimo(cfg: SimConfig):
 
         # Update rank and total number of streams
         cfg.ue_ranks = [rank]
-        cfg.num_tx_streams = rank * (cfg.num_rx_ue_sel + 2)  # treat BS as two UEs
+        cfg.num_tx_streams = rank * (ns3cfg.num_rxue_sel + 2)  # treat BS as two UEs
         cfg.modulation_order = modulation_order
         cfg.code_rate = code_rate
 
@@ -355,7 +356,7 @@ def sim_mu_mimo(cfg: SimConfig):
 
     # TxSquad transmission (P1)
     if cfg.enable_txsquad is True:
-        tx_squad = TxSquad(cfg, mu_mimo.num_bits_per_frame)
+        tx_squad = TxSquad(cfg, ns3cfg, mu_mimo.num_bits_per_frame)
         txs_chans = dMIMOChannels(ns3cfg, "TxSquad", add_noise=True)
         info_bits_new, txs_ber, txs_bler = tx_squad(txs_chans, info_bits)
         # print("BER: {}  BLER: {}".format(txs_ber, txs_bler))
@@ -374,7 +375,7 @@ def sim_mu_mimo(cfg: SimConfig):
         rxcfg = cfg.clone()
         rxcfg.csi_delay = 0
         rxcfg.perfect_csi = True
-        rx_squad = RxSquad(rxcfg, mu_mimo.num_bits_per_frame)
+        rx_squad = RxSquad(rxcfg, ns3cfg, mu_mimo.num_bits_per_frame)
         print("RxSquad using modulation order {} for {} streams / {}".format(
             rx_squad.num_bits_per_symbol, mu_mimo.num_streams_per_tx, mu_mimo.mapper.constellation.num_bits_per_symbol))
         rxscfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
@@ -390,9 +391,12 @@ def sim_mu_mimo(cfg: SimConfig):
     return [uncoded_ber, coded_ber], [goodbits, userbits]
 
 
-def sim_mu_mimo_all(cfg: SimConfig):
+def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config):
     """"
     Simulation of MU-MIMO scenario according to the frame structure
+
+    :param cfg: simulation settings
+    :param ns3cfg: ns-3 channel settings
     """
 
     total_cycles = 0
@@ -400,7 +404,7 @@ def sim_mu_mimo_all(cfg: SimConfig):
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
-        bers, bits = sim_mu_mimo(cfg)
+        bers, bits = sim_mu_mimo(cfg, ns3cfg)
         uncoded_ber += bers[0]
         ldpc_ber += bers[1]
         goodput += bits[0]

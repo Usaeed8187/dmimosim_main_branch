@@ -43,8 +43,6 @@ class SU_MIMO(Model):
         # The number of transmitted streams is less than or equal to the number of Rx UE antennas
         assert cfg.num_tx_streams <= self.num_rx_ant
         self.num_streams_per_tx = cfg.num_tx_streams
-        # The number of Tx/Rx UE must be at least 2
-        assert cfg.num_tx_ue_sel >= 2 and cfg.num_rx_ue_sel >= 2
 
         # Create an RX-TX association matrix
         # rx_tx_association[i,j]=1 means that receiver i gets at least one stream from transmitter j.
@@ -246,30 +244,33 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
     return rank, rate, modulation_order, code_rate
 
 
-def sim_su_mimo(cfg: SimConfig):
+def sim_su_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
     """
     Simulation of SU-MIMO scenarios using different settings
 
     :param cfg: simulation settings
+    :param ns3cfg: ns-3 channel settings
     :return: [uncoded_ber, coded_ber], [goodbits, userbits]
     """
 
     # CFO and STO settings
     if cfg.gen_sync_errors:
-        cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(cfg.num_tx_ue_sel, 1))
-        cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(cfg.num_tx_ue_sel, 1))
+        cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
+        cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
 
     # dMIMO channels from ns-3 simulator
-    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO-Forward", add_noise=True)
 
-    # UE selection
+    # Update UE selection
+    ns3cfg.reset_ue_selection()
     if cfg.enable_ue_selection is True:
+        # The number of Tx/Rx UE must be at least 2 for SU-MIMO
+        assert ns3cfg.num_txue_sel >= 2 and ns3cfg.num_rxue_sel >= 2
         tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
-        ns3cfg.update_ue_mask(tx_ue_mask, rx_ue_mask)
+        ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
 
     # Total number of antennas in the TxSquad, always use all gNB antennas
-    num_txs_ant = 2 * cfg.num_tx_ue_sel + ns3cfg.num_bs_ant
+    num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
 
     # Adjust guard subcarriers for channel estimation grid
     csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
@@ -331,7 +332,7 @@ def sim_su_mimo(cfg: SimConfig):
 
     # TxSquad transmission (P1)
     if cfg.enable_txsquad is True:
-        tx_squad = TxSquad(cfg, su_mimo.num_bits_per_frame)
+        tx_squad = TxSquad(cfg, ns3cfg, su_mimo.num_bits_per_frame)
         txs_chans = dMIMOChannels(ns3cfg, "TxSquad", add_noise=True)
         info_bits_new, txs_ber, txs_bler = tx_squad(txs_chans, info_bits)
         print("BER: {}  BLER: {}".format(txs_ber, txs_bler))
@@ -352,9 +353,12 @@ def sim_su_mimo(cfg: SimConfig):
     return [uncoded_ber, coded_ber], [goodbits, userbits]
 
 
-def sim_su_mimo_all(cfg: SimConfig):
+def sim_su_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config):
     """"
     Simulation of SU-MIMO scenario according to the frame structure
+
+    :param cfg: simulation settings
+    :param ns3cfg: ns-3 channel settings
     """
 
     total_cycles = 0
@@ -362,7 +366,7 @@ def sim_su_mimo_all(cfg: SimConfig):
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
-        bers, bits = sim_su_mimo(cfg)
+        bers, bits = sim_su_mimo(cfg, ns3cfg)
         uncoded_ber += bers[0]
         ldpc_ber += bers[1]
         goodput += bits[0]

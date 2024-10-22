@@ -13,7 +13,7 @@ from sionna.fec.interleaving import RowColumnInterleaver, Deinterleaver
 from sionna.mapping import Mapper, Demapper
 from sionna.utils.metrics import compute_ber, compute_bler
 
-from dmimo.config import SimConfig
+from dmimo.config import SimConfig, Ns3Config
 
 
 class RxSquad(Model):
@@ -26,7 +26,7 @@ class RxSquad(Model):
 
     """
 
-    def __init__(self, cfg: SimConfig, rxs_bits_per_frame: int, **kwargs):
+    def __init__(self, cfg: SimConfig, ns3cfg: Ns3Config, rxs_bits_per_frame: int, **kwargs):
         """
         Initialize RxSquad simulation
 
@@ -36,6 +36,7 @@ class RxSquad(Model):
         super().__init__(trainable=False, **kwargs)
 
         self.cfg = cfg
+        self.ns3cfg = ns3cfg
         self.batch_size = cfg.num_slots_p1  # batch processing for all slots in phase 1
 
         # The number of transmitted streams is equal to the number of BS antennas
@@ -155,7 +156,7 @@ class RxSquad(Model):
         ue_data = []
         ue_ber_avg, ue_bler_avg = 0.0, 0.0
         ue_ber_max, ue_bler_max = 0.0, 0.0
-        for rx_ue_idx in range(0, self.cfg.num_rx_ue_sel, 2):
+        for rx_ue_idx in range(0, self.ns3cfg.num_rxue_sel, 2):
 
             # apply dMIMO channels to the resource grid in the frequency domain
             # only using the channel for the current UEs
@@ -180,8 +181,8 @@ class RxSquad(Model):
             # Error statistics
             ber = compute_ber(b, dec_bits).numpy()
             bler = compute_bler(b, dec_bits).numpy()
-            ue_ber_avg += ber/self.cfg.num_rx_ue_sel
-            ue_bler_avg += bler/self.cfg.num_rx_ue_sel
+            ue_ber_avg += ber/self.ns3cfg.num_rxue_sel
+            ue_bler_avg += bler/self.ns3cfg.num_rxue_sel
             if ber > ue_ber_max:
                 ue_ber_max = ber
             if bler > ue_bler_max:

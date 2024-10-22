@@ -12,7 +12,7 @@ from sionna.fec.interleaving import RowColumnInterleaver, Deinterleaver
 from sionna.mapping import Mapper, Demapper
 from sionna.utils.metrics import compute_ber, compute_bler
 
-from dmimo.config import SimConfig
+from dmimo.config import SimConfig, Ns3Config
 from dmimo.channel import lmmse_channel_estimation
 from dmimo.mimo import ZFPrecoder
 
@@ -22,7 +22,7 @@ class TxSquad(Model):
     Implement Tx Squad data transmission in phase 1 (P1)
     """
 
-    def __init__(self, cfg: SimConfig, txs_bits_per_frame: int, **kwargs):
+    def __init__(self, cfg: SimConfig, ns3cfg: Ns3Config, txs_bits_per_frame: int, **kwargs):
         """
         Initialize TxSquad simulation
 
@@ -32,6 +32,7 @@ class TxSquad(Model):
         super().__init__(trainable=False, **kwargs)
 
         self.cfg = cfg
+        self.ns3cfg = ns3cfg
         self.batch_size = cfg.num_slots_p1  # batch processing for all slots in phase 1
 
         # Define the number of UE and BS antennas.
@@ -165,7 +166,7 @@ class TxSquad(Model):
         ue_data = []
         ue_ber = 1.0
         ue_bler = 1.0
-        for ue_idx in range(self.cfg.num_tx_ue_sel):
+        for ue_idx in range(self.ns3cfg.num_txue_sel):
             # Received signal for current UE
             y1 = y[:, :, 2*ue_idx:2*ue_idx+self.num_streams_per_tx]
 

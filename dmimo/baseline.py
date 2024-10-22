@@ -235,16 +235,16 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
     return rank, rate, modulation_order, code_rate
 
 
-def sim_baseline(cfg: SimConfig):
+def sim_baseline(cfg: SimConfig, ns3cfg: Ns3Config):
     """
     Simulation of baseline scenarios using 4x4 MIMO channels
 
     :param cfg: simulation settings
+    :param ns3cfg: ns-3 channel settings
     :return: [uncoded_ber, coded_ber], [goodbits, userbits]
     """
 
     # dMIMO channels from ns-3 simulator
-    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     dmimo_chans = dMIMOChannels(ns3cfg, "Baseline", add_noise=True)
 
     # Adjust guard subcarriers for channel estimation grid
@@ -265,6 +265,7 @@ def sim_baseline(cfg: SimConfig):
                           pilot_pattern="kronecker",
                           pilot_ofdm_symbol_indices=[2, 11])
 
+    # Channel CSI estimation using channels in previous frames/slots
     if cfg.perfect_csi is True:
         # Perfect channel estimation
         h_freq_csi, rx_snr_db, rx_pwr_dbm = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
@@ -310,7 +311,7 @@ def sim_baseline(cfg: SimConfig):
     return [uncoded_ber, coded_ber], [goodbits, userbits]
 
 
-def sim_baseline_all(cfg: SimConfig):
+def sim_baseline_all(cfg: SimConfig, ns3cfg: Ns3Config):
     """"
     Simulation of baseline scenario (BS-to-BS)
     """
@@ -320,7 +321,7 @@ def sim_baseline_all(cfg: SimConfig):
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p2):
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
-        bers, bits = sim_baseline(cfg)
+        bers, bits = sim_baseline(cfg, ns3cfg)
         uncoded_ber += bers[0]
         ldpc_ber += bers[1]
         goodput += bits[0]
