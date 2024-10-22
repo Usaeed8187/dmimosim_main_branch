@@ -1,7 +1,6 @@
 """
-Simulation of baseline scenario with ns-3 channels
+Simulation of Baseline scenario with ns-3 channels
 
-This scripts should be called from the "sims" folder
 """
 
 import sys
@@ -17,7 +16,7 @@ os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
 # Configure to use only a single GPU and allocate only as much memory as needed
 import tensorflow as tf
 gpus = tf.config.list_physical_devices('GPU')
-if gpus:
+if gpus and gpu_num != "":
     try:
         tf.config.experimental.set_memory_growth(gpus[0], True)
     except RuntimeError as e:
@@ -28,7 +27,7 @@ tf.get_logger().setLevel('ERROR')
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
-from dmimo.config import SimConfig
+from dmimo.config import SimConfig, Ns3Config
 from dmimo.baseline import sim_baseline_all
 
 
@@ -43,10 +42,12 @@ if __name__ == "__main__":
     cfg.csi_delay = 2           # feedback delay in number of subframe
     cfg.rank_adapt = False      # disable rank adaptation
     cfg.link_adapt = False      # disable link adaptation
-    cfg.ns3_folder = "../ns3/channels_medium_mobility/"
+
+    cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels_medium_mobility/")
+    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
-    os.makedirs(os.path.join("../results", folder_name), exist_ok=True)
+    os.makedirs(os.path.join(dmimo_root, "results", folder_name), exist_ok=True)
     print("Using channels in {}".format(folder_name))
 
     # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
@@ -61,14 +62,14 @@ if __name__ == "__main__":
         cfg.modulation_order = modulation_orders[k]
 
         cfg.precoding_method = "SVD"
-        rst_svd = sim_baseline_all(cfg)
+        rst_svd = sim_baseline_all(cfg, ns3cfg)
         ber[0, k] = rst_svd[0]
         ldpc_ber[0, k] = rst_svd[1]
         goodput[0, k] = rst_svd[2]
         throughput[0, k] = rst_svd[3]
 
         cfg.precoding_method = "ZF"
-        rst_zf = sim_baseline_all(cfg)
+        rst_zf = sim_baseline_all(cfg, ns3cfg)
         ber[1, k] = rst_zf[0]
         ldpc_ber[1, k] = rst_zf[1]
         goodput[1, k] = rst_zf[2]
@@ -95,7 +96,6 @@ if __name__ == "__main__":
     ax[2].plot(modulation_orders, throughput.transpose(), 'd-')
     ax[2].legend(['Goodput-SVD', 'Goodput-ZF', 'Throughput-SVD', 'Throughput-ZF'])
 
-    plt.savefig("../results/{}/baseline_results.png".format(folder_name))
-
-    np.savez("../results/{}/baseline_results.npz".format(folder_name),
-             ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput)
+    basename = dmimo_root + "/results/{}/baseline_results".format(folder_name)
+    plt.savefig(f"{basename}.png")
+    np.savez(f"{basename}.npz", ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput)

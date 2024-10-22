@@ -27,7 +27,7 @@ tf.get_logger().setLevel('ERROR')
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
-from dmimo.config import SimConfig
+from dmimo.config import SimConfig, Ns3Config
 from dmimo.su_mimo import sim_su_mimo_all
 
 
@@ -39,8 +39,11 @@ if __name__ == "__main__":
     cfg.total_slots = 35        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 8           # feedback delay in number of subframe
+    cfg.rank_adapt = True       # disable rank adaptation
+    cfg.link_adapt = True       # disable link adaptation
 
     cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels_medium_mobility/")
+    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join(dmimo_root, "results", folder_name), exist_ok=True)
@@ -59,7 +62,7 @@ if __name__ == "__main__":
     cfg.link_adapt = True
 
     cfg.precoding_method = "ZF"
-    rst_svd = sim_su_mimo_all(cfg)
+    rst_svd = sim_su_mimo_all(cfg, ns3cfg)
     ber[0] = rst_svd[0]
     ldpc_ber[0] = rst_svd[1]
     goodput[0] = rst_svd[2]
@@ -78,7 +81,7 @@ if __name__ == "__main__":
     cfg.code_rate = 0.5
 
     cfg.precoding_method = "ZF"
-    rst_svd = sim_su_mimo_all(cfg)
+    rst_svd = sim_su_mimo_all(cfg, ns3cfg)
     ber[1] = rst_svd[0]
     ldpc_ber[1] = rst_svd[1]
     goodput[1] = rst_svd[2]
@@ -90,7 +93,7 @@ if __name__ == "__main__":
     cfg.code_rate = 0.5
 
     cfg.precoding_method = "ZF"
-    rst_svd = sim_su_mimo_all(cfg)
+    rst_svd = sim_su_mimo_all(cfg, ns3cfg)
     ber[2] = rst_svd[0]
     ldpc_ber[2] = rst_svd[1]
     goodput[2] = rst_svd[2]

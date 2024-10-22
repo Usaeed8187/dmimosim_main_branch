@@ -27,7 +27,7 @@ tf.get_logger().setLevel('ERROR')
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
-from dmimo.config import SimConfig
+from dmimo.config import SimConfig, Ns3Config
 from dmimo.mu_mimo import sim_mu_mimo
 
 
@@ -44,6 +44,7 @@ if __name__ == "__main__":
     cfg.rank_adapt = False      # disable rank adaptation
 
     cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels_high_mobility/")
+    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
 
     avg_ber, avg_ber_pred = 0.0, 0.0
     avg_goodput, avg_tput = 0.0, 0.0
@@ -55,7 +56,7 @@ if __name__ == "__main__":
         cfg.first_slot_idx = first_slot_idx
         cfg.csi_prediction = False
         cfg.precoding_method = "ZF"
-        bers, bits = sim_mu_mimo(cfg)
+        bers, bits = sim_mu_mimo(cfg, ns3cfg)
         avg_ber += bers[0]
         avg_goodput += bits[0]
         avg_tput += bits[1]
@@ -65,7 +66,7 @@ if __name__ == "__main__":
 
         cfg.csi_prediction = True
         cfg.precoding_method = "ZF"
-        bers, bits = sim_mu_mimo(cfg)
+        bers, bits = sim_mu_mimo(cfg, ns3cfg)
         avg_ber_pred += bers[0]
         avg_goodput_pred += bits[0]
         avg_tput_pred += bits[1]
