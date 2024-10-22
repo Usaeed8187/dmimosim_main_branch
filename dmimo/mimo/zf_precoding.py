@@ -131,7 +131,7 @@ def mumimo_zf_precoder(x, h, ue_indices, ue_ranks, return_precoding_matrix=False
             if ue_ranks[k] == num_rx_ant:
                 # full rank
                 h_all.append(h_ue)
-            else:
+            else:  # assuming rank==1
                 # support only one stream adaptation
                 assert(ue_ranks[k] == 1)
                 # Calculate MRC weights

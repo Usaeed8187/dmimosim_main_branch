@@ -220,7 +220,7 @@ class rankAdaptation(Layer):
                         ant_idx = tf.range(self.num_BS_Ant + (rx_node_id-1)*self.num_UE_Ant, self.num_BS_Ant + rx_node_id * self.num_UE_Ant)
                         H_freq_temp = tf.gather(H_freq, ant_idx, axis=1)
                     
-                    snr_linear_nodewise = snr_linear[:,:,ant_idx,:]
+                    snr_linear_nodewise = self.snr_linear[:,:,ant_idx,:]
 
                     for sym_idx in range(total_num_symbols):
                         
