@@ -112,7 +112,8 @@ class HardLogLikelihood(Layer):
             else:
                 return log_prob  # (...,N,2**k) # N is the number of Rx Nodes and 2**k is the number of candidate symbols.
         else:
-            prob_multiplied = tf.reduce_prod(prob, axis=-2)  # (...,2**k)
+            prob_new = prob + (tf.experimental.numpy.finfo(prob.dtype.as_numpy_dtype).tiny)**(1/prob.shape[-2]) # Add with the smallest positive number to avoid log(0) issues
+            prob_multiplied = tf.reduce_prod(prob_new, axis=-2)  # (...,2**k)
             LLR_list = []
             for k in range(self.k_constellation - 1, -1, -1):  # [k_constellation-1, k_constellation-2, ... , 1, 0]
                 # e.g. [8,9,10,11,12,13,14,15]
