@@ -60,6 +60,7 @@ class HardLogLikelihood(Layer):
         self.right_inf_imag = tf.concat((middle_points_imag, [tf.float32.max]), axis=0)  # shape [2**(k/2),]
 
     # tf.where does not support XLA
+    @tf.function(jit_compile=True)  # Enable graph execution to speed things up
     def call(self, inputs, SNR) -> tf.Tensor:
 
         assert inputs.shape == SNR.shape
@@ -91,18 +92,20 @@ class HardLogLikelihood(Layer):
         # intervals = tf.concat((intervals_real, intervals_imag), axis=1)
         
         x_reshaped = tf.reshape(received_symbols, [-1, 1])
+        print('x_reshaped.shape=',x_reshaped.shape)
         mask_real_lower = (tf.math.real(x_reshaped)<self.right_inf_real[tf.newaxis,:]) # (total_symbols,2**(k/2))
-        mask_real_upper = (tf.math.real(x_reshaped)>self.left_inf_real[tf.newaxis,:]) # (total_symbols,2**(k/2))
+        mask_real_upper = (tf.math.real(x_reshaped)>=self.left_inf_real[tf.newaxis,:]) # (total_symbols,2**(k/2))
         mask_real = tf.logical_and(mask_real_lower,mask_real_upper) # (total_symbols,2**(k/2)) -- This should have exactly one True value per row
+        indices_real = tf.argmax(mask_real,axis=1) #  (total_symbols,)
         mask_imag_lower = (tf.math.imag(x_reshaped)<self.right_inf_imag[tf.newaxis,:]) # (total_symbols,2**(k/2))
-        mask_imag_upper = (tf.math.imag(x_reshaped)>self.left_inf_imag[tf.newaxis,:]) # (total_symbols,2**(k/2))
+        mask_imag_upper = (tf.math.imag(x_reshaped)>=self.left_inf_imag[tf.newaxis,:]) # (total_symbols,2**(k/2))
         mask_imag = tf.logical_and(mask_imag_lower,mask_imag_upper) # (total_symbols,2**(k/2)) -- This should have exactly one True value per row
+        indices_imag = tf.argmax(mask_imag,axis=1) #  (total_symbols,)
 
-        total_symbols = x_reshaped.shape[0]
-        intervals=tf.stack([tf.boolean_mask(tf.tile(self.left_inf_real[tf.newaxis,:],[total_symbols,1]),mask_real),
-                            tf.boolean_mask(tf.tile(self.right_inf_real[tf.newaxis,:],[total_symbols,1]),mask_real),
-                            tf.boolean_mask(tf.tile(self.left_inf_real[tf.newaxis,:],[total_symbols,1]),mask_imag),
-                            tf.boolean_mask(tf.tile(self.right_inf_real[tf.newaxis,:],[total_symbols,1]),mask_imag)],
+        intervals=tf.stack([tf.gather(self.left_inf_real, indices_real),
+                            tf.gather(self.right_inf_real, indices_real),
+                            tf.gather(self.left_inf_imag, indices_imag),
+                            tf.gather(self.right_inf_imag, indices_imag)],
                             axis=-1) # (total_symbols, 4)
         
         intervals = tf.reshape(intervals, (*received_symbols.shape, 4))  # (...,N,1,1,4)
