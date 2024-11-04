@@ -71,23 +71,40 @@ class HardLogLikelihood(Layer):
         SNRs = tf.math.real(SNR[..., tf.newaxis, tf.newaxis])  # (...,N,1,1)
 
         # Mapping each received symbol to an interval.
-        # def fn_v2(x: tf.Tensor):
+        # # def fn_v2(x: tf.Tensor):
+        # x_reshaped = tf.reshape(received_symbols, [-1, 1])
+        # # Explanation: the first column of tf.where's output is just a range from 0 to total_symbols. We don't need it.
+        # real_indices = tf.where(tf.math.real(x_reshaped) == self.candidate_real_reshaped)[:, 1]  # shape = (total_symbols,)
+        # imag_indices = tf.where(tf.math.imag(x_reshaped) == self.candidate_imag_reshaped)[:, 1]  # shape = (total_symbols,)
+
+
+        # # print(real_indices.shape)
+        # # print(imag_indices.shape)
+
+        # intervals_real = tf.stack([tf.gather(self.left_inf_real, real_indices),
+        #                            tf.gather(self.right_inf_real, real_indices)],
+        #                           axis=1)  # shape = (total_symbols,2)
+        # intervals_imag = tf.stack([tf.gather(self.left_inf_imag, imag_indices),
+        #                            tf.gather(self.right_inf_imag, imag_indices)],
+        #                           axis=1)  # shape = (total_symbols,2)
+
+        # intervals = tf.concat((intervals_real, intervals_imag), axis=1)
+        
         x_reshaped = tf.reshape(received_symbols, [-1, 1])
-        # Explanation: the first column of tf.where's output is just a range from 0 to total_symbols. We don't need it.
-        real_indices = tf.where(tf.math.real(x_reshaped) == self.candidate_real_reshaped)[:, 1]  # shape = (total_symbols,)
-        imag_indices = tf.where(tf.math.imag(x_reshaped) == self.candidate_imag_reshaped)[:, 1]  # shape = (total_symbols,)
+        mask_real_lower = (tf.math.real(x_reshaped)<self.right_inf_real[tf.newaxis,:]) # (total_symbols,2**(k/2))
+        mask_real_upper = (tf.math.real(x_reshaped)>self.left_inf_real[tf.newaxis,:]) # (total_symbols,2**(k/2))
+        mask_real = tf.logical_and(mask_real_lower,mask_real_upper) # (total_symbols,2**(k/2)) -- This should have exactly one True value per row
+        mask_imag_lower = (tf.math.imag(x_reshaped)<self.right_inf_imag[tf.newaxis,:]) # (total_symbols,2**(k/2))
+        mask_imag_upper = (tf.math.imag(x_reshaped)>self.left_inf_imag[tf.newaxis,:]) # (total_symbols,2**(k/2))
+        mask_imag = tf.logical_and(mask_imag_lower,mask_imag_upper) # (total_symbols,2**(k/2)) -- This should have exactly one True value per row
 
-        # print(real_indices.shape)
-        # print(imag_indices.shape)
-
-        intervals_real = tf.stack([tf.gather(self.left_inf_real, real_indices),
-                                   tf.gather(self.right_inf_real, real_indices)],
-                                  axis=1)  # shape = (total_symbols,2)
-        intervals_imag = tf.stack([tf.gather(self.left_inf_imag, imag_indices),
-                                   tf.gather(self.right_inf_imag, imag_indices)],
-                                  axis=1)  # shape = (total_symbols,2)
-
-        intervals = tf.concat((intervals_real, intervals_imag), axis=1)
+        total_symbols = x_reshaped.shape[0]
+        intervals=tf.stack([tf.boolean_mask(tf.tile(self.left_inf_real[tf.newaxis,:],[total_symbols,1]),mask_real),
+                            tf.boolean_mask(tf.tile(self.right_inf_real[tf.newaxis,:],[total_symbols,1]),mask_real),
+                            tf.boolean_mask(tf.tile(self.left_inf_real[tf.newaxis,:],[total_symbols,1]),mask_imag),
+                            tf.boolean_mask(tf.tile(self.right_inf_real[tf.newaxis,:],[total_symbols,1]),mask_imag)],
+                            axis=-1) # (total_symbols, 4)
+        
         intervals = tf.reshape(intervals, (*received_symbols.shape, 4))  # (...,N,1,1,4)
 
         # Note that P(a<X<b) = 1/2 * ( erf((b-μ)/(σ√2)) - erf((a-μ)/(σ√2))) for X ~ 𝒩(μ,σ²)
@@ -116,14 +133,16 @@ class HardLogLikelihood(Layer):
             prob_multiplied = tf.reduce_prod(prob_new, axis=-2)  # (...,2**k)
             LLR_list = []
             for k in range(self.k_constellation - 1, -1, -1):  # [k_constellation-1, k_constellation-2, ... , 1, 0]
-                # e.g. [8,9,10,11,12,13,14,15]
-                syms_indices_that_have_bit1 = tf.where((tf.range(2 ** self.k_constellation) // (2 ** k)) % 2 == 1)[:, 0]
-                # e.g. [0,1,2,3,4,5,6,7]
-                syms_indices_that_have_bit0 = tf.where((tf.range(2 ** self.k_constellation) // (2 ** k)) % 2 == 0)[:, 0]
+                # # e.g. [8,9,10,11,12,13,14,15]
+                # syms_indices_that_have_bit1 = tf.where((tf.range(2 ** self.k_constellation) // (2 ** k)) % 2 == 1)[:, 0]
+                # # e.g. [0,1,2,3,4,5,6,7]
+                # syms_indices_that_have_bit0 = tf.where((tf.range(2 ** self.k_constellation) // (2 ** k)) % 2 == 0)[:, 0]
+                # # (...,2**(k-1)) after tf.gather and (...) after tf.reduce_sum
+                # sum_prob_bit1 = tf.reduce_sum(tf.gather(prob_multiplied, syms_indices_that_have_bit1, axis=-1), axis=-1)
+                sum_prob_bit1 = tf.reduce_sum(tf.boolean_mask(prob_multiplied,mask=((tf.range(2 ** self.k_constellation) // (2 ** k)) % 2 == 1), axis=prob_multiplied.ndim-1),axis=-1)
                 # (...,2**(k-1)) after tf.gather and (...) after tf.reduce_sum
-                sum_prob_bit1 = tf.reduce_sum(tf.gather(prob_multiplied, syms_indices_that_have_bit1, axis=-1), axis=-1)
-                # (...,2**(k-1)) after tf.gather and (...) after tf.reduce_sum
-                sum_prob_bit0 = tf.reduce_sum(tf.gather(prob_multiplied, syms_indices_that_have_bit0, axis=-1), axis=-1)
+                # sum_prob_bit0 = tf.reduce_sum(tf.gather(prob_multiplied, syms_indices_that_have_bit0, axis=-1), axis=-1)
+                sum_prob_bit0 = tf.reduce_sum(tf.boolean_mask(prob_multiplied,mask=((tf.range(2 ** self.k_constellation) // (2 ** k)) % 2 == 0), axis=prob_multiplied.ndim-1),axis=-1)
                 LLR_list.append(tf.math.log(sum_prob_bit1) - tf.math.log(sum_prob_bit0))
                 pass
             LLR = tf.stack(LLR_list, axis=-1)  # (...,k_constellation)
