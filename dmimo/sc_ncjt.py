@@ -22,10 +22,11 @@ from dmimo.ncjt import NCJT_TxUE, NCJT_RxUE, NCJT_PostCombination
 
 class SC_NCJT(Model):
 
-    def __init__(self, cfg: SimConfig, **kwargs):
+    def __init__(self, cfg: SimConfig, ns3cfg: Ns3Config, **kwargs):
         super().__init__(kwargs)
 
         self.cfg = cfg
+        self.ns3cfg = ns3cfg
         self.batch_size = cfg.num_slots_p2  # batch processing for all slots in phase 2
 
         # Update number of QAM symbols for data and LDPC params
@@ -73,7 +74,7 @@ class SC_NCJT(Model):
 
         # Phase 2 transmission from all gNB/UEs
         tx_signals_list = []
-        for ue_idx in range(0, self.cfg.num_tx_ue_sel + 1):
+        for ue_idx in range(0, self.ns3cfg.num_txue_sel + 1):
             ue_tx_signal = self.ncjt_tx(tx_bit_stream, is_txbs=(ue_idx == 0))
             tx_signals_list.append(ue_tx_signal)
         tx_signals = tf.concat(tx_signals_list, axis=-1)
@@ -82,14 +83,14 @@ class SC_NCJT(Model):
         tx_signals = tf.expand_dims(tx_signals, axis=1)
 
         # apply dMIMO channels to the resource grid in the frequency domain
-        ry = dmimo_chans([tx_signals, self.cfg.first_slot_idx])
+        ry, _ = dmimo_chans([tx_signals, self.cfg.first_slot_idx])
         ry = tf.transpose(ry, [0, 4, 3, 2, 1])
 
         # Rx Squad processing
         y_list = []
         gains_list = []
         nvar_list = []
-        for ue_idx in range(0, self.cfg.num_rx_ue_sel + 1):
+        for ue_idx in range(0, self.ns3cfg.num_rxue_sel + 1):
             if ue_idx == 0:
                 y, gains, nvar = self.ncjt_rx(ry[:, :, :, 0:4, :])
             else:
@@ -124,23 +125,22 @@ class SC_NCJT(Model):
         return [uncoded_ber, coded_ber, coded_bler], [goodbits, userbits]
 
 
-def sim_sc_ncjt(cfg: SimConfig):
+def sim_sc_ncjt(cfg: SimConfig, ns3cfg: Ns3Config):
     """
     Simulation of single-cluster NCJT scenario
     """
 
     # dMIMO channels from ns-3 simulator
-    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
 
-    # UE selection
+    # Update UE selection
+    ns3cfg.reset_ue_selection()
     if cfg.enable_ue_selection is True:
         tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
-        # Update will be applied to dMIMOChannels object
-        ns3cfg.update_ue_mask(tx_ue_mask, rx_ue_mask)
+        ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
 
     # Create single-cluster NCJT simulation
-    sc_ncjt = SC_NCJT(cfg)
+    sc_ncjt = SC_NCJT(cfg, ns3cfg)
 
     # Loop over channels for all transmission cycles
     total_cycles = 0

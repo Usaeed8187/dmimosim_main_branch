@@ -27,7 +27,7 @@ tf.get_logger().setLevel('ERROR')
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
-from dmimo.config import SimConfig
+from dmimo.config import SimConfig, Ns3Config
 from dmimo.sc_ncjt import sim_sc_ncjt
 
 
@@ -45,14 +45,16 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(dmimo_root, "results", folder_name), exist_ok=True)
     print("Using channels in {}".format(folder_name))
 
+    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     # Select different number of Tx/Rx nodes
-    cfg.num_tx_ue_sel = 8
-    cfg.num_rx_ue_sel = 6
+    ns3cfg.num_txue_sel = 8
+    ns3cfg.num_rxue_sel = 6
+
     cfg.modulation_order = 4
     cfg.code_rate = 0.5
 
     # Run the simulation
-    uncoded_ber, coded_ber, coded_bler, goodput, throughput = sim_sc_ncjt(cfg)
+    uncoded_ber, coded_ber, coded_bler, goodput, throughput = sim_sc_ncjt(cfg, ns3cfg)
 
     # Show results
     print(f"Average uncoded/coded BER: {uncoded_ber}  {coded_ber}")
