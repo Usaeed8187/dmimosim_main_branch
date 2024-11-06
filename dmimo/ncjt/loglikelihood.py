@@ -92,7 +92,7 @@ class HardLogLikelihood(Layer):
         # intervals = tf.concat((intervals_real, intervals_imag), axis=1)
         
         x_reshaped = tf.reshape(received_symbols, [-1, 1])
-        print('x_reshaped.shape=',x_reshaped.shape)
+        # print('x_reshaped.shape=',x_reshaped.shape)
         mask_real_lower = (tf.math.real(x_reshaped)<self.right_inf_real[tf.newaxis,:]) # (total_symbols,2**(k/2))
         mask_real_upper = (tf.math.real(x_reshaped)>=self.left_inf_real[tf.newaxis,:]) # (total_symbols,2**(k/2))
         mask_real = tf.logical_and(mask_real_lower,mask_real_upper) # (total_symbols,2**(k/2)) -- This should have exactly one True value per row

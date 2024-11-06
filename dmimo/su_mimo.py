@@ -335,7 +335,7 @@ def sim_su_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
         tx_squad = TxSquad(cfg, ns3cfg, su_mimo.num_bits_per_frame)
         txs_chans = dMIMOChannels(ns3cfg, "TxSquad", add_noise=True)
         info_bits_new, txs_ber, txs_bler = tx_squad(txs_chans, info_bits)
-        print("BER: {}  BLER: {}".format(txs_ber, txs_bler))
+        # print("BER: {}  BLER: {}".format(txs_ber, txs_bler))
         assert txs_ber <= 1e-3, "TxSquad transmission BER too high"
 
     # SU-MIMO transmission (P2 & P3)
