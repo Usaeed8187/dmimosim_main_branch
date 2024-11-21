@@ -222,19 +222,14 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
                                      precoder='BD', ue_indices=cfg.ue_indices)
 
     rank_feedback_report = rank_adaptation(h_est, channel_type='dMIMO')
+    rank = rank_feedback_report[0]
 
-    if rank_adaptation.use_mmse_eesm_method:
-        rank = rank_feedback_report[0]
-        rate = rank_feedback_report[1]
+    h_eff = rank_adaptation.calculate_effective_channel(rank_feedback_report[0], h_est)
+    snr_linear = 10**(rx_snr_db/10)
+    snr_linear = np.sum(snr_linear, axis=(2))
+    snr_linear = np.mean(snr_linear)
 
-        print("\n", "rank per user (MU-MIMO) = ", rank, "\n")
-        print("\n", "rate per user (MU-MIMO) = ", rate, "\n")
-
-    else:
-        rank = rank_feedback_report
-        rate = []
-
-        print("\n", "rank per user (MU-MIMO) = ", rank, "\n")
+    n_var = rank_adaptation.cal_n_var(h_eff, snr_linear)
 
     # Link adaptation
     data_sym_position = np.arange(0, 14)
@@ -244,29 +239,7 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
 
     mcs_feedback_report = link_adaptation(h_est, channel_type='dMIMO')
 
-    if link_adaptation.use_mmse_eesm_method:
-        qam_order_arr = mcs_feedback_report[0]
-        code_rate_arr = mcs_feedback_report[1]
-
-        # Majority vote for MCS selection for now
-        values, counts = np.unique(qam_order_arr, return_counts=True)
-        most_frequent_value = values[np.argmax(counts)]
-        modulation_order = int(most_frequent_value)
-
-        values, counts = np.unique(code_rate_arr, return_counts=True)
-        most_frequent_value = values[np.argmax(counts)]
-        code_rate = most_frequent_value
-
-        print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
-        print("\n", "Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
-    else:
-        qam_order_arr = mcs_feedback_report[0]
-        modulation_order = int(np.min(qam_order_arr))
-        code_rate = []  # FIXME update code rate
-
-        print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
-
-    return rank, rate, modulation_order, code_rate
+    return rank_feedback_report, n_var, mcs_feedback_report
 
 
 def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
@@ -287,10 +260,11 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
 
     # Update UE selection
-    ns3cfg.reset_ue_selection()
     if cfg.enable_ue_selection is True:
+        ns3cfg.reset_ue_selection()
         tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
         ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+        cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
     # Total number of antennas in the TxSquad, always use all gNB antennas
     num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
@@ -335,17 +309,33 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
                                                            sto_vals=cfg.random_sto_vals)
 
     # Rank and link adaptation
-    if cfg.rank_adapt and cfg.link_adapt and cfg.first_slot_idx == cfg.start_slot_idx:
-        _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                   batch_size=cfg.num_slots_p2)
-        rank, rate, modulation_order, code_rate = \
-            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
+    
+    _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+                                                batch_size=cfg.num_slots_p2)
+    rank_feedback_report, n_var, mcs_feedback_report = \
+        do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
 
+    if cfg.rank_adapt and cfg.link_adapt:
         # Update rank and total number of streams
+        rank = rank_feedback_report[0]
         cfg.ue_ranks = [rank]
         cfg.num_tx_streams = rank * (ns3cfg.num_rxue_sel + 2)  # treat BS as two UEs
-        cfg.modulation_order = modulation_order
-        cfg.code_rate = code_rate
+
+        qam_order_arr = mcs_feedback_report[0]
+        code_rate_arr = mcs_feedback_report[1]
+        values, counts = np.unique(qam_order_arr, return_counts=True)
+        most_frequent_value = values[np.argmax(counts)]
+        cfg.modulation_order = int(most_frequent_value)
+
+        print("\n", "rank per user (MU-MIMO) = ", rank, "\n")
+        # print("\n", "rate per user (MU-MIMO) = ", rate, "\n")
+
+        values, counts = np.unique(code_rate_arr, return_counts=True)
+        most_frequent_value = values[np.argmax(counts)]
+        cfg.code_rate = most_frequent_value
+
+        print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
+        print("\n", "Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
 
     # Create MU-MIMO simulation
     mu_mimo = MU_MIMO(cfg, rg_csi)
