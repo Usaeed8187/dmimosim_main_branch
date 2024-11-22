@@ -85,6 +85,7 @@ class linkAdaptation(Layer):
 
             qam_order_arr = np.zeros((self.N_s))
             code_rate_arr = np.zeros((self.N_s))
+            cqi_snr = np.zeros((self.N_s))
 
             if self.N_s == 1:
                 
@@ -96,11 +97,11 @@ class linkAdaptation(Layer):
                     sinr_eff_dB = 10*np.log10(sinr_eff)
                     sinr_eff_list.append(sinr_eff_dB)
                 
-                curr_qam_order, curr_code_rate = self.lookup_table(sinr_eff_list, refer_sinr_db, mcs_candidates)
+                curr_qam_order, curr_code_rate, cqi_snr_tmp = self.lookup_table(sinr_eff_list, refer_sinr_db, mcs_candidates)
 
                 qam_order_arr[0] = curr_qam_order
                 code_rate_arr[0] = curr_code_rate
-                
+                cqi_snr[0] = cqi_snr_tmp
                 
             else:
 
@@ -123,12 +124,13 @@ class linkAdaptation(Layer):
                         sinr_eff_dB = 10*np.log10(sinr_eff)
                         sinr_eff_list.append(sinr_eff_dB)
 
-                    curr_qam_order, curr_code_rate = self.lookup_table(sinr_eff_list, refer_sinr_db, mcs_candidates)
+                    curr_qam_order, curr_code_rate, cqi_snr_tmp = self.lookup_table(sinr_eff_list, refer_sinr_db, mcs_candidates)
 
                     qam_order_arr[stream_idx] = curr_qam_order
                     code_rate_arr[stream_idx] = curr_code_rate
+                    cqi_snr[stream_idx] = cqi_snr_tmp
 
-            return [qam_order_arr, code_rate_arr]
+            return [qam_order_arr, code_rate_arr, cqi_snr]
 
         else:
             
@@ -190,6 +192,7 @@ class linkAdaptation(Layer):
 
             qam_order_arr = np.zeros((self.N_s, num_rx_nodes))
             code_rate_arr = np.zeros((self.N_s, num_rx_nodes))
+            cqi_snr = np.zeros((self.N_s, num_rx_nodes))
 
             if self.N_s == 1:
                 
@@ -207,10 +210,11 @@ class linkAdaptation(Layer):
                         sinr_eff_dB = 10*np.log10(sinr_eff)
                         sinr_eff_list.append(sinr_eff_dB)
                     
-                    curr_qam_order, curr_code_rate = self.lookup_table(sinr_eff_list, refer_sinr_db, mcs_candidates)
+                    curr_qam_order, curr_code_rate, cqi_snr_tmp = self.lookup_table(sinr_eff_list, refer_sinr_db, mcs_candidates)
 
                     qam_order_arr[0, rx_node_idx] = curr_qam_order
                     code_rate_arr[0, rx_node_idx] = curr_code_rate
+                    cqi_snr[0, rx_node_idx] = cqi_snr_tmp
                 
                 
             else:
@@ -245,12 +249,13 @@ class linkAdaptation(Layer):
                             sinr_eff_dB = 10*np.log10(sinr_eff)
                             sinr_eff_list.append(sinr_eff_dB)
 
-                        curr_qam_order, curr_code_rate = self.lookup_table(sinr_eff_list, refer_sinr_db, mcs_candidates)
+                        curr_qam_order, curr_code_rate, cqi_snr_tmp = self.lookup_table(sinr_eff_list, refer_sinr_db, mcs_candidates)
 
                         qam_order_arr[stream_idx, rx_node_idx] = curr_qam_order
                         code_rate_arr[stream_idx, rx_node_idx] = curr_code_rate
+                        cqi_snr[stream_idx, rx_node_idx] = cqi_snr_tmp
 
-            return [qam_order_arr, code_rate_arr]
+            return [qam_order_arr, code_rate_arr, cqi_snr]
         else:
             raise Exception(f"The non-EESM methods have not been implemented.")
 
@@ -271,4 +276,4 @@ class linkAdaptation(Layer):
         [curr_qam_order, curr_code_rate] = mcs_candidates[mcs_idx, :]
 
         
-        return curr_qam_order, curr_code_rate
+        return curr_qam_order, curr_code_rate, refer_sinr_db[mcs_idx]

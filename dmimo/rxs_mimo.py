@@ -128,7 +128,7 @@ class RxSquad(Model):
         # The decoder provides hard-decisions on the information bits
         self.decoder = LDPC5GDecoder(self.encoder, hard_out=True)
 
-    def call(self, rxs_chans, info_bits):
+    def call(self, rxs_chans, info_bits, return_data_only=False):
         """
         Signal processing for RxSquad downlink transmission (P1)
 
@@ -151,6 +151,9 @@ class RxSquad(Model):
         x = self.mapper(d)
         # x_rg has shape [batch_size, num_tx, num_tx_streams, num_ofdm_syms, fft_size)
         x_rg = self.rg_mapper(x)
+
+        if return_data_only:
+            return x_rg
 
         # check all UEs
         ue_data = []

@@ -7,6 +7,10 @@ import sys
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import tensorflow as tf
+
+from dmimo.config import SimConfig, Ns3Config
+from dmimo.mu_mimo_integration import sim_mu_mimo_all
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
@@ -14,7 +18,6 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
 
 # Configure to use only a single GPU and allocate only as much memory as needed
-import tensorflow as tf
 gpus = tf.config.list_physical_devices('GPU')
 if gpus and gpu_num != "":
     try:
@@ -54,10 +57,6 @@ for root, dirs, files in os.walk(source_dir):
         os.symlink(source_file, destination_file)
         # print(f"Symlink created for {source_file} -> {destination_file}")
 
-from dmimo.config import SimConfig, Ns3Config
-from dmimo.mu_mimo import sim_mu_mimo_all
-
-
 # Main function
 if __name__ == "__main__":
 
@@ -72,12 +71,12 @@ if __name__ == "__main__":
     mobility = 'medium_mobility'
     drop_idx = '3'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
+    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
+
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)
-    print("Using channels in {}".format(folder_name))
-    
-    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
+    print("Using channels in {}".format(folder_name))    
 
     # rx_ues_arr = [1,2,4,6]
     rx_ues_arr = [1]    
@@ -135,3 +134,65 @@ if __name__ == "__main__":
                     ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_bd[5],
                     nodewise_throughput=rst_bd[6], nodewise_bitrate=rst_bd[7], ranks=rst_bd[8], uncoded_ber_list=rst_bd[9],
                     ldpc_ber_list=rst_bd[10], sinr_dB=rst_bd[11])
+
+    #############################################
+    # Testing without rank and link adaptation
+    #############################################
+
+    # for ue_arr_idx in range(np.size(rx_ues_arr)):
+
+    #     num_rx_antennas = rx_ues_arr[ue_arr_idx] * 2 + 4
+
+    #     # Test case 1:  no rank adaptation, assuming 2 antennas per UE and treating BS as two UEs
+    #     cfg.num_tx_streams = num_rx_antennas
+    #     ns3cfg.num_rxue_sel = (num_rx_antennas - 4) // 2
+    #     cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
+    #     cfg.ue_ranks = [2]  # same rank for all UEs
+
+
+    #     # Test case 2: manual rank 1 adaption, assuming 2 antennas per UE and treating BS as two UEs
+    #     # cfg.num_tx_streams = num_rx_antennas // 2
+    #     # ns3cfg.num_rxue_sel = (num_rx_antennas - 4) // 2
+    #     # cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
+    #     # cfg.ue_ranks = [1]  # same rank for all UEs
+
+    #     # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
+    #     modulation_orders = [4]
+    #     num_modulations = len(modulation_orders)
+    #     ber = np.zeros((2, num_modulations))
+    #     ldpc_ber = np.zeros((2, num_modulations))
+    #     goodput = np.zeros((2, num_modulations))
+    #     throughput = np.zeros((2, num_modulations))
+
+    #     cfg.modulation_order = modulation_orders[k]
+
+    #     # cfg.precoding_method = "BD"
+    #     cfg.precoding_method = "ZF"
+    #     rst_zf = sim_mu_mimo_all(cfg, ns3cfg)
+    #     ber[ue_arr_idx] = rst_bd[0]
+    #     ldpc_ber[ue_arr_idx] = rst_bd[1]
+    #     goodput[ue_arr_idx] = rst_bd[2]
+    #     throughput[ue_arr_idx] = rst_bd[3]
+    #     bitrate[ue_arr_idx] = rst_bd[4]
+    #     phase_1_ue_ber_tmp = rst_bd[12]
+
+    #     nodewise_goodput.append(rst_bd[5])
+    #     nodewise_throughput.append(rst_bd[6])
+    #     nodewise_bitrate.append(rst_bd[7])
+    #     ranks.append(rst_bd[8])
+    #     uncoded_ber_list.append(rst_bd[9])
+    #     ldpc_ber_list.append(rst_bd[10])
+    #     if rst_bd[11] is not None:
+    #         sinr_dB.append(np.concatenate(rst_bd[11]))
+    #     phase_1_ue_ber.append(phase_1_ue_ber_tmp)
+
+    #     if cfg.csi_prediction:
+    #         np.savez("results/channels_multiple_mu_mimo/results/{}/mu_mimo_results_UE_{}_pred.npz".format(folder_name, rx_ues_arr[ue_arr_idx]),
+    #                 ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_bd[5],
+    #                 nodewise_throughput=rst_bd[6], nodewise_bitrate=rst_bd[7], ranks=rst_bd[8], uncoded_ber_list=rst_bd[9],
+    #                 ldpc_ber_list=rst_bd[10], sinr_dB=rst_bd[11])
+    #     else:
+    #         np.savez("results/channels_multiple_mu_mimo/results/{}/mu_mimo_results_UE_{}.npz".format(folder_name, rx_ues_arr[ue_arr_idx]),
+    #                 ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_bd[5],
+    #                 nodewise_throughput=rst_bd[6], nodewise_bitrate=rst_bd[7], ranks=rst_bd[8], uncoded_ber_list=rst_bd[9],
+    #                 ldpc_ber_list=rst_bd[10], sinr_dB=rst_bd[11])
