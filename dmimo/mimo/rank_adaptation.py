@@ -248,6 +248,8 @@ class rankAdaptation(Layer):
             u_h = tf.gather(u_h, np.arange(stream_idx), axis=4)
         elif self.precoder == 'BD':
             v, u_h = self.generate_bd_precoding(stream_idx, h_est) # calculating the svd precoder
+        elif self.precoder == 'ZF':
+            v = self.generate_zf_precoding(stream_idx, h_est) # calculating the svd precoder
 
         h_est_reshaped = tf.transpose(h_est, [0, 1, 3, 5, 6, 2, 4])
         h_est_reshaped = tf.cast(h_est_reshaped, dtype=v.dtype)
@@ -260,6 +262,73 @@ class rankAdaptation(Layer):
             h_eff = h_eff
 
         return h_eff
+
+    def generate_zf_precoding(self, num_streams, h):
+
+        # ZF precoding for MU-MIMO
+
+        num_tx_ant = h.shape[-3]
+        num_rx_ant = h.shape[2]
+        num_streams = num_streams
+        num_rx_nodes = int((num_rx_ant - self.num_BS_Ant)/self.num_UE_Ant) + 2 # treating BS as 2 UEs
+        assert num_streams <= num_tx_ant, "Number of stream should not exceed number of tx antennas"
+
+        # h has shape
+        # [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]
+
+        # Transformations to bring h in the desired shapes
+
+        # Transpose h:
+        # [num_tx, num_rx, num_rx_ant, num_tx_ant, num_ofdm_symbols, fft_size, batch_size]
+        h_pc = tf.transpose(h, [3, 1, 2, 4, 5, 6, 0])
+
+        # Flatten dims 2,3:
+        # [num_tx, num_rx_per_tx * num_rx_ant, num_tx_ant, num_ofdm_symbols, fft_size, batch_size]
+        h_pc_desired = flatten_dims(h_pc, 2, axis=1)
+
+        # Transpose:
+        # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx, num_tx_ant]
+        h_pc_desired = tf.transpose(h_pc_desired, [5, 0, 3, 4, 1, 2])
+        h_pc_desired = tf.cast(h_pc_desired, self._dtype)
+
+        h = h_pc_desired
+
+        if num_rx_ant == num_streams * num_rx_nodes:
+            # Compute pseudo inverse for precoding
+            g = tf.matmul(h, h, adjoint_b=True)
+            g = tf.matmul(h, matrix_inv(g), adjoint_a=True)
+        else:
+            # Rank adaptation support
+            h_all = []
+            for rx_node_idx in range(num_rx_nodes):
+                
+                # Update effective channels for all users
+                ant_indices = np.arange((rx_node_idx)*self.num_UE_Ant, (rx_node_idx+1)*self.num_UE_Ant)
+                
+                h_ue = tf.gather(h, indices=ant_indices, axis=-2)
+                if num_streams == num_rx_ant:
+                    # full rank
+                    h_all.append(h_ue)
+                else:  # assuming rank==1
+                    # support only one stream adaptation
+                    assert(num_streams == 1)
+                    # Calculate MRC weights
+                    g = tf.math.conj(tf.math.reduce_sum(h_ue, axis=-1, keepdims=True))
+                    # g = tf.matmul(g, tf.cast(1.0, tf.complex64)/tf.matmul(g, g, adjoint_a=True))
+                    h_eff = tf.matmul(g, h_ue, adjoint_a=True)
+                    h_all.append(h_eff)
+            # Combine h_eff for all users
+            h_zf = tf.concat(h_all, axis=-2)  # [..., num_tx_ant, num_streams_per_tx]
+
+            # Compute pseudo inverse for precoding
+            g = tf.matmul(h_zf, h_zf, adjoint_b=True)
+            g = tf.matmul(h_zf, matrix_inv(g), adjoint_a=True)
+        
+        # Normalize each column to unit power
+        norm = tf.sqrt(tf.reduce_sum(tf.abs(g)**2, axis=-2, keepdims=True))
+        g = g/tf.cast(norm, g.dtype)
+
+        return g
 
 
 

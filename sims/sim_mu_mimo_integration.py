@@ -65,6 +65,7 @@ if __name__ == "__main__":
     cfg.total_slots = 90        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
+    cfg.perfect_csi = False
     cfg.rank_adapt = True      # disable rank adaptation
     cfg.link_adapt = True      # disable link adaptation
     cfg.csi_prediction = False
@@ -72,7 +73,6 @@ if __name__ == "__main__":
     drop_idx = '3'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
-
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)

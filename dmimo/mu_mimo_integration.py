@@ -221,7 +221,7 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
     # Rank adaptation
     rank_adaptation = rankAdaptation(dmimo_chans.ns3_config.num_bs_ant, dmimo_chans.ns3_config.num_ue_ant,
                                      architecture='MU-MIMO', snrdb=rx_snr_db, fft_size=cfg.fft_size,
-                                     precoder='BD', ue_indices=cfg.ue_indices)
+                                     precoder=cfg.precoding_method, ue_indices=cfg.ue_indices)
 
     rank_feedback_report = rank_adaptation(h_est, channel_type='dMIMO')
     rank = rank_feedback_report[0]
@@ -388,7 +388,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
     node_wise_userbits = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (ns3cfg.num_rxue_sel + 1)
     node_wise_ratedbits = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (ns3cfg.num_rxue_sel + 1)
 
-    return [uncoded_ber, coded_ber], [goodbits, userbits]
     return [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits], [node_wise_goodbits, node_wise_userbits, node_wise_ratedbits, ranks_out, sinr_dB_arr]
 
 

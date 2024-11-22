@@ -170,6 +170,7 @@ class linkAdaptation(Layer):
         num_rx_nodes = int((N_r - self.num_BS_Ant)/self.num_UE_Ant) + 1
         total_num_symbols = h_est.shape[5]
 
+        h_est = h_est[0:1,...]
         H_freq = tf.squeeze(h_est)
         H_freq = tf.transpose(H_freq, perm=[3,0,1,2])
 
