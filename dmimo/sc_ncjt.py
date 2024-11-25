@@ -22,12 +22,12 @@ from dmimo.ncjt import NCJT_TxUE, NCJT_RxUE, NCJT_PostCombination
 
 class SC_NCJT(Model):
 
-    def __init__(self, cfg: SimConfig, ns3cfg: Ns3Config, **kwargs):
+    def __init__(self, cfg: SimConfig, ns3cfg: Ns3Config, dmimo_chans:dMIMOChannels , batch_size:int, **kwargs):
         super().__init__(kwargs)
 
         self.cfg = cfg
         self.ns3cfg = ns3cfg
-        self.batch_size = cfg.num_slots_p2  # batch processing for all slots in phase 2
+        self.batch_size = batch_size # cfg.num_slots_p2  # batch processing for all slots in phase 2
 
         # Update number of QAM symbols for data and LDPC params
         self.num_data_symbols = cfg.fft_size * (cfg.symbols_per_slot - len(cfg.pilot_indices))
@@ -47,12 +47,28 @@ class SC_NCJT(Model):
 
         if self.cfg.perfect_csi is False:
             # TODO: Auto generate LMMSE weights
-            filename = os.path.abspath(os.path.join(self.cfg.ns3_folder + "/../lmmse_weight.npy"))
-            self.Wf = np.load(filename)
-            self.Wf = tf.constant(tf.convert_to_tensor(self.Wf, dtype=tf.complex64))
+            ## Start of edit by Ramin. To Donald: I've put the changes here for better clarity, I know it is not clean.
+            # filename = os.path.abspath(os.path.join(self.cfg.ns3_folder + "/../lmmse_weight.npy"))
+            # self.Wf = np.load(filename)
+            # self.Wf = tf.constant(tf.convert_to_tensor(self.Wf, dtype=tf.complex64))
+            from sionna.ofdm import ResourceGrid
+            from dmimo.channel import estimate_freq_cov
+            # Dummy resource grid for inputting to the estimate_freq_cov function:
+            rg = ResourceGrid(num_ofdm_symbols=cfg.symbols_per_slot,
+                               fft_size=cfg.fft_size,
+                               subcarrier_spacing=cfg.subcarrier_spacing,
+                               num_tx=1,
+                               num_streams_per_tx=2*1,
+                               cyclic_prefix_length=cfg.cyclic_prefix_len,
+                               num_guard_carriers=[0, 0],
+                               dc_null=False,
+                               pilot_pattern="kronecker",
+                               pilot_ofdm_symbol_indices=cfg.pilot_indices)
+            self.Wf = estimate_freq_cov(dmimo_chans, rg, start_slot=cfg.start_slot_idx, total_slots=cfg.total_slots)
+            
 
         self.ncjt_tx = NCJT_TxUE(cfg)
-        self.ncjt_rx = NCJT_RxUE(cfg, lmmse_weights=self.Wf)
+        self.ncjt_rx = NCJT_RxUE(cfg, lmmse_weights=self.Wf, batch_size = self.batch_size)
         self.ncjt_combination = NCJT_PostCombination(cfg, return_LLRs=True)
 
     def call(self, dmimo_chans: dMIMOChannels):
@@ -90,6 +106,7 @@ class SC_NCJT(Model):
         y_list = []
         gains_list = []
         nvar_list = []
+        assert ry.shape[0] == self.cfg.num_slots_p2
         for ue_idx in range(0, self.ns3cfg.num_rxue_sel + 1):
             if ue_idx == 0:
                 y, gains, nvar = self.ncjt_rx(ry[:, :, :, 0:4, :])
@@ -125,11 +142,15 @@ class SC_NCJT(Model):
         return [uncoded_ber, coded_ber, coded_bler], [goodbits, userbits]
 
 
-def sim_sc_ncjt(cfg: SimConfig, ns3cfg: Ns3Config):
+def sim_sc_ncjt(cfg: SimConfig, ns3cfg: Ns3Config, phase='phase2'):
     """
     Simulation of single-cluster NCJT scenario
+    
+    :param SimConfig cfg: Configuration object
+    :param Ns3Config ns3cfg: NS3 Configuration object
+    :param str phase: Whether this is phase1 and phase1 transmission (phase1 not supported)
     """
-
+    assert phase == 'phase2', 'Only phase 2 is supported.'
     # dMIMO channels from ns-3 simulator
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
 
@@ -140,7 +161,9 @@ def sim_sc_ncjt(cfg: SimConfig, ns3cfg: Ns3Config):
         ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
 
     # Create single-cluster NCJT simulation
-    sc_ncjt = SC_NCJT(cfg, ns3cfg)
+    batch_size = cfg.num_slots_p1 if phase=='phase1' else cfg.num_slots_p2 if phase=='phase2' else -1
+
+    sc_ncjt = SC_NCJT(cfg, ns3cfg, dmimo_chans, batch_size)
 
     # Loop over channels for all transmission cycles
     total_cycles = 0

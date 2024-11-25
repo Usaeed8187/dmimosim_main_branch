@@ -1,6 +1,7 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.keras import Model
+from typing import List
 
 from sionna.mapping import Demapper
 from sionna.ofdm import ResourceGrid, LSChannelEstimator
@@ -15,7 +16,7 @@ class NCJT_RxUE(Model):
     Implement of the reception of the Alamouti scheme in the dMIMO phase.
     """
 
-    def __init__(self, cfg: SimConfig, lmmse_weights, **kwargs):
+    def __init__(self, cfg: SimConfig, lmmse_weights, batch_size , **kwargs):
         """
         Create NCJT RxUE object
         :param cfg: system settings
@@ -24,6 +25,7 @@ class NCJT_RxUE(Model):
 
         self.cfg = cfg
         self.data_syms = np.delete(np.arange(0, cfg.symbols_per_slot, 1), cfg.pilot_indices)
+        self.batch_size = batch_size
         self.demapper = Demapper("maxlog", "qam", cfg.modulation_order, hard_out=True)
         self.rg = ResourceGrid(num_ofdm_symbols=cfg.symbols_per_slot,
                                fft_size=cfg.fft_size,
@@ -39,8 +41,13 @@ class NCJT_RxUE(Model):
         if self.cfg.perfect_csi is False:
             self.ls_est = LSChannelEstimator(self.rg, interpolation_type=None)
             self.Wf = lmmse_weights
+        ## Begin edit by Ramin
+        from dmimo.channel import LMMSELinearInterp
+        lmmse_int = LMMSELinearInterp(self.rg.pilot_pattern, lmmse_weights)
+        self.lmmse_est = LSChannelEstimator(self.rg, interpolator=lmmse_int)
 
-    @tf.function(jit_compile=True)  # Enable graph execution to speed things up
+
+    # @tf.function(jit_compile=True)  # Enable graph execution to speed things up
     def call(self, ry_noisy=tf.Tensor, h_freq_ns3=None):
 
         # Using perfect CSI
@@ -70,35 +77,49 @@ class NCJT_RxUE(Model):
         nvar = tf.cast(4e-1, tf.float32)
 
         # Channel estimation
-        if self.cfg.perfect_csi is False:
-            ry_noisy = tf.transpose(ry_noisy, (0, 4, 3, 2, 1))
-            # ry_noise shape [batch_size, num_rx_ant, num_tx_ant, num_ofdm_sym, nfft]
-            h_hat = []
-            for k in range(ry_noisy.shape[0]):
-                # h_est shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, num_pilot_sym * nfft]
-                h_est, err_var = self.ls_est([ry_noisy[k:k + 1], nvar])
-                # new shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, num_pilot_sym, nfft]
-                h_est = split_dim(h_est, [-1, self.rg.num_effective_subcarriers], axis=5)
-                # average over time-domain, new shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, nfft]
-                h_est = tf.reduce_mean(h_est, axis=5)
-                # new shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, nfft/2, 2]
-                h_est = split_dim(h_est, [self.rg.num_effective_subcarriers//2, 2], axis=5)
-                # extract LS estimation for two Tx stream, new shape [..., num_tx_stream, nfft/2]
-                h_est = tf.concat((h_est[..., 0:1, :, 0], h_est[..., 1:2, :, 1]), axis=4)
-                # interpolation function
-                num_pt = 16  # fixed constant for now
-                sfrm = tf.signal.frame(h_est, num_pt, 1)  # (num_batch, num_frame, 16)
-                y_pre = h_est[..., :num_pt] @ self.Wf[:, :num_pt]
-                y_main = sfrm @ self.Wf[:, num_pt:(num_pt + 2)]
-                y_main = flatten_last_dims(y_main)
-                y_post = h_est[..., -num_pt:] @ self.Wf[:, (num_pt + 2):]
-                y_hat = tf.concat((y_pre, y_main, y_post), axis=-1)
-                h_hat.append(y_hat)
+        # if self.cfg.perfect_csi is False:
+        #     ry_noisy = tf.transpose(ry_noisy, (0, 4, 3, 2, 1))
+        #     # ry_noise shape [batch_size, num_rx_ant, num_tx_ant, num_ofdm_sym, nfft]
+        #     h_hat = []
+        #     for k in range(ry_noisy.shape[0]):
+        #         # h_est shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, num_pilot_sym * nfft]
+        #         h_est, err_var = self.ls_est([ry_noisy[k:k + 1], nvar])
+        #         # new shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, num_pilot_sym, nfft]
+        #         h_est = split_dim(h_est, [-1, self.rg.num_effective_subcarriers], axis=5)
+        #         # average over time-domain, new shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, nfft]
+        #         h_est = tf.reduce_mean(h_est, axis=5)
+        #         # new shape [num_batch, num_rx, rx_ant, num_tx, num_tx_stream, nfft/2, 2]
+        #         h_est = split_dim(h_est, [self.rg.num_effective_subcarriers//2, 2], axis=5)
+        #         # extract LS estimation for two Tx stream, new shape [..., num_tx_stream, nfft/2]
+        #         h_est = tf.concat((h_est[..., 0:1, :, 0], h_est[..., 1:2, :, 1]), axis=4)
+        #         # interpolation function
+        #         num_pt = 16  # fixed constant for now
+        #         sfrm = tf.signal.frame(h_est, num_pt, 1)  # (num_batch, num_frame, 16)
+        #         y_pre = h_est[..., :num_pt] @ self.Wf[:, :num_pt]
+        #         y_main = sfrm @ self.Wf[:, num_pt:(num_pt + 2)]
+        #         y_main = flatten_last_dims(y_main)
+        #         y_post = h_est[..., -num_pt:] @ self.Wf[:, (num_pt + 2):]
+        #         y_hat = tf.concat((y_pre, y_main, y_post), axis=-1)
+        #         h_hat.append(y_hat)
 
-            h_hat = tf.concat(h_hat, axis=0)  # [num_batch, num_rx, num_rx_ant, num_tx, num_tx_stream, nfft]
-            h_hat = tf.transpose(h_hat[:, 0], (0, 4, 2, 1, 3))  # [num_batch, nfft, 1, num_rx_ant, num_tx_stream]
-            h_hat_averaged = tf.repeat(h_hat, len(self.data_syms)//2, axis=2)
+        #     h_hat = tf.concat(h_hat, axis=0)  # [num_batch, num_rx, num_rx_ant, num_tx, num_tx_stream, nfft]
+        #     h_hat = tf.transpose(h_hat[:, 0], (0, 4, 2, 1, 3))  # [num_batch, nfft, 1, num_rx_ant, num_tx_stream]
+        #     h_hat_averaged = tf.repeat(h_hat, len(self.data_syms)//2, axis=2)
 
+        # Channel estimation
+        ry_noisy = tf.transpose(ry_noisy, (0, 4, 3, 2, 1))
+        # ry_noise shape [batch_size, num_rx_ant, num_tx_ant, num_ofdm_sym, nfft]
+        h_hat = []
+        # for k in range(ry_noisy.shape[0]):
+        for k in range(self.batch_size):
+            h_est, err_var = self.lmmse_est([ry_noisy[k:k+1], 5e-3])
+            h_hat.append(h_est[:, 0, :,  0, :, :, :])  # [1, num_rx_ant, num_tx_ant, num_ofdm_sym, nfft]
+        h_hat = tf.concat(h_hat, axis=0)
+        h_hat = tf.transpose(h_hat, (0, 4, 3, 1, 2))
+        data_syms = [i for i in range(self.cfg.symbols_per_slot) if i not in self.cfg.pilot_indices]
+        h_hat = tf.gather(h_hat, indices=data_syms, axis=2)
+        h_hat_averaged = (h_hat[:, :, ::2] + h_hat[:, :, 1::2]) / 2.0
+        
         # Reshape ry_stbc of shape [num_subframes, num_subcarriers, num_ofdm_symbols/2, 2, total_rx_antennas]
         num_ofdm_symbols = ry_stbc.shape[-3]
         total_rx_antennas = ry_stbc.shape[-2]

@@ -36,10 +36,10 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 65        # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
+    cfg.total_slots = 26 #65        # total number of slots in ns-3 channels
+    cfg.start_slot_idx = 15 #15     # starting slots (must be greater than csi_delay + 5)
 
-    cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels_medium_mobility/")
+    cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels/LowMobility")
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join(dmimo_root, "results", folder_name), exist_ok=True)

@@ -12,12 +12,16 @@ class NCJT_TxUE(Model):
     """
     Implement of the non-coherent transmission of symbols using the Alamouti scheme in the dMIMO phase.
     """
-    def __init__(self, cfg: SimConfig, **kwargs):
+    def __init__(self, cfg: SimConfig, num_clusters=1, **kwargs):
         """
         Create NCJT TxUE object
 
         :param cfg: system settings
         """
+        assertion_text = ('More than one cluster is not supported yet'+
+                          ' because the rg mapper used for pilot assignments'+
+                          ' would be inconsistent with the the rg mapper used for packing data.')
+        assert num_clusters == 1 , assertion_text
         super().__init__(trainable=False, **kwargs)
 
         self.cfg = cfg
@@ -29,7 +33,7 @@ class NCJT_TxUE(Model):
                                fft_size=cfg.fft_size,
                                subcarrier_spacing=cfg.subcarrier_spacing,
                                num_tx=1,
-                               num_streams_per_tx=2,
+                               num_streams_per_tx=2*num_clusters,
                                cyclic_prefix_length=cfg.cyclic_prefix_len,
                                num_guard_carriers=[0, 0],
                                dc_null=False,
