@@ -9,19 +9,18 @@ from .loglikelihood import HardLogLikelihood
 
 class NCJT_PostCombination(Model):
 
-    def __init__(self, cfg: SimConfig, return_LLRs=False, perSC_SNR=False, **kwargs):
+    def __init__(self, modulation_order, return_LLRs=False, perSC_SNR=False, **kwargs):
         """
         Create NCJT post detection combining
         :param cfg: system settings
         """
         super().__init__(trainable=False, **kwargs)
 
-        self.cfg = cfg
         self.return_LLRs = return_LLRs
         self.perSC_SNR = perSC_SNR
-        self.constel = Constellation('qam', self.cfg.modulation_order)
-        self.mapper = Mapper("qam", cfg.modulation_order)
-        self.demapper = Demapper("maxlog", "qam", cfg.modulation_order, hard_out=True)
+        self.constel = Constellation('qam', modulation_order)
+        self.mapper = Mapper("qam", modulation_order)
+        self.demapper = Demapper("maxlog", "qam", modulation_order, hard_out=True)
         self.signal_dims = 4
         self.loglikelihood = HardLogLikelihood(self.constel, self.signal_dims, return_bit_llrs=return_LLRs)
 

@@ -138,6 +138,81 @@ def alamouti_decode(r, h):
 
     return z, h_eq
 
+def alamouti_decode_zf_double(r:tf.Tensor, h:tf.Tensor):
+    """
+    Double cluster alamouti decoder with zero forcing of the interference at the receiver.
+    We have M_r receive antennas, for num_syms consecutive symbols. M_r has to be even (unlike the single cluster case).
+
+    :param r: received symbols. shape [..., num_syms/2, 2, M_r], where 2 is representing first or second received symbol
+    :param h: channel estimation for channels, shape  [..., num_syms/2, M_r, 4], where 4 is representing the 4 transmit antennas,
+    where the first and second two are representing the first and second cluster. 
+    :return equalized_symbols: estimated symbols, shape [..., num_syms, 2]. The last dimension represents the stream index.
+    :return gains: SNR gain of each symbol, shape [..., num_syms, 2]. The last dimension represents the stream index.
+
+    """
+    assert r.shape[-2] == 2 , 'r must have 2 consecutive slots available.'
+    assert h.shape[-1] == 4 , 'h must have 4 transmit antenna as its last dimension.'
+
+    assert r.shape[-1] == h.shape[-2], 'The shape of r does not match the shape of h'
+    assert h.shape[-1] == 4, f'Need exactly 4 transmit antennas, not {h.shape[-1]}'
+    r = tf.transpose(r, (*range(r.ndim-2),r.ndim-1,r.ndim-2)) # [..., num_syms/2, M_r, 2]
+    M_r = r.shape[-2]
+    r_r_conj = tf.concat([r[...,0:1],tf.math.conj(r[...,1:2])],axis = -1)
+    r_r_conj = tf.reshape(r_r_conj, [*r_r_conj.shape[:-2],1,2*M_r]) # [..., num_syms/2, 1, 2*M_r]
+    # r_r_conj is [r11, r21*, ... , r14, r24*] where the second index represents the receive antenna
+    h_trans = tf.transpose(h,[*tf.range(h.ndim-2),h.ndim-1,h.ndim-2]) # Need the matrix to be N_t by M_r: (..., num_syms/2, 4, M_r)
+    h_trans_ = tf.math.conj(h_trans)
+    h_trans_ = tf.concat([h_trans_[...,1:2,:],
+                          -h_trans_[...,0:1,:],
+                          h_trans_[...,3:4,:],
+                          -h_trans_[...,2:3,:]],
+                          axis = -2) # (..., num_syms/2, 4, M_r)
+    temp_list = []
+    for i in range(M_r):
+        temp_list.append(h_trans[...,i])
+        temp_list.append(h_trans_[...,i])
+    Omega = tf.stack(temp_list , axis = -1) # (..., num_syms/2, 4, 2*M_r)
+    # Omega = tf.stack([h_trans,h_trans_], axis=-2) # (..., num_syms/2, 4, 2, M_r)
+    # Omega = tf.reshape(Omega, [*Omega.shape[:-2],2*M_r]) # (..., num_syms/2, 4, 2 * M_r)
+    # Now Omega is made up of 2*M_r different omegas that each has the ΩᴴΩ = σI
+    # relation. Hence, Ω⁻¹ = 1/σ * Ωᴴ
+    def _inv(omega_matrix):
+        omega_hermitian = tf.math.conj(tf.transpose(omega_matrix,(*tf.range(omega_matrix.ndim-2),omega_matrix.ndim-1,omega_matrix.ndim-2)))
+        sigma = tf.cast(tf.math.abs(tf.matmul(omega_hermitian, omega_matrix)[...,0:1,0:1]),omega_hermitian.dtype)
+        return 1/sigma * omega_hermitian
+    def _hermitian(matrix, conjugate=True):
+        return tf.transpose(matrix, (*tf.range(matrix.ndim-2),matrix.ndim-1,matrix.ndim-2),conjugate=conjugate)
+    # We will put all the omegas in a list as follows:
+    omega_list = [ [Omega[... , 2*i : 2*i+2 , 2*j : 2*j+2 ] for j in range(M_r)] for i in range(2) ] # A nested list of dimensions 2 by 4 
+    # Now the zero forcing matrix is constructed as follows
+    Eye = tf.ones([*Omega.shape[:-2],2,2],dtype = Omega.dtype) * tf.eye(2,2,dtype=Omega.dtype)
+    zero_forcer = tf.concat([tf.concat([tf.concat([Eye,-tf.matmul(_inv(omega_list[0][2*i]),omega_list[0][2*i+1])],axis=-1),
+                                        tf.concat([-tf.matmul(_inv(omega_list[1][2*i+1]),omega_list[1][2*i]),Eye],axis=-1)],
+                                        axis=-2) for i in range(M_r//2)],axis=-2) # (..., num_syms/2, 2*M_r, 4)
+    r_without_interference = tf.matmul(r_r_conj , zero_forcer) # (..., num_syms/2, 1, 4)
+    r1 = r_without_interference[...,0:2] # (..., num_syms/2, 1, 2)
+    r2 = r_without_interference[...,2:4] # (..., num_syms/2, 1, 2)
+    new_equivalent_omega = tf.matmul(Omega, zero_forcer) # (..., num_syms/2, 4, 4)
+    # new_equivalent_omega has non-zero values on its block diagonal of block size 2 by 2
+    omega1 = new_equivalent_omega[...,0:2,0:2] # (..., num_syms/2, 2, 2)
+    omega2 = new_equivalent_omega[...,2:4,2:4] # (..., num_syms/2, 2, 2)
+    # Now we have [s1 s2] = r1 . Ω1 and [s3 s4] = r2 . Ω2
+    first_cluster_symbol = tf.matmul(r1, _inv(omega1)) # s1 and s2 (..., num_syms/2, 1, 2)
+    second_cluster_symbol = tf.matmul(r2, _inv(omega2)) # s3 and s4 (..., num_syms/2, 1, 2)
+    equalized_symbols = tf.stack([tf.reshape(first_cluster_symbol,[*first_cluster_symbol.shape[:-3],-1]),
+                                  tf.reshape(second_cluster_symbol,[*second_cluster_symbol.shape[:-3],-1])],
+                                  axis=-1) # (..., num_syms, 2)
+    noise_enhancer_cov = _hermitian(zero_forcer) @ zero_forcer # (..., num_syms/2, 2*M_r, 4)
+    cluster1_noise_enhancer_cov = _hermitian(_inv(omega1)) @ noise_enhancer_cov[...,0:2,0:2] @ _inv(omega1)
+    cluster1_noise_power = tf.stack([cluster1_noise_enhancer_cov[...,0,0],cluster1_noise_enhancer_cov[...,1,1]],axis=-1) # (..., num_syms/2, 2)
+    cluster1_noise_power = tf.reshape(cluster1_noise_power,(*cluster1_noise_power.shape[:-2],-1)) # (..., num_syms)
+    cluster2_noise_enhancer_cov = _hermitian(_inv(omega2)) @ noise_enhancer_cov[...,2:4,2:4] @ _inv(omega2)
+    cluster2_noise_power = tf.stack([cluster2_noise_enhancer_cov[...,0,0],cluster2_noise_enhancer_cov[...,1,1]],axis=-1) # (..., num_syms/2, 2)
+    cluster2_noise_power = tf.reshape(cluster2_noise_power,(*cluster2_noise_power.shape[:-2],-1)) # (..., num_syms)
+
+    both_noise_power = tf.stack([cluster1_noise_power,cluster2_noise_power],axis=-1) # (..., num_syms, 2)
+    
+    return equalized_symbols , tf.math.abs(1/both_noise_power) # both are (..., num_syms, 2)
 
 def stbc_encode_434(x):
     """
