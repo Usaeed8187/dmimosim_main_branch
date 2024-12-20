@@ -23,7 +23,6 @@ class rankAdaptation(Layer):
                 snrdb,
                 fft_size,
                 precoder,
-                ue_indices=None,
                 dtype=tf.complex64,
                 **kwargs):
         super().__init__(trainable=False, dtype=dtype, **kwargs)
@@ -31,7 +30,6 @@ class rankAdaptation(Layer):
         self.num_BS_Ant = num_bs_ant
         self.num_UE_Ant = num_ue_ant
         self.nfft = fft_size
-        self.ue_indices = ue_indices
 
         self.architecture = architecture
         
@@ -146,7 +144,7 @@ class rankAdaptation(Layer):
                 
             return rank
         
-    def generate_rank_MU_MIMO(self, h_est, channel_type):
+    def generate_rank_MU_MIMO(self, h_est, channel_type, prefixed_ranks=None):
         
         N_t = h_est.shape[4]
         N_r = h_est.shape[2]
@@ -154,15 +152,22 @@ class rankAdaptation(Layer):
         total_num_symbols = h_est.shape[5]
 
         if channel_type == 'Tx_squad':
-            max_rank = min(N_t, N_r) # Assumes that Tx Squad channel can always achieve max rank
+            num_rank_choices = min(N_t, N_r) # Assumes that Tx Squad channel can always achieve max rank
         else:
 
             if self.use_mmse_eesm_method:
+                
+                if prefixed_ranks is None:
+                    ranks = np.arange(1, min(N_t, self.num_UE_Ant, self.num_BS_Ant)+1)
+                    num_rank_choices = min(N_t, self.num_UE_Ant, self.num_BS_Ant)
+                else:
+                    ranks = np.array((prefixed_ranks))
+                    if ranks.shape == ():
+                        ranks = ranks[np.newaxis]
+                    num_rank_choices = np.size(prefixed_ranks)
+                per_rank_rate = np.zeros((num_rank_choices, num_rx_nodes))
 
-                max_rank = min(N_t, self.num_UE_Ant, self.num_BS_Ant)
-                per_rank_rate = np.zeros((max_rank, num_rx_nodes))
-
-                for rank_idx in range(1, max_rank+1):
+                for rank_idx in ranks:
 
                     h_eff = self.calculate_effective_channel(rank_idx, h_est)
 
@@ -179,7 +184,7 @@ class rankAdaptation(Layer):
                         n_var = self.cal_n_var(h_eff_per_node, snr_linear)
 
                         mmse_inv = tf.matmul(h_eff_per_node, h_eff_per_node, adjoint_b=True)/rank_idx + n_var
-                        # mmse_inv = tf.linalg.inv(mmse_inv)
+                        mmse_inv = tf.linalg.inv(mmse_inv)
 
                         per_stream_sinr = self.compute_sinr(h_eff_per_node, mmse_inv, n_var)
                         if rank_idx == 1:
@@ -195,11 +200,13 @@ class rankAdaptation(Layer):
                 
                 # TODO: Add per-user rank selection
                 min_per_rank_rate = np.min(per_rank_rate, axis=1)
+
+                sum_rate = np.sum(per_rank_rate, axis=1)
                 
                 selected_rank = np.where(min_per_rank_rate == np.max(min_per_rank_rate))[0][0] + 1
                 rate_for_selected_rank = min_per_rank_rate[selected_rank - 1]
 
-                return [selected_rank, rate_for_selected_rank]
+                return [selected_rank, rate_for_selected_rank, sum_rate]
             
             else:
 
@@ -249,7 +256,7 @@ class rankAdaptation(Layer):
         elif self.precoder == 'BD':
             v, u_h = self.generate_bd_precoding(stream_idx, h_est) # calculating the svd precoder
         elif self.precoder == 'ZF':
-            v = self.generate_zf_precoding(stream_idx, h_est) # calculating the svd precoder
+            v, _ = self.generate_zf_precoding(stream_idx, h_est) # calculating the svd precoder
 
         h_est_reshaped = tf.transpose(h_est, [0, 1, 3, 5, 6, 2, 4])
         h_est_reshaped = tf.cast(h_est_reshaped, dtype=v.dtype)
@@ -287,7 +294,7 @@ class rankAdaptation(Layer):
         h_pc_desired = flatten_dims(h_pc, 2, axis=1)
 
         # Transpose:
-        # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx, num_tx_ant]
+        # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_rx_per_tx * num_rx_ant, num_tx_ant]
         h_pc_desired = tf.transpose(h_pc_desired, [5, 0, 3, 4, 1, 2])
         h_pc_desired = tf.cast(h_pc_desired, self._dtype)
 
@@ -297,6 +304,7 @@ class rankAdaptation(Layer):
             # Compute pseudo inverse for precoding
             g = tf.matmul(h, h, adjoint_b=True)
             g = tf.matmul(h, matrix_inv(g), adjoint_a=True)
+            h_zf = None
         else:
             # Rank adaptation support
             h_all = []
@@ -318,7 +326,7 @@ class rankAdaptation(Layer):
                     h_eff = tf.matmul(g, h_ue, adjoint_a=True)
                     h_all.append(h_eff)
             # Combine h_eff for all users
-            h_zf = tf.concat(h_all, axis=-2)  # [..., num_tx_ant, num_streams_per_tx]
+            h_zf = tf.concat(h_all, axis=-2)  # [..., num_streams_per_tx, num_tx_ant]
 
             # Compute pseudo inverse for precoding
             g = tf.matmul(h_zf, h_zf, adjoint_b=True)
@@ -328,9 +336,7 @@ class rankAdaptation(Layer):
         norm = tf.sqrt(tf.reduce_sum(tf.abs(g)**2, axis=-2, keepdims=True))
         g = g/tf.cast(norm, g.dtype)
 
-        return g
-
-
+        return g, h_zf
 
     def generate_svd_precoding(self, num_streams, h):
 

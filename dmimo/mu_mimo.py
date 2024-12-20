@@ -219,7 +219,7 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
     # Rank adaptation
     rank_adaptation = rankAdaptation(dmimo_chans.ns3_config.num_bs_ant, dmimo_chans.ns3_config.num_ue_ant,
                                      architecture='MU-MIMO', snrdb=rx_snr_db, fft_size=cfg.fft_size,
-                                     precoder='BD', ue_indices=cfg.ue_indices)
+                                     precoder='BD')
 
     rank_feedback_report = rank_adaptation(h_est, channel_type='dMIMO')
     rank = rank_feedback_report[0]

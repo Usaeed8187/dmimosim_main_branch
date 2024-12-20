@@ -17,7 +17,6 @@ from dmimo.config import Ns3Config, SimConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
 from dmimo.channel import standard_rc_pred_freq_mimo
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, SLNREqualizer
-from dmimo.mimo import rankAdaptation, linkAdaptation
 from dmimo.mimo import update_node_selection
 from dmimo.utils import add_frequency_offset, add_timing_offset
 
@@ -81,8 +80,8 @@ class MU_MIMO(Model):
                                num_tx=1,
                                num_streams_per_tx=self.num_streams_per_tx,
                                cyclic_prefix_length=64,
-                               num_guard_carriers=[guard_carriers_1, guard_carriers_2],
-                               dc_null=False,
+                               num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
+                               dc_null=self.rg_csi.dc_null,
                                pilot_pattern="kronecker",
                                pilot_ofdm_symbol_indices=[2, 11])
 
@@ -167,7 +166,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
 
     # Total number of antennas in the TxSquad, always use all gNB antennas
-    num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
+    num_txs_ant = 2 * ns3cfg.num_txue_sel
 
     # Adjust guard subcarriers for channel estimation grid
     csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
@@ -181,8 +180,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
                           num_tx=1,
                           num_streams_per_tx=num_txs_ant,
                           cyclic_prefix_length=cfg.cyclic_prefix_len,
-                          num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
-                          dc_null=False,
+                          num_guard_carriers=[6, 5],
+                          dc_null=True,
                           pilot_pattern="kronecker",
                           pilot_ofdm_symbol_indices=[2, 11])
 
@@ -196,7 +195,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
     # MU-MIMO transmission (P2)
     x_rg = mu_mimo(dmimo_chans, info_bits)
 
-    return x_rg
+    return x_rg, info_bits
 
 
 def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config):
@@ -209,17 +208,17 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config):
 
     total_cycles = 0
     
-    x_rg_all_4_streams = []
-    x_rg_all_2_streams = []
+    x_rg_all = []
+    info_bits_all = []
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
-        x_rg = sim_mu_mimo(cfg, ns3cfg)
-        x_rg_all_4_streams.append(x_rg[:,:,:4,:,:])
-        x_rg_all_2_streams.append(x_rg[:,:,:2,:,:])
+        x_rg, info_bits = sim_mu_mimo(cfg, ns3cfg)
+        x_rg_all.append(x_rg)
+        info_bits_all.append(info_bits)
 
-    x_rg_all_4_streams = np.asarray(x_rg_all_4_streams)
-    x_rg_all_2_streams = np.asarray(x_rg_all_2_streams)
+    x_rg_all = np.asarray(x_rg_all)
+    info_bits_all = np.asarray(info_bits_all)
 
-    return x_rg_all_4_streams, x_rg_all_2_streams
+    return x_rg_all, info_bits_all

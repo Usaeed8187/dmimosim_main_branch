@@ -30,6 +30,7 @@ tf.get_logger().setLevel('ERROR')
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
+# Set symlinks to channel data files
 sys.path.append(os.path.join('..'))
 source_dir = '/home/data/ns3_channels_q4/'
 destination_dir = 'ns3/'
@@ -57,6 +58,22 @@ for root, dirs, files in os.walk(source_dir):
         os.symlink(source_file, destination_file)
         # print(f"Symlink created for {source_file} -> {destination_file}")
 
+script_name = sys.argv[0]
+arguments = sys.argv[1:]
+
+print(f"Script Name: {script_name}")
+print(f"Arguments: {arguments}")
+
+if len(arguments) > 0:
+    mobility = arguments[0]
+    drop_idx = arguments[1]
+    rx_ues_arr = arguments[2:]
+    rx_ues_arr = np.array(rx_ues_arr, dtype=int)
+    
+    print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
+    print("rx_ues_arr: ", rx_ues_arr)
+    print("rx_ues_arr[0]: ", rx_ues_arr[0])
+
 # Main function
 if __name__ == "__main__":
 
@@ -66,20 +83,34 @@ if __name__ == "__main__":
     cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = False
-    cfg.rank_adapt = True      # disable rank adaptation
-    cfg.link_adapt = True      # disable link adaptation
+    cfg.rank_adapt = False      # disable rank adaptation
+    cfg.link_adapt = False      # disable link adaptation
     cfg.csi_prediction = False
-    mobility = 'medium_mobility'
-    drop_idx = '3'
+    cfg.enable_ue_selection = False
+    cfg.scheduling = False
+    cfg.num_tx_ue_sel = 10
+    if arguments == []:
+        mobility = 'high_mobility'
+        drop_idx = '3'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
+    ns3cfg.num_txue_sel = cfg.num_tx_ue_sel
+    # Select Number of TxSquad and RxSquad UEs to use. If using scheduling, leave the number of UEs to 10.
+    if arguments == []:
+        if cfg.scheduling:
+            rx_ues_arr = [10]
+        else:
+            rx_ues_arr = [4]
+    if cfg.scheduling:
+        assert rx_ues_arr == [10], "If scheduling is on, rx_ues_arr should be = [10]"
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)
     print("Using channels in {}".format(folder_name))    
 
-    # rx_ues_arr = [1,2,4,6]
-    rx_ues_arr = [1]    
+    #############################################
+    # Testing
+    #############################################
 
     ber = np.zeros(np.size(rx_ues_arr ))
     ldpc_ber = np.zeros(np.size(rx_ues_arr ))
@@ -95,104 +126,70 @@ if __name__ == "__main__":
     sinr_dB = []
     phase_1_ue_ber = []
 
-    #############################################
-    # Testing with rank and link adaptation
-    #############################################
-
     for ue_arr_idx in range(np.size(rx_ues_arr)):
-
+        
         cfg.num_rx_ue_sel = rx_ues_arr[ue_arr_idx]
         ns3cfg.num_rxue_sel = cfg.num_rx_ue_sel
+
+        if not (cfg.rank_adapt and cfg.rank_adapt):
+            
+            num_rx_antennas = rx_ues_arr[ue_arr_idx] * 2 + 4
+
+            # Test case 1:  rank 2 transmission, assuming 2 antennas per UE and treating BS as two UEs
+            # cfg.num_tx_streams = num_rx_antennas
+            # cfg.ue_ranks = [2] # same rank for all UEs
+
+            # Test case 2: rank 1 transmission, assuming 2 antennas per UE and treating BS as two UEs
+            cfg.num_tx_streams = num_rx_antennas // 2
+            cfg.ue_ranks = [1]  # same rank for all UEs
+
+            # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
+            cfg.modulation_order = 4
+        
+        if not cfg.scheduling:
+            tx_ue_mask = np.ones(cfg.num_tx_ue_sel)
+            rx_ue_mask = np.ones(cfg.num_rx_ue_sel)
+            ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+
         cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
         cfg.precoding_method = "ZF"
-        rst_bd = sim_mu_mimo_all(cfg, ns3cfg)
-        ber[ue_arr_idx] = rst_bd[0]
-        ldpc_ber[ue_arr_idx] = rst_bd[1]
-        goodput[ue_arr_idx] = rst_bd[2]
-        throughput[ue_arr_idx] = rst_bd[3]
-        bitrate[ue_arr_idx] = rst_bd[4]
-        phase_1_ue_ber_tmp = rst_bd[12]
+        rst_zf = sim_mu_mimo_all(cfg, ns3cfg)
+        ber[ue_arr_idx] = rst_zf[0]
+        ldpc_ber[ue_arr_idx] = rst_zf[1]
+        goodput[ue_arr_idx] = rst_zf[2]
+        throughput[ue_arr_idx] = rst_zf[3]
+        bitrate[ue_arr_idx] = rst_zf[4]
         
-        nodewise_goodput.append(rst_bd[5])
-        nodewise_throughput.append(rst_bd[6])
-        nodewise_bitrate.append(rst_bd[7])
-        ranks.append(rst_bd[8])
-        uncoded_ber_list.append(rst_bd[9])
-        ldpc_ber_list.append(rst_bd[10])
-        if rst_bd[11] is not None:
-            sinr_dB.append(np.concatenate(rst_bd[11]))
-        phase_1_ue_ber.append(phase_1_ue_ber_tmp)
+        nodewise_goodput.append(rst_zf[5])
+        nodewise_throughput.append(rst_zf[6])
+        nodewise_bitrate.append(rst_zf[7])
+        ranks.append(rst_zf[8])
+        uncoded_ber_list.append(rst_zf[9])
+        ldpc_ber_list.append(rst_zf[10])
+        if rst_zf[11] is not None:
+            sinr_dB.append(np.concatenate(rst_zf[11]))
+
+        folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
+        os.makedirs(folder_path, exist_ok=True)
 
         if cfg.csi_prediction:
-            np.savez("results/channels_multiple_mu_mimo/results/{}/mu_mimo_results_UE_{}_pred.npz".format(folder_name, rx_ues_arr[ue_arr_idx]),
-                    ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_bd[5],
-                    nodewise_throughput=rst_bd[6], nodewise_bitrate=rst_bd[7], ranks=rst_bd[8], uncoded_ber_list=rst_bd[9],
-                    ldpc_ber_list=rst_bd[10], sinr_dB=rst_bd[11])
+            
+            if cfg.scheduling:
+                file_path = os.path.join(folder_path, "mu_mimo_results_scheduling_prediction.npz")
+            else:
+                file_path = os.path.join(folder_path, "mu_mimo_results_UE_{}_prediction.npz".format(rx_ues_arr[ue_arr_idx]))
+            np.savez(file_path,
+                    ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
+                    nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
+                    ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11])
         else:
-            np.savez("results/channels_multiple_mu_mimo/results/{}/mu_mimo_results_UE_{}.npz".format(folder_name, rx_ues_arr[ue_arr_idx]),
-                    ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_bd[5],
-                    nodewise_throughput=rst_bd[6], nodewise_bitrate=rst_bd[7], ranks=rst_bd[8], uncoded_ber_list=rst_bd[9],
-                    ldpc_ber_list=rst_bd[10], sinr_dB=rst_bd[11])
+            if cfg.scheduling:
+                file_path = os.path.join(folder_path, "mu_mimo_results_scheduling.npz")
+            else:
+                file_path = os.path.join(folder_path, "mu_mimo_results_UE_{}.npz".format(rx_ues_arr[ue_arr_idx]))
 
-    #############################################
-    # Testing without rank and link adaptation
-    #############################################
-
-    # for ue_arr_idx in range(np.size(rx_ues_arr)):
-
-    #     num_rx_antennas = rx_ues_arr[ue_arr_idx] * 2 + 4
-
-    #     # Test case 1:  no rank adaptation, assuming 2 antennas per UE and treating BS as two UEs
-    #     cfg.num_tx_streams = num_rx_antennas
-    #     ns3cfg.num_rxue_sel = (num_rx_antennas - 4) // 2
-    #     cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
-    #     cfg.ue_ranks = [2]  # same rank for all UEs
-
-
-    #     # Test case 2: manual rank 1 adaption, assuming 2 antennas per UE and treating BS as two UEs
-    #     # cfg.num_tx_streams = num_rx_antennas // 2
-    #     # ns3cfg.num_rxue_sel = (num_rx_antennas - 4) // 2
-    #     # cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
-    #     # cfg.ue_ranks = [1]  # same rank for all UEs
-
-    #     # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
-    #     modulation_orders = [4]
-    #     num_modulations = len(modulation_orders)
-    #     ber = np.zeros((2, num_modulations))
-    #     ldpc_ber = np.zeros((2, num_modulations))
-    #     goodput = np.zeros((2, num_modulations))
-    #     throughput = np.zeros((2, num_modulations))
-
-    #     cfg.modulation_order = modulation_orders[k]
-
-    #     # cfg.precoding_method = "BD"
-    #     cfg.precoding_method = "ZF"
-    #     rst_zf = sim_mu_mimo_all(cfg, ns3cfg)
-    #     ber[ue_arr_idx] = rst_bd[0]
-    #     ldpc_ber[ue_arr_idx] = rst_bd[1]
-    #     goodput[ue_arr_idx] = rst_bd[2]
-    #     throughput[ue_arr_idx] = rst_bd[3]
-    #     bitrate[ue_arr_idx] = rst_bd[4]
-    #     phase_1_ue_ber_tmp = rst_bd[12]
-
-    #     nodewise_goodput.append(rst_bd[5])
-    #     nodewise_throughput.append(rst_bd[6])
-    #     nodewise_bitrate.append(rst_bd[7])
-    #     ranks.append(rst_bd[8])
-    #     uncoded_ber_list.append(rst_bd[9])
-    #     ldpc_ber_list.append(rst_bd[10])
-    #     if rst_bd[11] is not None:
-    #         sinr_dB.append(np.concatenate(rst_bd[11]))
-    #     phase_1_ue_ber.append(phase_1_ue_ber_tmp)
-
-    #     if cfg.csi_prediction:
-    #         np.savez("results/channels_multiple_mu_mimo/results/{}/mu_mimo_results_UE_{}_pred.npz".format(folder_name, rx_ues_arr[ue_arr_idx]),
-    #                 ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_bd[5],
-    #                 nodewise_throughput=rst_bd[6], nodewise_bitrate=rst_bd[7], ranks=rst_bd[8], uncoded_ber_list=rst_bd[9],
-    #                 ldpc_ber_list=rst_bd[10], sinr_dB=rst_bd[11])
-    #     else:
-    #         np.savez("results/channels_multiple_mu_mimo/results/{}/mu_mimo_results_UE_{}.npz".format(folder_name, rx_ues_arr[ue_arr_idx]),
-    #                 ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_bd[5],
-    #                 nodewise_throughput=rst_bd[6], nodewise_bitrate=rst_bd[7], ranks=rst_bd[8], uncoded_ber_list=rst_bd[9],
-    #                 ldpc_ber_list=rst_bd[10], sinr_dB=rst_bd[11])
+            np.savez(file_path,
+                    ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
+                    nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], 
+                    ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11])

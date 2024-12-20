@@ -88,7 +88,7 @@ class ZFPrecoder(Layer):
         # [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]
         num_tx, num_streams_per_tx = x.shape[1:3]
         num_rx, num_rx_ant = h.shape[1:3]
-        assert num_streams_per_tx <= num_rx * num_rx_ant, "Invalid number of transmitted streams"
+        assert num_streams_per_tx <= tf.size(ue_indices), "Invalid number of transmitted streams"
 
         # Transformations to bring h and x in the desired shapes
 
@@ -96,21 +96,21 @@ class ZFPrecoder(Layer):
         # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx]
         x_precoded = tf.transpose(x, [0, 1, 3, 4, 2])
         x_precoded = tf.cast(x_precoded, self._dtype)
-
+    
         # Transpose h:
         # [num_tx, num_rx, num_rx_ant, num_tx_ant, num_ofdm_symbols, fft_size, batch_size]
-        h_pc = tf.transpose(h, [3, 1, 2, 4, 5, 6, 0])
+        h_pc_desired = tf.transpose(h, [3, 1, 2, 4, 5, 6, 0])
 
         # Gather desired channel for precoding:
         # [num_tx, num_rx_per_tx, num_rx_ant, num_tx_ant, num_ofdm_symbols, fft_size, batch_size]
-        h_pc_desired = tf.gather(h_pc, self._stream_management.precoding_ind, axis=1, batch_dims=1)
+        # h_pc_desired = tf.gather(h_pc, tf.reshape(ue_indices, (1,-1)), axis=2, batch_dims=1)
 
         # Flatten dims 2,3:
         # [num_tx, num_rx_per_tx * num_rx_ant, num_tx_ant, num_ofdm_symbols, fft_size, batch_size]
         h_pc_desired = flatten_dims(h_pc_desired, 2, axis=1)
 
         # Transpose:
-        # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx, num_tx_ant]
+        # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_rx_ant, num_tx_ant]
         h_pc_desired = tf.transpose(h_pc_desired, [5, 0, 3, 4, 1, 2])
         h_pc_desired = tf.cast(h_pc_desired, self._dtype)
 

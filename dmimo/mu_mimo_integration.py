@@ -10,7 +10,7 @@ from sionna.fec.ldpc.decoding import LDPC5GDecoder
 from sionna.fec.interleaving import RowColumnInterleaver, Deinterleaver
 
 from sionna.mapping import Mapper, Demapper
-from sionna.utils import BinarySource
+from sionna.utils import BinarySource, flatten_dims
 from sionna.utils.metrics import compute_ber, compute_bler
 
 from dmimo.config import Ns3Config, SimConfig
@@ -18,6 +18,7 @@ from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
 from dmimo.channel import standard_rc_pred_freq_mimo
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, SLNREqualizer
 from dmimo.mimo import rankAdaptation, linkAdaptation
+from dmimo.mimo import MUMIMOScheduler
 from dmimo.mimo import update_node_selection
 from dmimo.utils import add_frequency_offset, add_timing_offset, compute_UE_wise_BER, compute_UE_wise_SER
 
@@ -51,7 +52,7 @@ class MU_MIMO(Model):
             self.num_rx_ue = self.num_rxs_ant // self.num_ue_ant
         else:
             # rank adaptation support
-            self.num_rxs_ant = np.sum([len(val) for val in cfg.ue_indices])
+            self.num_rxs_ant = np.sum([len(val) for val in cfg.scheduled_rx_ue_indices])
             self.num_rx_ue = self.num_rxs_ant // self.num_ue_ant
             if cfg.ue_ranks is None:
                 cfg.ue_ranks = self.num_ue_ant  # no rank adaptation
@@ -151,20 +152,17 @@ class MU_MIMO(Model):
         x = self.mapper(d)
         x_rg = self.rg_mapper(x)
 
-        # [batch_size, num_rx, num_rxs_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
-        h_freq_csi = h_freq_csi[:, :, :self.num_rxs_ant, :, :, :, :]
-
         # [batch_size, num_rx_ue, num_ue_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
-        h_freq_csi = tf.reshape(h_freq_csi, (-1, self.num_rx_ue, self.num_ue_ant, *h_freq_csi.shape[3:]))
+        h_freq_csi = tf.gather(h_freq_csi, tf.reshape(self.cfg.scheduled_rx_ue_indices, (1,-1)), axis=2, batch_dims=1)
 
         # apply precoding to OFDM grids
         if self.cfg.precoding_method == "ZF":
-            x_precoded, g = self.zf_precoder([x_rg, h_freq_csi, self.cfg.ue_indices, self.cfg.ue_ranks])
+            x_precoded, g = self.zf_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "BD":
-            x_precoded, g = self.bd_precoder([x_rg, h_freq_csi, self.cfg.ue_indices, self.cfg.ue_ranks])
+            x_precoded, g = self.bd_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "SLNR":
             nvar = 5e-2  # TODO optimize value
-            x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
+            x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi, nvar, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         else:
             ValueError("unsupported precoding method")
 
@@ -178,7 +176,8 @@ class MU_MIMO(Model):
         y, _ = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
 
         # make proper shape
-        y = y[:, :, :self.num_rxs_ant, :, :]
+        # y = y[:, :, :self.num_rxs_ant, :, :]
+        y = tf.gather(y, tf.reshape(self.cfg.scheduled_rx_ue_indices, [-1]), axis=2)
         y = tf.reshape(y, (self.batch_size, self.num_rx_ue, self.num_ue_ant, 14, -1))
 
         if self.cfg.precoding_method == "BD":
@@ -221,7 +220,7 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
     # Rank adaptation
     rank_adaptation = rankAdaptation(dmimo_chans.ns3_config.num_bs_ant, dmimo_chans.ns3_config.num_ue_ant,
                                      architecture='MU-MIMO', snrdb=rx_snr_db, fft_size=cfg.fft_size,
-                                     precoder=cfg.precoding_method, ue_indices=cfg.ue_indices)
+                                     precoder=cfg.precoding_method)
 
     rank_feedback_report = rank_adaptation(h_est, channel_type='dMIMO')
     rank = rank_feedback_report[0]
@@ -261,12 +260,18 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
     # dMIMO channels from ns-3 simulator
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
 
-    # Update UE selection
-    if cfg.enable_ue_selection is True:
-        ns3cfg.reset_ue_selection()
-        tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
-        ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
-        cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
+    # Reset UE selection
+    ns3cfg.reset_ue_selection()
+    tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
+    ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+    # cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
+    
+    # if cfg.scheduling:
+    # if cfg.enable_ue_selection is True:
+    #     ns3cfg.reset_ue_selection()
+    #     tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
+    #     ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+    #     cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
     # Total number of antennas in the TxSquad, always use all gNB antennas
     num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
@@ -309,14 +314,75 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
                                                            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                            cfo_vals=cfg.random_cfo_vals,
                                                            sto_vals=cfg.random_sto_vals)
-
-    # Rank and link adaptation
     _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                 batch_size=cfg.num_slots_p2)
+
+
+    ######################################################
+    # Testing scheduler with no quantization for now
+    ######################################################
+
+    if cfg.scheduling:
+        # Get effective channel estimate after MRC combining at the RxSquad Nodes
+        rank_adaptation = rankAdaptation(dmimo_chans.ns3_config.num_bs_ant, dmimo_chans.ns3_config.num_ue_ant,
+                                        architecture='MU-MIMO', snrdb=rx_snr_db, fft_size=cfg.fft_size,
+                                        precoder=cfg.precoding_method)
+        _, h_eff = rank_adaptation.generate_zf_precoding(cfg.ue_ranks[0], h_freq_csi) 
+
+        # Get right singular vectors and singular values of effective channels 
+        num_rx_nodes = cfg.ue_indices.shape[0]-1
+        h_reconstructed = np.zeros((h_freq_csi.shape), dtype=complex)
+        h_reconstructed = h_reconstructed[:, :, :h_eff.shape[-2], ...]
+        for rx_node_idx in range(num_rx_nodes):
+
+            if rx_node_idx == 0:
+                num_streams = cfg.ue_ranks[0]*2
+                stream_idx = np.arange(cfg.ue_ranks[0]*2)
+            else:
+                num_streams = cfg.ue_ranks[0]
+                stream_idx = np.arange((rx_node_idx-1) * cfg.ue_ranks[0] + cfg.ue_ranks[0]*2, rx_node_idx * cfg.ue_ranks[0] + cfg.ue_ranks[0]*2)
+
+            curr_h_eff = tf.gather(h_eff, stream_idx, axis=-2)
+
+            s, _, Vh = tf.linalg.svd(curr_h_eff, full_matrices=False)
+            s = tf.cast(s, Vh.dtype)
+            s = tf.expand_dims(s, axis=-2)
+
+            curr_h_reconstructed = Vh * s
+            curr_h_reconstructed = curr_h_reconstructed[:,:,:,tf.newaxis,...]
+
+            h_reconstructed[:, :, stream_idx, ...] = tf.transpose(curr_h_reconstructed, [0, 1, 6, 3, 5, 2, 4])
+        
+        h_reconstructed = tf.convert_to_tensor(h_reconstructed)
+
+        # Scheduling
+        mu_mimo_scheduler = MUMIMOScheduler(rx_snr_db)
+        scheduled_rx_nodes = mu_mimo_scheduler(h_reconstructed)
+        scheduled_rx_UEs = scheduled_rx_nodes[1:] - 1 # Assuming gNB was scheduled
+        
+        # Updating system parameters based on scheduling    
+        # rx_ue_mask = np.zeros(cfg.num_rx_ue_sel)
+        # rx_ue_mask[scheduled_rx_UEs] = 1
+        # tx_ue_mask = np.ones(cfg.num_tx_ue_sel)
+        # ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+
+        ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
+        for node in scheduled_rx_nodes[1:]:
+            start = (node - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+            end = node * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+            ue_indices.append(list(np.arange(start, end)))
+        cfg.scheduled_rx_ue_indices = np.array(ue_indices)
+        cfg.num_scheduled_ues = scheduled_rx_UEs.size
+        cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
+    else:
+        cfg.scheduled_rx_ue_indices = cfg.ue_indices
+        cfg.num_scheduled_ues = cfg.scheduled_rx_ue_indices.shape[0]-2
+        cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
+    
+    # Rank and link adaptation
     rank_feedback_report, n_var, mcs_feedback_report = \
         do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
 
-    
     if cfg.rank_adapt and cfg.link_adapt:
         # Update rank and total number of streams
         rank = rank_feedback_report[0]
@@ -400,19 +466,49 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config):
     """
 
     total_cycles = 0
-    uncoded_ber, ldpc_ber, goodput, throughput = 0, 0, 0, 0
+    uncoded_ber, ldpc_ber, goodput, throughput, bitrate = 0, 0, 0, 0, 0
+    nodewise_goodput = []
+    nodewise_throughput = []
+    nodewise_bitrate = []
+    ranks_list = []
+    ldpc_ber_list = []
+    uncoded_ber_list = []
+    sinr_dB_list = []
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
+        
+        print("first_slot_idx: ", first_slot_idx, "\n")
+
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
-        bers, bits = sim_mu_mimo(cfg, ns3cfg)
+        bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg)
+        
         uncoded_ber += bers[0]
         ldpc_ber += bers[1]
+        uncoded_ber_list.append(bers[0])
+        ldpc_ber_list.append(bers[1])
+        
         goodput += bits[0]
         throughput += bits[1]
+        bitrate += bits[2]
+        
+        nodewise_goodput.append(additional_KPIs[0])
+        nodewise_throughput.append(additional_KPIs[1])
+        nodewise_bitrate.append(additional_KPIs[2])
+        ranks_list.append(additional_KPIs[3])
+        sinr_dB_list.append(additional_KPIs[4])
 
     slot_time = cfg.slot_duration  # default 1ms subframe/slot duration
     overhead = cfg.num_slots_p2/(cfg.num_slots_p1 + cfg.num_slots_p2)
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
-    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput]
+    nodewise_goodput = np.concatenate(nodewise_goodput) / (slot_time * 1e6) * overhead  # Mbps
+    nodewise_throughput = np.concatenate(nodewise_throughput) / (slot_time * 1e6) * overhead  # Mbps
+    nodewise_bitrate = np.concatenate(nodewise_bitrate) / (slot_time * 1e6) * overhead  # Mbps
+    ranks = np.array(ranks_list).flatten()
+    if sinr_dB_list[0] is not None:
+        sinr_dB = np.concatenate(sinr_dB_list)
+    else:
+        sinr_dB = None
+
+    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate, nodewise_goodput, nodewise_throughput, nodewise_bitrate, ranks, uncoded_ber_list, ldpc_ber_list, sinr_dB]

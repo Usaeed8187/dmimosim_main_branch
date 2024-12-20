@@ -31,6 +31,8 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._random_sto_vals = [0.0]                               # random CFO values in Hz (temporary values for simulation)
         self._CSI_feedback_method = '5G'                            # which CSI feedback method to use. choices: '5G', 'RVQ'
         self._phase_1_precoding_method = "5G_max_min_demo"          # precoding method for phase 1: 'ZF', '5G_max_min_demo'
+        self._scheduling = False                                    # Turn scheduling on or off for phase 2 of MU-MIMO architecture
+        self._scheduled_rx_ue_indices = None                        # Scheduled UE antennas indices for MU-MIMO precoding
         super().__init__(**kwargs)
 
     @property
@@ -224,3 +226,19 @@ class SimConfig(CarrierConfig, MCSConfig):
     @phase_1_precoding_method.setter
     def phase_1_precoding_method(self, val):
         self._phase_1_precoding_method = val
+
+    @property
+    def scheduling(self):
+        return self._scheduling
+
+    @scheduling.setter
+    def scheduling(self, val):
+        self._scheduling = val
+
+    @property
+    def scheduled_rx_ue_indices(self):
+        return self._scheduled_rx_ue_indices
+
+    @scheduled_rx_ue_indices.setter
+    def scheduled_rx_ue_indices(self, val):
+        self._scheduled_rx_ue_indices = val

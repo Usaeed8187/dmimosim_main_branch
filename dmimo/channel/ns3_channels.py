@@ -175,7 +175,7 @@ class LoadNs3Channel:
             tx_pwr_dbm = np.concatenate((np.repeat(tx_pwr_bs, self._cfg.num_bs),
                                          np.repeat(tx_pwr_ue, self._cfg.num_txue_sel)))
             rx_ant_gain = np.concatenate((np.repeat(self._cfg.bs_ant_gain, self._cfg.num_bs),
-                                         np.repeat(self._cfg.ue_ant_gain, self._cfg.num_rxue)))
+                                         np.repeat(self._cfg.ue_ant_gain, self._cfg.num_rxue_sel)))
             # new shape [num_rxue+1,num_txue+1,num_ofdm_sym]
             rx_pwr_path = np.reshape(tx_pwr_dbm, (1, -1, 1)) + np.reshape(rx_ant_gain, (-1, 1, 1)) - self._Ldm
 

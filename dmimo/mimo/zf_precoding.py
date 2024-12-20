@@ -116,6 +116,9 @@ def mumimo_zf_precoder(x, h, ue_indices, ue_ranks, return_precoding_matrix=False
     assert num_user_ant == total_rx_ant, "number Rx antennas must match"
     assert (num_user_streams <= total_tx_ant) and (num_user_streams <= total_rx_ant), \
         "total number of streams must be less than total number of Tx/Rx antennas"
+    
+
+    arr_indices = tf.reshape(tf.range(num_user_ant), (-1, 2))
 
     if total_rx_ant == num_user_streams:
         # Compute pseudo inverse for precoding
@@ -126,8 +129,8 @@ def mumimo_zf_precoder(x, h, ue_indices, ue_ranks, return_precoding_matrix=False
         h_all = []
         for k in range(num_user):
             # Update effective channels for all users
-            num_rx_ant = len(ue_indices[k])  # number of antennas for user k
-            h_ue = tf.gather(h, indices=ue_indices[k], axis=-2)
+            num_rx_ant = len(arr_indices[k])  # number of antennas for user k
+            h_ue = tf.gather(h, indices=arr_indices[k], axis=-2)
             if ue_ranks[k] == num_rx_ant:
                 # full rank
                 h_all.append(h_ue)
