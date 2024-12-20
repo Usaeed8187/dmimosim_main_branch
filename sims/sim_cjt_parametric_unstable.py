@@ -6,10 +6,10 @@ NOTE: This file is unstable:
 DO NOT pass "su-mimo" as dmimo_mode 
 DO NOT enable scheduling by passing --enable_scheduling
 
-Run python sims/sim_cjt_parametric_(unstable).py -h to see the list of parameters you can pass as arguments.
+Run python sims/sim_cjt_parametric_unstable.py -h to see the list of parameters you can pass as arguments.
 
 Example usage:
-python sims/sim_cjt_parametric_(unstable).py 
+python sims/sim_cjt_parametric_unstable.py 
 --chan_dir ~/Projects/dMIMO/temp/dmimosim/ns3/channels/LowMobility 
 --output_file_name ~/Projects/dMIMO/temp/dmimosim/results/new_folder/my_test_output.npz 
 --dmimo_mode "mu-mimo"  
