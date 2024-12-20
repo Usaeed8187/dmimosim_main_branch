@@ -153,7 +153,7 @@ class MU_MIMO(Model):
         x_rg = self.rg_mapper(x)
 
         # [batch_size, num_rx_ue, num_ue_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
-        h_freq_csi = tf.gather(h_freq_csi, tf.reshape(self.cfg.scheduled_rx_ue_indices, (1,-1)), axis=2, batch_dims=1)
+        # h_freq_csi = tf.gather(h_freq_csi, tf.reshape(self.cfg.scheduled_rx_ue_indices, (1,-1)), axis=2, batch_dims=1)
 
         # apply precoding to OFDM grids
         if self.cfg.precoding_method == "ZF":
@@ -377,9 +377,11 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
     else:
         cfg.scheduled_rx_ue_indices = cfg.ue_indices
         cfg.num_scheduled_ues = cfg.scheduled_rx_ue_indices.shape[0]-2
-        cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
+        if not cfg.rank_adapt:
+            cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
     
     # Rank and link adaptation
+    h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (1,-1)), axis=2, batch_dims=1)
     rank_feedback_report, n_var, mcs_feedback_report = \
         do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
 
@@ -387,7 +389,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
         # Update rank and total number of streams
         rank = rank_feedback_report[0]
         cfg.ue_ranks = [rank]
-        cfg.num_tx_streams = rank * (ns3cfg.num_rxue_sel + 2)  # treat BS as two UEs
+        cfg.num_tx_streams = rank * (cfg.num_scheduled_ues + 2)  # treat BS as two UEs
 
         qam_order_arr = mcs_feedback_report[0]
         code_rate_arr = mcs_feedback_report[1]
@@ -404,7 +406,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
 
         print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
         print("\n", "Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
-    ranks_out = int(cfg.num_tx_streams / (ns3cfg.num_rxue_sel+2))
+    ranks_out = int(cfg.num_tx_streams / (cfg.num_scheduled_ues+2))
 
     # Create MU-MIMO simulation
     mu_mimo = MU_MIMO(cfg, rg_csi)
@@ -450,9 +452,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
     userbits = (1.0 - coded_bler) * mu_mimo.num_bits_per_frame
     ratedbits = (1.0 - uncoded_ser) * mu_mimo.num_uncoded_bits_per_frame
 
-    node_wise_goodbits = (1.0 - node_wise_ber) * mu_mimo.num_bits_per_frame / (ns3cfg.num_rxue_sel + 1)
-    node_wise_userbits = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (ns3cfg.num_rxue_sel + 1)
-    node_wise_ratedbits = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (ns3cfg.num_rxue_sel + 1)
+    node_wise_goodbits = (1.0 - node_wise_ber) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
+    node_wise_userbits = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
+    node_wise_ratedbits = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
     return [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits], [node_wise_goodbits, node_wise_userbits, node_wise_ratedbits, ranks_out, sinr_dB_arr]
 

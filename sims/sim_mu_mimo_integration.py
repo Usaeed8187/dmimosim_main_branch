@@ -83,8 +83,8 @@ if __name__ == "__main__":
     cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = False
-    cfg.rank_adapt = False      # disable rank adaptation
-    cfg.link_adapt = False      # disable link adaptation
+    cfg.rank_adapt = True      # enable/disable rank adaptation
+    cfg.link_adapt = True      # enable/disable link adaptation
     cfg.csi_prediction = False
     cfg.enable_ue_selection = False
     cfg.scheduling = False
