@@ -79,15 +79,15 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 90        # total number of slots in ns-3 channels
+    cfg.total_slots = 16        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = False
-    cfg.rank_adapt = True      # enable/disable rank adaptation
-    cfg.link_adapt = True      # enable/disable link adaptation
+    cfg.rank_adapt = False      # enable/disable rank adaptation
+    cfg.link_adapt = False      # enable/disable link adaptation
     cfg.csi_prediction = False
     cfg.enable_ue_selection = False
-    cfg.scheduling = False
+    cfg.scheduling = True
     cfg.num_tx_ue_sel = 10
     if arguments == []:
         mobility = 'high_mobility'
@@ -131,20 +131,20 @@ if __name__ == "__main__":
         cfg.num_rx_ue_sel = rx_ues_arr[ue_arr_idx]
         ns3cfg.num_rxue_sel = cfg.num_rx_ue_sel
 
-        if not (cfg.rank_adapt and cfg.rank_adapt):
+        assert cfg.rank_adapt == False, "Current MU-MIMO code assumes fixed ranks."
             
-            num_rx_antennas = rx_ues_arr[ue_arr_idx] * 2 + 4
+        num_rx_antennas = rx_ues_arr[ue_arr_idx] * 2 + 4
 
-            # Test case 1:  rank 2 transmission, assuming 2 antennas per UE and treating BS as two UEs
-            # cfg.num_tx_streams = num_rx_antennas
-            # cfg.ue_ranks = [2] # same rank for all UEs
+        # Test case 1:  rank 2 transmission, assuming 2 antennas per UE and treating BS as two UEs
+        # cfg.num_tx_streams = num_rx_antennas
+        # cfg.ue_ranks = [2] # same rank for all UEs
 
-            # Test case 2: rank 1 transmission, assuming 2 antennas per UE and treating BS as two UEs
-            cfg.num_tx_streams = num_rx_antennas // 2
-            cfg.ue_ranks = [1]  # same rank for all UEs
+        # Test case 2: rank 1 transmission, assuming 2 antennas per UE and treating BS as two UEs
+        cfg.num_tx_streams = num_rx_antennas // 2
+        cfg.ue_ranks = [1]  # same rank for all UEs
 
-            # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
-            cfg.modulation_order = 4
+        # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
+        cfg.modulation_order = 4
         
         if not cfg.scheduling:
             tx_ue_mask = np.ones(cfg.num_tx_ue_sel)

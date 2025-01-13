@@ -64,13 +64,13 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 90        # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
-    cfg.csi_delay = 4           # feedback delay in number of subframe
-    cfg.perfect_csi = False
-    cfg.rank_adapt = False      # disable rank adaptation
-    cfg.link_adapt = False      # disable link adaptation
-    cfg.csi_prediction = False
+    # cfg.total_slots = 90        # total number of slots in ns-3 channels
+    # cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
+    # cfg.csi_delay = 4           # feedback delay in number of subframe
+    # cfg.perfect_csi = False
+    # cfg.rank_adapt = False      # disable rank adaptation
+    # cfg.link_adapt = False      # disable link adaptation
+    # cfg.csi_prediction = False
     cfg.receiver = 'PIC'      # 'LMMSE', 'PIC'
     cfg.num_tx_streams = 4
     mcsconfig = MCSConfig()

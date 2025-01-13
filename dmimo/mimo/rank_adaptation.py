@@ -184,7 +184,7 @@ class rankAdaptation(Layer):
                         n_var = self.cal_n_var(h_eff_per_node, snr_linear)
 
                         mmse_inv = tf.matmul(h_eff_per_node, h_eff_per_node, adjoint_b=True)/rank_idx + n_var
-                        mmse_inv = tf.linalg.inv(mmse_inv)
+                        # mmse_inv = tf.linalg.inv(mmse_inv)
 
                         per_stream_sinr = self.compute_sinr(h_eff_per_node, mmse_inv, n_var)
                         if rank_idx == 1:
