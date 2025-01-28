@@ -232,7 +232,7 @@ def sim_mc_ncjt(cfg: SimConfig, ns3cfg: Ns3Config,):
 
     # Create single-cluster NCJT simulation
     cluster_ant_list = [list(range(8)), list(range(8,24))]
-    mod_order_list = [4,4]
+    mod_order_list = [6,6] # [4,4]
     mc_ncjt = MC_NCJT(cfg, ns3cfg, cluster_ant_list, mod_order_list, dmimo_chans)
 
     # Loop over channels for all transmission cycles 

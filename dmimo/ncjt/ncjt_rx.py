@@ -119,7 +119,30 @@ class NCJT_RxUE(Model):
         data_syms = [i for i in range(self.cfg.symbols_per_slot) if i not in self.cfg.pilot_indices]
         h_hat = tf.gather(h_hat, indices=data_syms, axis=2)
         h_hat_averaged = (h_hat[:, :, ::2] + h_hat[:, :, 1::2]) / 2.0
-        
+
+        # Okay here's the deal with the pilots:
+        # pp = self.rg.pilot_pattern is an object which has two attributes important to us:
+        # pp.mask and pp.pilots. 
+        # pp.mask has shape [num_tx, num_streams, num_ofdm_symbols, num_subcarriers] and shows the positions of pilots and nulls
+        # pp.pilots has shape [num_tx, num_streams, num_pilot_symbols * num_subcarriers]
+        # Note that num_streams in our case is 1.
+        # You need to first reshape pp.pilots: pp_r = tf.reshape(pp.pilots,[num_tx, num_streams, num_pilot_symbols, num_subcarriers])
+
+        # Side note: With the Kronecker style of pilot pattern, at every subcarrier we have a QPSK modulated
+        # symbol for one of the transmit antennas, and nulls for all other transmit antennas.
+        # With pp_r, we have that pp_r.shape = [1, 4, 2, 512] for the two cluster case and [1, 2, 2, 512] for the single cluster case
+        # In the double-cluster case pp_r[:,:2,:,:] corresponds to the first cluster, while pp_r[:,2:4,:,:] to the second one.
+        # ry_noisy.shape is [3, 1, 4, 14, 512] where 4 refers to number of receive antennas. 
+        # We need to reshape pp_r
+        pp_rsh = self.rg.pilot_pattern.pilots
+        pp_rsh = tf.reshape(pp_rsh, [1,*pp_rsh.shape[:-1],len(self.cfg.pilot_indices),self.cfg.fft_size]) # [1,1, num_streams, num_pilot_ofdm_syms, nfft] = e.g. [1,1, 4, 2, 512]
+        rx_pilots = tf.gather(ry_noisy, indices = self.cfg.pilot_indices, axis=-2) # (On the num_ofdm_sym axis) # [batch_size, 1, num_rx_ant, num_pilot_ofdm_syms, nfft]
+        rx_pilots = tf.transpose(rx_pilots, (0,4,3,2,1) ) # [batch_size, nfft, num_pilot_ofdm_syms, num_rx_ant, 1]
+        tx_pilots = tf.transpose(pp_rsh, (0,4,3,2,1 ) ) # [1, nfft, num_pilot_ofdm_syms, num_streams , 1]
+        h_hat_pilots = tf.gather(h_hat, indices = self.cfg.pilot_indices, axis=-3) # (On the num_ofdm_sym axis)  # [batch_size , nfft , num_pilot_ofdm_syms , num_rx_ant , num_tx_ant]
+        noise = rx_pilots - tf.matmul(h_hat_pilots, tx_pilots)
+        nvar = tf.reduce_mean(tf.abs(noise)**2)
+                
         # Reshape ry_stbc of shape [num_subframes, num_subcarriers, num_ofdm_symbols/2, 2, total_rx_antennas]
         num_ofdm_symbols = ry_stbc.shape[-3]
         total_rx_antennas = ry_stbc.shape[-2]
