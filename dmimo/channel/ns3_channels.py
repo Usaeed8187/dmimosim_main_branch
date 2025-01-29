@@ -58,9 +58,9 @@ class LoadNs3Channel:
                         self._Hrs = data['Hrs']
                         self._Hdm = data['Hdm']
                     else:
-                        self._Hts = data['Gts']
-                        self._Hrs = data['Grs']
-                        self._Hdm = data['Gdm']
+                        self._Hts = np.transpose(data['Gts'], [1, 0, 2, 3])
+                        self._Hrs = np.transpose(data['Grs'], [1, 0, 2, 3])
+                        self._Hdm = np.transpose(data['Gdm'], [1, 0, 2, 3])
                     self._Lts = data['Lts']
                     self._Lrs = data['Lrs']
                     self._Ldm = data['Ldm']
@@ -101,6 +101,9 @@ class LoadNs3Channel:
             slot_idx = slot_idx % self._cfg.total_slots  # for test purpose only
 
             h_freq, rx_snr, rx_pwr = self.convert_channel(channel_type)
+            if not forward:
+                # correct the channel shape (swap Tx/Rx dimension)
+                h_freq = np.transpose(h_freq, [1, 0, 2, 3])
 
             if batch_idx == 0 and batch_size > 1:
                 h_shape = [batch_size, *h_freq.shape]
