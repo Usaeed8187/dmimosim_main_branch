@@ -53,7 +53,7 @@ class LoadNs3Channel:
                 chan_filename = os.path.join(self._cfg.data_folder,
                                              "{}_{}.npz".format(self._cfg.file_prefix, slot_idx))
                 with np.load(chan_filename) as data:
-                    if self._forward:
+                    if forward:
                         self._Hts = data['Hts']
                         self._Hrs = data['Hrs']
                         self._Hdm = data['Hdm']
