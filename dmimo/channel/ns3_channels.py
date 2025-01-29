@@ -24,6 +24,8 @@ class LoadNs3Channel:
         self._cfg = config
         self._dtype = dtype
         self._current_slot = -1
+        self._num_txue = 0  # selected number of TX UE
+        self._num_rxue = 0  # selected number of Rx UE
         self._Hts = None  # TxSquad channels, shape is [num_txue * num_ue_ant,num_bs_ant,num_ofdm_sym,num_subcarrier]
         self._Hrs = None  # RxSquad channels, shape is [num_bs_ant,num_rxue * num_ue_ant,num_ofdm_sym,num_subcarrier]
         self._Hdm = None  # dMIMO channels, shape is [num_rxs_ant,num_txs_ant,num_ofdm_sym,num_subcarrier]
@@ -52,6 +54,8 @@ class LoadNs3Channel:
 
                 # Apply UE selection masks
                 # Note that the TxBS and RxBS are always selected
+                self._num_txue = self._cfg.num_txue
+                self._num_rxue = self._cfg.num_rxue
                 if ue_selection and (self._cfg.txue_mask is not None):
                     assert self._cfg.num_txue_sel == np.count_nonzero(self._cfg.txue_mask)
                     assert self._Hdm.shape[1] == self._cfg.num_bs_ant + self._cfg.num_ue_ant * self._cfg.txue_mask.size
@@ -60,7 +64,7 @@ class LoadNs3Channel:
                     txs_mask = np.concatenate(([True], tx_ue_mask), axis=0)
                     txs_ant_mask = np.concatenate((np.repeat([True], self._cfg.num_bs_ant),
                                                    np.repeat(tx_ue_mask, self._cfg.num_ue_ant)), axis=0)
-
+                    self._num_txue = self._cfg.num_txue_sel
                     self._Hts = self._Hts[tx_ant_mask]
                     self._Hdm = self._Hdm[:, txs_ant_mask]
                     self._Lts = self._Lts[tx_ue_mask]
@@ -74,6 +78,7 @@ class LoadNs3Channel:
                     rxs_mask = np.concatenate(([True], rx_ue_mask), axis=0)
                     rxs_ant_mask = np.concatenate((np.repeat([True], self._cfg.num_bs_ant),
                                                    np.repeat(rx_ue_mask, self._cfg.num_ue_ant)), axis=0)
+                    self._num_rxue = self._cfg.num_rxue_sel
                     self._Hrs = self._Hrs[:, rx_ant_mask]
                     self._Hdm = self._Hdm[rxs_ant_mask]
                     self._Lrs = self._Lrs[rx_ue_mask]
@@ -141,13 +146,13 @@ class LoadNs3Channel:
                 # pathloss from different UEs are normalized according to the maximum-loss (weakest) path as reference
 
                 # total received power is num_rxue * weakest_path_power
-                rx_pwr_dbm = tx_pwr_ue + 10.0 * np.log10(self._cfg.num_rxue_sel) + self._cfg.bs_ant_gain \
+                rx_pwr_dbm = tx_pwr_ue + 10.0 * np.log10(self._num_rxue) + self._cfg.bs_ant_gain \
                     - np.max(self._Lrs, axis=0, keepdims=True)  # [1, num_ofdm_sym]
                 rx_snr_db = rx_pwr_dbm - (self._cfg.thermal_noise + self._cfg.noise_figure)  # [1, num_ofdm_sym]
                 rx_snr_db = np.repeat(rx_snr_db, self._cfg.num_bs_ant, axis=0)  # [num_bs_ant, num_ofdm_sym]
 
                 # no need for agc gain compensation
-                rs_rx_agc = np.zeros((self._cfg.num_rxue_sel * self._cfg.num_ue_ant, 1))
+                rs_rx_agc = np.zeros((self._num_rxue * self._cfg.num_ue_ant, 1))
 
             else:
                 # assuming perfect AGC on BS and no power control on each UE, pathloss from different UEs
@@ -173,9 +178,9 @@ class LoadNs3Channel:
 
             # expand according to number of Tx/Rx nodes
             tx_pwr_dbm = np.concatenate((np.repeat(tx_pwr_bs, self._cfg.num_bs),
-                                         np.repeat(tx_pwr_ue, self._cfg.num_txue_sel)))
+                                         np.repeat(tx_pwr_ue, self._num_txue)))
             rx_ant_gain = np.concatenate((np.repeat(self._cfg.bs_ant_gain, self._cfg.num_bs),
-                                         np.repeat(self._cfg.ue_ant_gain, self._cfg.num_rxue_sel)))
+                                         np.repeat(self._cfg.ue_ant_gain, self._num_rxue)))
             # new shape [num_rxue+1,num_txue+1,num_ofdm_sym]
             rx_pwr_path = np.reshape(tx_pwr_dbm, (1, -1, 1)) + np.reshape(rx_ant_gain, (-1, 1, 1)) - self._Ldm
 
