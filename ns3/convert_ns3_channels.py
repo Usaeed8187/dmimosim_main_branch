@@ -8,7 +8,7 @@ def convert_ipc_channels(ipc_data_folder, ns3_chans_folder):
     # Load scenario configuration
     config = np.load(os.path.join(ipc_data_folder, '00_config.npz'), allow_pickle=True)['config'].item()
     
-    # TxSquad channels, shape is [num_txue * num_ue_ant, num_bs_ant, num_ofdm_sym, num_subcarrier]
+    # TxSquad downlink channels, shape is [num_txue * num_ue_ant, num_bs_ant, num_ofdm_sym, num_subcarrier]
     Hts = np.zeros((
         config['numSquad1UEs'] * config['numUEAnt'],
         config['numBSAnt'],
@@ -16,7 +16,15 @@ def convert_ipc_channels(ipc_data_folder, ns3_chans_folder):
         config['numSCs']),
         dtype=np.complex64)
     Hts[:, :, :, :] = np.nan
-    # RxSquad channels, shape is [num_bs_ant, num_rxue * num_ue_ant, num_ofdm_sym, num_subcarrier]
+    # TxSquad uplink channels, shape is [num_bs_ant, num_txue * num_ue_ant, num_ofdm_sym, num_subcarrier]
+    Gts = np.zeros((
+        config['numBSAnt'],
+        config['numSquad1UEs'] * config['numUEAnt'],
+        config['numSymsPerSubframe'],
+        config['numSCs']),
+        dtype=np.complex64)
+    Gts[:, :, :, :] = np.nan
+    # RxSquad uplink channels, shape is [num_bs_ant, num_rxue * num_ue_ant, num_ofdm_sym, num_subcarrier]
     Hrs = np.zeros((
         config['numBSAnt'],
         config['numSquad2UEs'] * config['numUEAnt'],
@@ -24,7 +32,15 @@ def convert_ipc_channels(ipc_data_folder, ns3_chans_folder):
         config['numSCs']),
         dtype=np.complex64)
     Hrs[:, :, :, :] = np.nan
-    # dMIMO channels, shape is [num_rxs_ant, num_txs_ant, num_ofdm_sym, num_subcarrier]
+    # RxSquad downlink channels, shape is [num_rxue * num_ue_ant, num_bs_ant, num_ofdm_sym, num_subcarrier]
+    Grs = np.zeros((
+        config['numSquad2UEs'] * config['numUEAnt'],
+        config['numBSAnt'],
+        config['numSymsPerSubframe'],
+        config['numSCs']),
+        dtype=np.complex64)
+    Grs[:, :, :, :] = np.nan
+    # dMIMO forward channels, shape is [num_rxs_ant, num_txs_ant, num_ofdm_sym, num_subcarrier]
     Hdm = np.zeros((
         config['numSquad2UEs'] * config['numUEAnt'] + config['numBSAnt'],
         config['numSquad1UEs'] * config['numUEAnt'] + config['numBSAnt'],
@@ -32,7 +48,15 @@ def convert_ipc_channels(ipc_data_folder, ns3_chans_folder):
         config['numSCs']),
         dtype=np.complex64)
     Hdm[:, :, :, :] = np.nan
-    # TxSquad pathloss in dB, shape is [num_txue, num_ofdm_sym]
+    # dMIMO backward channels, shape is [num_txs_ant, num_rxs_ant, num_ofdm_sym, num_subcarrier]
+    Gdm = np.zeros((
+        config['numSquad1UEs'] * config['numUEAnt'] + config['numBSAnt'],
+        config['numSquad2UEs'] * config['numUEAnt'] + config['numBSAnt'],
+        config['numSymsPerSubframe'],
+        config['numSCs']),
+        dtype=np.complex64)
+    Gdm[:, :, :, :] = np.nan
+    # TxSquad downlink pathloss in dB, shape is [num_txue, num_ofdm_sym]
     Lts = np.zeros((
         config['numSquad1UEs'],
         config['numSymsPerSubframe']),
@@ -86,13 +110,15 @@ def convert_ipc_channels(ipc_data_folder, ns3_chans_folder):
                     for i, tUEid in enumerate(tUE_ids):
                         start = i * ueAnts
                         end = (i + 1) * ueAnts
-                        Hts[start:end, :, sym_in_sf, :] = Hmats[(tBS_id, tUEid)]
+                        Hts[start:end, :, sym_in_sf, :] = Hmats[(tBS_id, tUEid)]  # forward/downlink
+                        Gts[:, start:end, sym_in_sf, :] = Hmats[(tUEid, tBS_id)]  # backward/uplink
                         Lts[i, sym_in_sf] = propLosses[(tBS_id, tUEid)]
                     # Load Hrs and Lrs
                     for i, rUEid in enumerate(rUE_ids):
                         start = i * ueAnts
                         end = (i + 1) * ueAnts
-                        Hrs[:, start:end, sym_in_sf, :] = Hmats[(rUEid, rBS_id)]
+                        Hrs[:, start:end, sym_in_sf, :] = Hmats[(rUEid, rBS_id)]  # forward/uplink
+                        Grs[start:end, :, sym_in_sf, :] = Hmats[(rBS_id, rUEid)]  # backward/downlink
                         Lrs[i, sym_in_sf] = propLosses[(rUEid, rBS_id)]
                     # Load Hdm and Ldm
                     for i, tNodeId in enumerate([tBS_id] + tUE_ids):
@@ -109,7 +135,8 @@ def convert_ipc_channels(ipc_data_folder, ns3_chans_folder):
                             else:
                                 start2 = bsAnts + (j - 1) * ueAnts
                                 end2 = bsAnts + j * ueAnts
-                            Hdm[start2:end2, start:end, sym_in_sf, :] = Hmats[(tNodeId, rNodeId)]
+                            Hdm[start2:end2, start:end, sym_in_sf, :] = Hmats[(tNodeId, rNodeId)]  # forward link
+                            Gdm[start:end, start2:end2, sym_in_sf, :] = Hmats[(rNodeId, tNodeId)]  # backward link
                             Ldm[j, i, sym_in_sf] = propLosses[(tNodeId, rNodeId)]
                     # External nodes
                     if num_extnodes > 0:
@@ -133,9 +160,11 @@ def convert_ipc_channels(ipc_data_folder, ns3_chans_folder):
         # save channel for current subframe/slot
         output_file = os.path.join(ns3_chans_folder, "dmimochans_{}.npz".format(slot_idx))
         if num_extnodes > 0:
-            np.savez_compressed(output_file, Hdm=Hdm, Hrs=Hrs, Hts=Hts, Hex=Hex, Ldm=Ldm, Lrs=Lrs, Lts=Lts, Lex=Lex)
+            np.savez_compressed(output_file, Hdm=Hdm, Hrs=Hrs, Hts=Hts, Gdm=Gdm, Grs=Grs, Gts=Gts,
+                                Ldm=Ldm, Lrs=Lrs, Lts=Lts, Hex=Hex, Lex=Lex)
         else:
-            np.savez_compressed(output_file, Hdm=Hdm, Hrs=Hrs, Hts=Hts, Ldm=Ldm, Lrs=Lrs, Lts=Lts)
+            np.savez_compressed(output_file, Hdm=Hdm, Hrs=Hrs, Hts=Hts, Gdm=Gdm, Grs=Grs, Gts=Gts,
+                                Ldm=Ldm, Lrs=Lrs, Lts=Lts)
 
     return config['numSubframes'] * config['numSymsPerSubframe']
 

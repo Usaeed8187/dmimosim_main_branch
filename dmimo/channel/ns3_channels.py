@@ -33,7 +33,15 @@ class LoadNs3Channel:
         self._Lrs = None  # RxSquad pathloss in dB, shape is [num_rxue,num_ofdm_sym]
         self._Ldm = None  # dMIMO pathloss in dB, shape is [num_rxue+1,num_txue+1,num_ofdm_sym]
 
-    def __call__(self, channel_type, slot_idx=None, batch_size=1, ue_selection=True):
+    def __call__(self, channel_type, slot_idx=None, batch_size=1, forward=True, ue_selection=True):
+        """
+        Params:
+        channel_type: channel type (Baseline, TxSquad, RxSquad, dMIMO, dMIMO-Forward)
+        slot_idx: starting time slot index
+        batch_size: number of time slots to load channel data
+        forward: select forward (TxSquad->RxSquad) or backward (RxSquad->TxSquad) links
+        ue_selection: enable Tx/Rx UE selection masks
+        """
         if slot_idx is None:
             slot_idx = self._current_slot + 1  # advance to next slot by default
         slot_idx = slot_idx % self._cfg.total_slots  # for test purpose only
@@ -45,9 +53,14 @@ class LoadNs3Channel:
                 chan_filename = os.path.join(self._cfg.data_folder,
                                              "{}_{}.npz".format(self._cfg.file_prefix, slot_idx))
                 with np.load(chan_filename) as data:
-                    self._Hts = data['Hts']
-                    self._Hrs = data['Hrs']
-                    self._Hdm = data['Hdm']
+                    if self._forward:
+                        self._Hts = data['Hts']
+                        self._Hrs = data['Hrs']
+                        self._Hdm = data['Hdm']
+                    else:
+                        self._Hts = data['Gts']
+                        self._Hrs = data['Grs']
+                        self._Hdm = data['Gdm']
                     self._Lts = data['Lts']
                     self._Lrs = data['Lrs']
                     self._Ldm = data['Ldm']
