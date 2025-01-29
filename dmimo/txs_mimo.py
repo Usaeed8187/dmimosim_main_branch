@@ -154,13 +154,14 @@ class TxSquad(Model):
             h_freq_csi, rx_snr_db, _ = txs_chans.load_channel(slot_idx=self.cfg.first_slot_idx, batch_size=self.batch_size)
         else:
             # LMMSE channel estimation
-            h_freq_csi, err_var_csi = lmmse_channel_estimation(txs_chans, self.rg_csi, slot_idx=self.cfg.first_slot_idx)
+            h_freq_csi, err_var_csi = lmmse_channel_estimation(txs_chans, self.rg_csi, slot_idx=self.cfg.first_slot_idx,
+                                                               batch_size=self.batch_size)
 
         # Apply basic ZF precoder (optimized precoder will be added later)
         x_precoded, g = self.zf_precoder([x_rg, h_freq_csi])
 
         # apply dMIMO channels to the resource grid in the frequency domain.
-        y = txs_chans([x_precoded, self.cfg.first_slot_idx])
+        y, _ = txs_chans([x_precoded, self.cfg.first_slot_idx])
 
         # check all UEs
         ue_data = []

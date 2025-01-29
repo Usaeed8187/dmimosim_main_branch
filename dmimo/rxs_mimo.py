@@ -164,7 +164,7 @@ class RxSquad(Model):
             # apply dMIMO channels to the resource grid in the frequency domain
             # only using the channel for the current UEs
             tx_ant_mask = np.arange(2 * rx_ue_idx, 2 * rx_ue_idx + self.num_streams_per_tx)
-            y_rg = rxs_chans([x_rg, self.cfg.first_slot_idx, tx_ant_mask, None])
+            y_rg, _ = rxs_chans([x_rg, self.cfg.first_slot_idx, tx_ant_mask, None])
 
             # LS channel estimation with linear interpolation
             no = 1e-5  # tunable param
