@@ -19,7 +19,7 @@ class dMIMOChannels(Layer):
     dMIMOChannels apply inputs the specific type of channels and generate received output signals.
     """
 
-    def __init__(self, config: Ns3Config, channel_type, resource_grid: ResourceGrid = None,
+    def __init__(self, config: Ns3Config, channel_type, forward=True, resource_grid: ResourceGrid = None,
                  add_noise=True, normalize_channel=False, return_channel=False, return_rxpwr=False,
                  dtype=tf.complex64, **kwargs):
         super().__init__(trainable=False, dtype=dtype, **kwargs)
@@ -34,6 +34,7 @@ class dMIMOChannels(Layer):
         self._load_channel = LoadNs3Channel(self._config)
         self._apply_channel = ApplyOFDMChannel(add_awgn=False, dtype=tf.as_dtype(self.dtype))
         self._awgn = AWGN(dtype=dtype)
+        self._forward = forward
 
     @property
     def ns3_config(self):
@@ -47,9 +48,13 @@ class dMIMOChannels(Layer):
     def channel_type(self):
         return self._channel_type
 
-    def load_channel(self, slot_idx, batch_size=1, ue_selection=True):
+    @property
+    def forward(self):
+        return self._forward
+
+    def load_channel(self, slot_idx, forward=forward, batch_size=1, ue_selection=True):
         assert slot_idx >= 0, "Slot indices must be non-negative integers"
-        return self._load_channel(self._channel_type, slot_idx=slot_idx, batch_size=batch_size,
+        return self._load_channel(self._channel_type, forward=forward, slot_idx=slot_idx, batch_size=batch_size,
                                   ue_selection=ue_selection)
 
     def call(self, inputs):
