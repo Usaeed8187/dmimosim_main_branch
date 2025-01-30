@@ -18,9 +18,11 @@ from sionna.utils.metrics import compute_ber, compute_bler
 from dmimo.config import Ns3Config, SimConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
 from dmimo.channel import standard_rc_pred_freq_mimo
-from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, SLNREqualizer
+from dmimo.channel import LMMSELinearInterp
+from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, SLNREqualizer, SICLMMSEEqualizer
 from dmimo.mimo import update_node_selection
 from dmimo.utils import add_frequency_offset, add_timing_offset
+from dmimo.ncjt_demo_branch import MC_NCJT_RxUE
 
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
@@ -87,7 +89,7 @@ class Phase_3_RX(Model):
                                num_streams_per_tx=self.num_streams_per_tx,
                                cyclic_prefix_length=64,
                                num_guard_carriers=[guard_carriers_1, guard_carriers_2],
-                               dc_null=False,
+                               dc_null=cfg.dc_null,
                                pilot_pattern="kronecker",
                                pilot_ofdm_symbol_indices=[2, 11])
 
@@ -139,8 +141,14 @@ class Phase_3_RX(Model):
         self.detector = MMSEPICDetector("bit", self.rg, sm, constellation_type="qam",
                                         num_bits_per_symbol=cfg.modulation_order,
                                         num_iter=2, hard_out=False)
+        
+        # The SIC+LMMSE equalizer will provide soft symbols together with noise variance estimates
+        self.sic_lmmse_equ = SICLMMSEEqualizer(self.rg, sm, cfg.modulation_order)
+        
+        # Using LMMSE CE from NCJT Demo code
+        self.ncjt_rx = MC_NCJT_RxUE(self.cfg, batch_size=self.batch_size , modulation_order_list=[self.cfg.modulation_order])
 
-    def call(self, x_rg, y):
+    def call(self, x_rg, y, rx_heltf=None):
         """
         Signal processing for one MU-MIMO transmission cycle (P2)
 
@@ -186,75 +194,112 @@ class Phase_3_RX(Model):
         # Processing received data
         #############################################
 
-        # LS channel estimation with linear interpolation
-        no = 1e-5  # initial noise estimation (tunable param)
-        h_hat, err_var = self.ls_estimator([y, no])
+        if self.cfg.lmmse_chest:
+
+            # new shape: (batch_size, num_subcarrier, num_rx_ant, num_ltf)
+            he_ltf = tf.squeeze(tf.transpose(rx_heltf, [1, 0, 4, 2, 3]))
+
+            h1_hat = self.ncjt_rx.heltf_channel_estimate(he_ltf[..., 0:2])  # (num_batch, num_subcarrier, num_rx_ant, num_ss)
+            h2_hat = self.ncjt_rx.heltf_channel_estimate(he_ltf[..., 2:4])  # (num_batch, num_subcarrier, num_rx_ant, num_ss)
+            h_hat = tf.concat((h1_hat, h2_hat), axis=-1)
+            # h_hat_averaged = insert_dims(h_hat, 1, axis=2)
+            # h_hat_averaged = tf.repeat(h_hat_averaged, len(self.ncjt_rx.data_syms) // 2, axis=2)
+
+            # Channel covariance statistics
+            freq_cov = self.ncjt_rx.estimate_freq_cov(h_hat)
+            lmmse_int = LMMSELinearInterp(self.rg.pilot_pattern, freq_cov)
+            self.lmmse_est = LSChannelEstimator(self.rg, interpolator=lmmse_int)
+            no = 5e-3
+            h_hat, err_var = self.lmmse_est([y, no])
+
+        else:
+            # LS channel estimation with linear interpolation
+            no = 1e-5  # initial noise estimation (tunable param)
+            h_hat, err_var = self.ls_estimator([y, no])
 
         debug = True
         if debug:
-            plt.figure()
-            plt.plot(np.real(h_hat[0,0,0,0,0,0,:]), label='Real')
-            plt.plot(np.imag(h_hat[0,0,0,0,0,0,:]), label='Imag')
-            plt.plot(np.abs(h_hat[0,0,0,0,0,0,:]), label='Abs')
+            sym_idx = 11 
+            plt.figure(figsize=(48, 12))
+            plot_idx = 1
+            for ue_idx in range(self.cfg.num_rx_ue_sel):
+                for ue_ant_idx in range(2):
+                    for bs_ant_idx in range(4):
+                        plt.subplot(self.cfg.num_rx_ue_sel, 4*2, plot_idx)
+                        plt.plot(np.real(h_hat[0, 0, bs_ant_idx, ue_idx, ue_ant_idx, sym_idx, :]), label='Real_Tx{}_Rx{}'.format(ue_ant_idx, bs_ant_idx), linewidth=2)
+                        plt.title(f'UE_{ue_idx}_UEAnt_{ue_ant_idx}_BSAnt_{bs_ant_idx}', fontsize=18, fontweight='bold')
+                        # plt.plot(np.imag(h_hat[0, 0, bs_ant_idx, ue_idx, ue_ant_idx, 0, :]), label='Imag_Tx{}_Rx{}'.format(ue_ant_idx, bs_ant_idx))
+                        # plt.plot(np.abs(h_hat[0, 0, bs_ant_idx, ue_idx, ue_ant_idx, 0, :]), label='Abs_Tx{}_Rx{}'.format(ue_ant_idx, bs_ant_idx))
+                        plot_idx += 1
             plt.legend()
-            plt.title('Antenna_0_0')
-            plt.savefig('Antenna_0_0')
+            plt.suptitle("Channel Real Part for UEs and Antennas", fontsize=24, fontweight='bold', y=1.02)  # Main title
+            plt.tight_layout(rect=[0, 0, 1, 0.98])  # Adjust layout to fit title
+            plt.savefig('channel_estimates_all')
 
-            plt.figure()
-            plt.plot(np.real(h_hat[0,0,2,0,1,0,:]), label='Real')
-            plt.plot(np.imag(h_hat[0,0,2,0,1,0,:]), label='Imag')
-            plt.plot(np.abs(h_hat[0,0,2,0,1,0,:]), label='Abs')
-            plt.legend()
-            plt.title('Antenna_2_1')
-            plt.savefig('Antenna_2_1')
 
-            plt.figure()
-            plt.plot(np.real(h_hat[0,0,3,0,1,0,:]), label='Real')
-            plt.plot(np.imag(h_hat[0,0,3,0,1,0,:]), label='Imag')
-            plt.plot(np.abs(h_hat[0,0,3,0,1,0,:]), label='Abs')
-            plt.legend()
-            plt.title('Antenna_3_1')
-            plt.savefig('Antenna_3_1')
+            # plt.figure()
+            # plt.plot(np.real(h_hat[0,0,0,ue_idx,0,0,:]), label='Real')
+            # # plt.plot(np.imag(h_hat[0,0,0,0,0,0,:]), label='Imag')
+            # # plt.plot(np.abs(h_hat[0,0,0,0,0,0,:]), label='Abs')
+            # plt.legend()
+            # plt.title('Antenna_0_0')
+            # plt.savefig('Antenna_0_0')
 
-            y_np = y.numpy()
-            x_rg_np = x_rg.numpy()
-            h_ls_np = np.zeros((y_np.shape[2], x_rg_np.shape[2], 2, 500), dtype=np.complex64)
+            # plt.figure()
+            # plt.plot(np.real(h_hat[0,0,2,ue_idx,1,0,:]), label='Real')
+            # # plt.plot(np.imag(h_hat[0,0,2,0,1,0,:]), label='Imag')
+            # # plt.plot(np.abs(h_hat[0,0,2,0,1,0,:]), label='Abs')
+            # plt.legend()
+            # plt.title('Antenna_2_1')
+            # plt.savefig('Antenna_2_1')
 
-            sym_ids = [2, 11]
-            for sym_idx, sym_id in enumerate(sym_ids):
-                for rx_id in range(y.shape[2]):
-                    for tx_id in range(x_rg.shape[2]):
+            # plt.figure()
+            # plt.plot(np.real(h_hat[0,0,3,ue_idx,1,0,:]), label='Real')
+            # # plt.plot(np.imag(h_hat[0,0,3,0,1,0,:]), label='Imag')
+            # # plt.plot(np.abs(h_hat[0,0,3,0,1,0,:]), label='Abs')
+            # plt.legend()
+            # plt.title('Antenna_3_1')
+            # plt.savefig('Antenna_3_1')
 
-                        h_ls_np[rx_id, tx_id, sym_idx, :] = y_np[0, 0, rx_id, sym_id, 6:506] / x_rg_np[0, 0, tx_id, sym_id, 6:506]
+            # y_np = y.numpy()
+            # x_rg_np = x_rg.numpy()
+            # h_ls_np = np.zeros((y_np.shape[2], x_rg_np.shape[2], 2, len(self.rg.effective_subcarrier_ind)), dtype=np.complex64)
+
+            # sym_ids = [2, 11]
+            # for sym_idx, sym_id in enumerate(sym_ids):
+            #     for rx_id in range(y.shape[2]):
+            #         for tx_id in range(x_rg.shape[2]):
+
+            #             h_ls_np[rx_id, tx_id, sym_idx, :] = y_np[0, 0, rx_id, sym_id, self.rg.effective_subcarrier_ind] / x_rg_np[0, 0, tx_id, sym_id, self.rg.effective_subcarrier_ind]
             
-            h_ls = tf.convert_to_tensor(h_ls_np)
+            # h_ls = tf.convert_to_tensor(h_ls_np)
             
-            num_ue_ants = 2
-            h_ls_reshaped = np.reshape(h_ls_np, [h_ls_np.shape[0], self.cfg.num_rx_ue_sel, num_ue_ants, len(sym_ids), self.rg.num_effective_subcarriers])
-            for sym_idx, sym_id in enumerate(sym_ids):
-                for rx_ant_id in range(y.shape[2]):
-                    for tx_node_id in range(self.cfg.num_rx_ue_sel):
-                        for tx_ant_id in range(num_ue_ants):
+            # num_ue_ants = 2
+            # h_ls_reshaped = np.reshape(h_ls_np, [h_ls_np.shape[0], self.cfg.num_rx_ue_sel, num_ue_ants, len(sym_ids), self.rg.num_effective_subcarriers])
+            # for sym_idx, sym_id in enumerate(sym_ids):
+            #     for rx_ant_id in range(y.shape[2]):
+            #         for tx_node_id in range(self.cfg.num_rx_ue_sel):
+            #             for tx_ant_id in range(num_ue_ants):
                             
-                            curr_h_ls_all = h_ls_reshaped[rx_ant_id, tx_node_id, tx_ant_id, sym_idx, :]
-                            pilot_indices = np.where(np.isfinite(curr_h_ls_all))[0]
-                            non_pilot_indices = np.where(~np.isfinite(curr_h_ls_all))[0]
+            #                 curr_h_ls_all = h_ls_reshaped[rx_ant_id, tx_node_id, tx_ant_id, sym_idx, :]
+            #                 pilot_indices = np.where(np.isfinite(curr_h_ls_all))[0]
+            #                 non_pilot_indices = np.where(~np.isfinite(curr_h_ls_all))[0]
 
-                            curr_h_ls_pilots = curr_h_ls_all[pilot_indices]
+            #                 curr_h_ls_pilots = curr_h_ls_all[pilot_indices]
 
-                            interp_real = interp1d(pilot_indices, curr_h_ls_pilots.real, kind='linear', fill_value="extrapolate")
-                            interp_imag = interp1d(pilot_indices, curr_h_ls_pilots.imag, kind='linear', fill_value="extrapolate")
-                            interpolated_real = interp_real(non_pilot_indices)
-                            interpolated_imag = interp_imag(non_pilot_indices)
+            #                 interp_real = interp1d(pilot_indices, curr_h_ls_pilots.real, kind='linear', fill_value="extrapolate")
+            #                 interp_imag = interp1d(pilot_indices, curr_h_ls_pilots.imag, kind='linear', fill_value="extrapolate")
+            #                 interpolated_real = interp_real(non_pilot_indices)
+            #                 interpolated_imag = interp_imag(non_pilot_indices)
 
-                            h_ls_reshaped[rx_ant_id, tx_node_id, tx_ant_id, sym_idx, non_pilot_indices] = interpolated_real + 1j * interpolated_imag
+            #                 h_ls_reshaped[rx_ant_id, tx_node_id, tx_ant_id, sym_idx, non_pilot_indices] = interpolated_real + 1j * interpolated_imag
 
-            h_ls_np = np.reshape(h_ls_reshaped, [h_ls_reshaped.shape[0], -1, h_ls_reshaped.shape[-2], h_ls_reshaped.shape[-1]])
+            # h_ls_np = np.reshape(h_ls_reshaped, [h_ls_reshaped.shape[0], -1, h_ls_reshaped.shape[-2], h_ls_reshaped.shape[-1]])
             
-            plt.figure()
-            plt.plot(np.real(h_ls_np[0,0,0,:]))
-            plt.plot(np.real(h_hat[0,0,0,0,0,2,:]))
-            plt.savefig('a')
+            # plt.figure()
+            # plt.plot(np.real(h_ls_np[0,0,0,:]))
+            # plt.plot(np.real(h_hat[0,0,0,0,0,2,:]))
+            # plt.savefig('a')
         debug = False
 
         if self.cfg.receiver == 'PIC':
@@ -283,6 +328,11 @@ class Phase_3_RX(Model):
                 if curr_ber < uncoded_ber:
                     uncoded_ber = curr_ber
                     start_subframe_idx = curr_batch_idx
+
+            per_stream_ber = np.zeros((self.cfg.num_rx_ue_sel, self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel))
+            for ue_idx in range(self.cfg.num_rx_ue_sel):
+                for stream_idx in range(self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel):
+                    per_stream_ber[ue_idx, stream_idx] = compute_ber(tx_bits_coded_intlvd[start_subframe_idx:start_subframe_idx+1, ue_idx, stream_idx, :], d_hard[:,ue_idx, stream_idx,:]).numpy()
         
         elif self.cfg.receiver == 'LMMSE':
 
@@ -308,6 +358,12 @@ class Phase_3_RX(Model):
                 if curr_ber < uncoded_ber:
                     uncoded_ber = curr_ber
                     start_subframe_idx = curr_batch_idx
+            
+            per_stream_ber = np.zeros((self.cfg.num_rx_ue_sel, self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel))
+            for ue_idx in range(self.cfg.num_rx_ue_sel):
+                for stream_idx in range(self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel):
+                    per_stream_ber[ue_idx, stream_idx] = compute_ber(tx_bits_coded_intlvd[start_subframe_idx:start_subframe_idx+1, ue_idx, stream_idx, :], d_hard[:,ue_idx, stream_idx,:]).numpy()
+
 
             debug = True
             if debug:
@@ -320,17 +376,55 @@ class Phase_3_RX(Model):
                 plt.grid(True)
                 plt.savefig('b')
             debug = False
+        
+        elif self.cfg.receiver == 'SIC':
+            
+            # LMMSE equalization
+            x_hat, no_eff = self.sic_lmmse_equ([y, h_hat, err_var, no, self.num_streams_per_tx])
+
+            # Soft-output QAM demapper
+            llr = self.demapper([x_hat, no_eff])
+
+            # Hard-decision bit error rate
+            d_hard = tf.cast(llr > 0, tf.float32)
+
+            # Take the data carrying ofdm symbols of d_hard
+            data_ofdm_syms = tf.range(self.rg.num_ofdm_symbols)
+            mask = ~tf.reduce_any(tf.equal(tf.expand_dims(data_ofdm_syms, 1), self.rg._pilot_ofdm_symbol_indices), axis=1)
+            data_ofdm_syms = tf.boolean_mask(data_ofdm_syms, mask)
+            d_hard = tf.gather(d_hard, data_ofdm_syms, axis=-2)
+            d_hard = tf.reshape(d_hard, (d_hard.shape[0], d_hard.shape[1], d_hard.shape[2], -1))
+            
+            sc_ind = 6
+            sym_ind = 1
+            uncoded_ber = 0.5
+            start_subframe_idx = 0
+            for curr_batch_idx in range(tx_bits_coded_intlvd.shape[0]):                
+                curr_ber = compute_ber(tx_bits_coded_intlvd[curr_batch_idx:curr_batch_idx+1, ...], d_hard).numpy()
+
+                # expected_signal = h_hat[curr_batch_idx,0,:,0,:,sym_ind,sc_ind-6] @ x_rg[0,0,:,sym_ind,sc_ind:sc_ind+1]
+                # actual_signal = y[curr_batch_idx, 0, :, sym_ind,sc_ind:sc_ind+1]
+
+                if curr_ber < uncoded_ber:
+                    uncoded_ber = curr_ber
+                    start_subframe_idx = curr_batch_idx
+            
+            per_stream_ber = np.zeros((self.cfg.num_rx_ue_sel, self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel))
+            for ue_idx in range(self.cfg.num_rx_ue_sel):
+                for stream_idx in range(self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel):
+                    per_stream_ber[ue_idx, stream_idx] = compute_ber(tx_bits_coded_intlvd[start_subframe_idx:start_subframe_idx+1, ue_idx, stream_idx, :], d_hard[:,ue_idx, stream_idx,:]).numpy()
+
 
         # Hard-decision symbol error rate
         x_hard = self.mapper(d_hard)
         uncoded_ser = np.count_nonzero(x[start_subframe_idx:start_subframe_idx+1, ...] - x_hard) / np.prod(x_hard.shape)
 
-        print("subframe index = ", start_subframe_idx, "\n", "uncoded ber = ", uncoded_ber, "\n \n")
+        print("subframe index = ", start_subframe_idx, "\n", "per_stream_ber = ", per_stream_ber, "\n \n")
 
-        return uncoded_ber, uncoded_ser
+        return uncoded_ber, uncoded_ser, per_stream_ber
 
 
-def test_phase_3_rx(cfg: SimConfig, ns3cfg: Ns3Config, x_rg, y_rg):
+def test_phase_3_rx(cfg: SimConfig, ns3cfg: Ns3Config, x_rg, y_rg, rx_heltf=None):
     """
     Simulation of MU-MIMO scenarios using different settings
 
@@ -340,12 +434,12 @@ def test_phase_3_rx(cfg: SimConfig, ns3cfg: Ns3Config, x_rg, y_rg):
     """
     
     # Total number of antennas in the TxSquad, always use all gNB antennas
-    num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
+    num_txs_ant = 2 * ns3cfg.num_rxue_sel
 
     # Adjust guard subcarriers for channel estimation grid
-    csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
-    csi_guard_carriers_1 = (cfg.fft_size - csi_effective_subcarriers) // 2
-    csi_guard_carriers_2 = (cfg.fft_size - csi_effective_subcarriers) - csi_guard_carriers_1
+    # csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
+    cfg.num_guard_carriers = [cfg.csi_guard_carriers_1, cfg.csi_guard_carriers_2]
+    csi_effective_subcarriers = cfg.fft_size - (cfg.csi_guard_carriers_1 +  cfg.csi_guard_carriers_2 + cfg.dc_null)
 
     # Resource grid for channel estimation
     rg_csi = ResourceGrid(num_ofdm_symbols=14,
@@ -354,8 +448,8 @@ def test_phase_3_rx(cfg: SimConfig, ns3cfg: Ns3Config, x_rg, y_rg):
                           num_tx=1,
                           num_streams_per_tx=num_txs_ant,
                           cyclic_prefix_length=cfg.cyclic_prefix_len,
-                          num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
-                          dc_null=False,
+                          num_guard_carriers=cfg.num_guard_carriers,
+                          dc_null=cfg.dc_null,
                           pilot_pattern="kronecker",
                           pilot_ofdm_symbol_indices=[2, 11])
 
@@ -363,12 +457,12 @@ def test_phase_3_rx(cfg: SimConfig, ns3cfg: Ns3Config, x_rg, y_rg):
     phase_3_rx = Phase_3_RX(cfg, rg_csi)
 
     # MU-MIMO transmission (P2)
-    uncoded_ber, uncoded_ser = phase_3_rx(x_rg, y_rg)
+    uncoded_ber, uncoded_ser, per_stream_ber = phase_3_rx(x_rg, y_rg, rx_heltf)
 
-    return uncoded_ber, uncoded_ser
+    return uncoded_ber, uncoded_ser, per_stream_ber
 
 
-def test_phase_3_rx_all(cfg: SimConfig, ns3cfg: Ns3Config, x_rg, y_rg):
+def test_phase_3_rx_all(cfg: SimConfig, ns3cfg: Ns3Config, x_rg, y_rg, rx_heltf=None):
     """"
     Testing of phase 3 receiver using USRP received signal 
 
@@ -381,18 +475,22 @@ def test_phase_3_rx_all(cfg: SimConfig, ns3cfg: Ns3Config, x_rg, y_rg):
     total_cycles = 0
     uncoded_ber = 0
     uncoded_ser = 0
+    per_stream_ber_all = []
 
     for batch_idx in np.arange(y_rg.shape[0]):
 
-        curr_ber, curr_uncoded_ser = test_phase_3_rx(cfg, ns3cfg, x_rg, y_rg[batch_idx:batch_idx+1,...])
+        curr_ber, curr_uncoded_ser, per_stream_ber = test_phase_3_rx(cfg, ns3cfg, x_rg, y_rg[batch_idx:batch_idx+1,...], rx_heltf)
 
-        if curr_ber < 0.25: # May not always have enough received data. In this case we won't find 
+        if curr_ber < 0.4: # May not always have enough received data corresponding to all subframes in x_rg. In this case we won't always find a y_rg corresponding to an entry in x_rg
             uncoded_ber = uncoded_ber + curr_ber
             uncoded_ser = uncoded_ser + curr_uncoded_ser
             total_cycles += 1
 
+        per_stream_ber_all.append(per_stream_ber)
+                                  
     uncoded_ber = uncoded_ber / total_cycles
     uncoded_ser = uncoded_ser / total_cycles
+    per_stream_ber_all = np.asarray(per_stream_ber_all)
     
 
-    return uncoded_ber, uncoded_ser
+    return uncoded_ber, uncoded_ser, per_stream_ber_all

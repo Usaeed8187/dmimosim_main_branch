@@ -11,7 +11,7 @@ import tensorflow as tf
 from scipy.io import loadmat
 
 
-from dmimo.config import SimConfig, Ns3Config, MCSConfig
+from dmimo.config import SimConfig, Ns3Config
 from dmimo.phase_3_PIC_demo import test_phase_3_rx_all
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
@@ -71,16 +71,19 @@ if __name__ == "__main__":
     # cfg.rank_adapt = False      # disable rank adaptation
     # cfg.link_adapt = False      # disable link adaptation
     # cfg.csi_prediction = False
-    cfg.receiver = 'PIC'      # 'LMMSE', 'PIC'
+    cfg.receiver = 'LMMSE'      # 'LMMSE', 'PIC', 'SIC'
     cfg.num_tx_streams = 4
-    mcsconfig = MCSConfig()
-    rx_ues_arr = 2
-
+    num_rx_ues = cfg.num_tx_streams // 2
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
-
-    cfg.num_rx_ue_sel = rx_ues_arr
+    cfg.num_rx_ue_sel = num_rx_ues
     ns3cfg.num_rxue_sel = cfg.num_rx_ue_sel
-    cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
+    cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel) * 2), (ns3cfg.num_rxue_sel, -1))
+    cfg.modulation_order = 2
+    cfg.lmmse_chest = False
+    cfg.fft_size = 256
+    cfg.dc_null = True
+    cfg.csi_guard_carriers_1 = 6
+    cfg.csi_guard_carriers_2 = 5
 
     #############################################
     # Loading Transmit and Receive Data
@@ -90,14 +93,19 @@ if __name__ == "__main__":
     y = rx_data['y_freq']
     y_rg = y.transpose(2,3,1,0)[:, np.newaxis, ...]
 
-    if cfg.num_tx_streams == 2:
-        tx_data = np.load('tests/usrp_tx_sigs/phase_3/data_2_streams.npz')
-        x_rg = tx_data['x_rg_all_2_streams']
-    elif cfg.num_tx_streams == 4:
-        tx_data = np.load('tests/usrp_tx_sigs/phase_3/data_4_streams.npz')
-        x_rg = tx_data['x_rg_all_4_streams']
+    if cfg.lmmse_chest:
+        rx_heltf = y_rg[..., :4, :]
+        y_rg = y_rg[..., 4:, :]
     else:
-        raise ValueError('Number of streams should be 2 or 4')
+        rx_heltf = None
+        if y_rg.shape[-2] == 18:
+            y_rg = y_rg[..., 4:, :]
+    
+    tx_data_file = "tests/usrp_tx_sigs/phase_3/data_{}_streams_mod_order_{}.npz".format(cfg.num_tx_streams, cfg.modulation_order)
+    # tx_data_file = "tests/usrp_tx_sigs/phase_3/data_{}_streams.npz".format(cfg.num_tx_streams)
+    tx_data = np.load(tx_data_file)
+    key = "x_rg_all_{}_streams".format(cfg.num_tx_streams)
+    x_rg = tx_data[key]
 
     new_shape = [x_rg.shape[0] * x_rg.shape[1]] + list(x_rg.shape[2:])
     x_rg = tf.reshape(x_rg, new_shape)
@@ -106,10 +114,10 @@ if __name__ == "__main__":
     # Testing
     #############################################
 
-    uncoded_ber, uncoded_ser = test_phase_3_rx_all(cfg, ns3cfg, x_rg, y_rg)
+    uncoded_ber, uncoded_ser, per_stream_ber_all = test_phase_3_rx_all(cfg, ns3cfg, x_rg, y_rg, rx_heltf)
 
     file_path = "results/phase_3/usrp_channels_perfect_synch/{}_receiver/UEs_{}_streams_{}_modulation_order_{}.npz".format(
-                cfg.receiver, rx_ues_arr, cfg.num_tx_streams, mcsconfig.modulation_order)
+                cfg.receiver, num_rx_ues, cfg.num_tx_streams, cfg.modulation_order)
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
-    np.savez(file_path, uncoded_ber=uncoded_ber, uncoded_ser=uncoded_ser)
+    np.savez(file_path, uncoded_ber=uncoded_ber, uncoded_ser=uncoded_ser, per_stream_ber_all=per_stream_ber_all)
