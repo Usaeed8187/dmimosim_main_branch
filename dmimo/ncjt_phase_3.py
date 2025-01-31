@@ -182,10 +182,12 @@ class NCJT_phase_3(Model):
             nvar = 5e-2  # TODO optimize value
             x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi_dl, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "none":
+            x_rg = tf.reshape(x_rg, tf.concat([[x_rg.shape[0]], [-1], x_rg.shape[3:]], axis=0))
             x_rg_shape = x_rg.shape
-            padding_shape = tf.tensor_scatter_nd_update(x_rg_shape, [[2]], [h_freq_csi_dl.shape[-3] - x_rg.shape[2]])
+            padding_shape = tf.tensor_scatter_nd_update(x_rg_shape, [[1]], [h_freq_csi_dl.shape[-3] - x_rg.shape[1]])
             padding = tf.zeros(padding_shape, dtype=x_rg.dtype)
-            x_precoded = tf.concat([x_rg, padding], axis=2)
+            x_precoded = tf.concat([x_rg, padding], axis=1)
+            x_precoded = x_precoded[:, tf.newaxis, ...]
         else:
             ValueError("unsupported precoding method")
 
