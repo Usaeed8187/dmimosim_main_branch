@@ -339,11 +339,11 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     else:
         # LMMSE channel estimation
         h_freq_csi_dl, err_var_csi_dl = lmmse_channel_estimation(p3_chans_dl, rg_csi,
-                                                           slot_idx=cfg.first_slot_idx,
+                                                           slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                            cfo_vals=cfg.random_cfo_vals,
                                                            sto_vals=cfg.random_sto_vals)
         h_freq_csi_ul, err_var_csi_ul = lmmse_channel_estimation(p3_chans_ul, rg_csi,
-                                                           slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+                                                           slot_idx=cfg.first_slot_idx,
                                                            cfo_vals=cfg.random_cfo_vals,
                                                            sto_vals=cfg.random_sto_vals)
 
