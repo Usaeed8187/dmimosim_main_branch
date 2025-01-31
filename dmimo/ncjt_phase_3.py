@@ -242,6 +242,9 @@ class NCJT_phase_3(Model):
 
             # Soft-output QAM demapper
             llr = self.demapper([x_hat, no_eff])
+            llr = tf.gather(llr, [0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13], axis=-2)
+            llr = tf.reshape(llr, tf.concat([x_hat.shape[0:3], [-1]], axis=0))
+
 
             # Hard-decision bit error rate
             d_hard = tf.cast(llr > 0, tf.float32)
