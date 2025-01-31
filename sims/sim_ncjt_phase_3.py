@@ -68,6 +68,7 @@ print(f"Arguments: {arguments}")
 if len(arguments) > 0:
     mobility = arguments[0]
     drop_idx = arguments[1]
+    
     rx_ues_arr = arguments[2:]
     rx_ues_arr = np.array(rx_ues_arr, dtype=int)
     
@@ -88,21 +89,22 @@ if __name__ == "__main__":
     cfg.rank_adapt = False                                          # disable rank adaptation
     cfg.link_adapt = False                                          # disable link adaptation
     cfg.csi_prediction = False
-    cfg.receiver = 'SIC'                                            # 'LMMSE', 'PIC', 'SIC'
-    cfg.num_tx_streams = 4
-    num_rx_ues = cfg.num_tx_streams // 2
-    cfg.num_rx_ue_sel = num_rx_ues
-    cfg.num_scheduled_rx_ue = num_rx_ues
-    cfg.modulation_order = 2
     cfg.lmmse_chest = True
     cfg.fft_size = 512
     cfg.dc_null = False
-    cfg.precoding_method = 'none'
     if arguments == []:
         mobility = 'high_mobility'
         drop_idx = '1'
         rx_ues_arr = [2]
-    
+        precoding_method = 'none'                               # 'none', 'SVD'
+        receiver = 'SIC'                                        # 'LMMSE', 'PIC', 'SIC'
+    cfg.num_rx_ue_sel = rx_ues_arr[0]
+    cfg.num_scheduled_rx_ue = rx_ues_arr[0]
+    cfg.num_tx_streams = 4
+    cfg.modulation_order = 2
+    cfg.precoding_method = precoding_method
+    cfg.receiver = receiver
+
     # NS3 Configs
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
