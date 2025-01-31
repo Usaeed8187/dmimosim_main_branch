@@ -4,7 +4,7 @@ from tensorflow.python.keras import Model
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 
-from sionna.ofdm import ResourceGrid, ResourceGridMapper, ResourceGridDemapper,  LSChannelEstimator, LMMSEEqualizer, MMSEPICDetector
+from sionna.ofdm import ResourceGrid, ResourceGridMapper, ResourceGridDemapper,  LSChannelEstimator, LMMSEEqualizer, MMSEPICDetector, RemoveNulledSubcarriers
 from sionna.mimo import StreamManagement
 
 from sionna.fec.ldpc.encoding import LDPC5GEncoder
@@ -45,7 +45,7 @@ class NCJT_phase_3(Model):
 
         # To use sionna-compatible interface, regard TxSquad as one BS transmitter
         # A 4-antennas basestation is regarded as the combination of two 2-antenna UEs
-        self.num_streams_per_tx = cfg.num_tx_streams
+        self.num_streams_per_tx = cfg.num_tx_streams // cfg.num_scheduled_rx_ue
 
         self.num_ue_ant = 2  # assuming 2 antennas per UE for reshaping data/channels
         if cfg.ue_indices is None:
@@ -61,7 +61,7 @@ class NCJT_phase_3(Model):
 
         # Create an RX-TX association matrix
         # rx_tx_association[i,j]=1 means that receiver i gets at least one stream from transmitter j.
-        rx_tx_association = np.ones((self.num_rx_ue, 1))
+        rx_tx_association = np.ones((1, cfg.num_scheduled_rx_ue))
 
         # Instantiate a StreamManagement object
         # This determines which data streams are determined for which receiver.
@@ -81,19 +81,21 @@ class NCJT_phase_3(Model):
         self.rg = ResourceGrid(num_ofdm_symbols=14,
                                fft_size=cfg.fft_size,
                                subcarrier_spacing=cfg.subcarrier_spacing,
-                               num_tx=1,
+                               num_tx=cfg.num_scheduled_rx_ue,
                                num_streams_per_tx=self.num_streams_per_tx,
                                cyclic_prefix_length=64,
                                num_guard_carriers=[guard_carriers_1, guard_carriers_2],
-                               dc_null=False,
+                               dc_null=cfg.dc_null,
                                pilot_pattern="kronecker",
                                pilot_ofdm_symbol_indices=[2, 11])
+        
+        self.remove_nulled_scs = RemoveNulledSubcarriers(self.rg)
 
         # Update number of data bits and LDPC params
         self.ldpc_n = int(2 * self.rg.num_data_symbols)  # Number of coded bits
         self.ldpc_k = int(self.ldpc_n * cfg.code_rate)  # Number of information bits
         self.num_codewords = cfg.modulation_order // 2  # number of codewords per frame
-        self.num_bits_per_frame = self.ldpc_k * self.num_codewords * self.num_streams_per_tx
+        self.num_bits_per_frame = self.ldpc_k * self.num_codewords * self.num_streams_per_tx  * self.cfg.num_scheduled_rx_ue
         self.num_uncoded_bits_per_frame = self.ldpc_n * self.num_codewords * self.num_streams_per_tx
 
         # The encoder maps information bits to coded bits
@@ -142,7 +144,7 @@ class NCJT_phase_3(Model):
         # Using LMMSE CE from NCJT Demo code
         self.ncjt_rx = MC_NCJT_RxUE(self.cfg, batch_size=self.batch_size , modulation_order_list=[self.cfg.modulation_order])
 
-    def call(self, dmimo_chans_ul, dmimo_chans_dl, h_freq_csi_dl, info_bits):
+    def call(self, p3_chans_ul, h_freq_csi_dl, h_freq_csi_ul, err_var_csi_ul, info_bits):
         """
         Signal processing for one MU-MIMO transmission cycle (P2)
 
@@ -152,275 +154,123 @@ class NCJT_phase_3(Model):
         :return: decoded bits, uncoded BER, demodulated QAM symbols (for debugging purpose)
         """
 
-        # Pre-processing USRP rx data (from phase 3 gNB)
-        y = tf.cast(y, dtype=x_rg.dtype)
+        # LDPC encoder processing
+        info_bits = tf.reshape(info_bits, [self.batch_size, self.cfg.num_scheduled_rx_ue, self.rg.num_streams_per_tx,
+                                           self.num_codewords, self.encoder.k])
+        c = self.encoder(info_bits)
+        c = tf.reshape(c, [self.batch_size, self.cfg.num_scheduled_rx_ue, self.rg.num_streams_per_tx, self.num_codewords * self.encoder.n])
 
-        #############################################
-        # Processing transmit data
-        #############################################
+        # Interleaving for coded bits
+        d = self.intlvr(c)
 
-        # Initializing LDPC encoding and interleaving (needed for decoding. the actual bits in these lines are not used)
-        batch_size = x_rg.shape[0]
-        num_codewords = self.cfg.modulation_order // 2
-        encoder_k = self.ldpc_k
-        info_bits = tf.cast(
-                        tf.random.uniform(
-                            [batch_size, 1, self.num_streams_per_tx, num_codewords, encoder_k],
-                            minval=0,
-                            maxval=2,  # Exclusive upper bound
-                            dtype=tf.int32,
-                        ), dtype=tf.float32)
-        c_temp = self.encoder(info_bits)
-        c_temp = tf.reshape(c_temp, [batch_size, 1, self.num_streams_per_tx, num_codewords * self.encoder.n])
-        d_temp = self.intlvr(c_temp)
+        # QAM mapping for the OFDM grid
+        x = self.mapper(d)
+        x_rg = self.rg_mapper(x)
 
-        # Reshaping USRP tx data (sent from phase 3 UEs)
-        x = self.rg_demapper(x_rg)
-        # x = tf.repeat(x, repeats=y.shape[0], axis=0)
-        no_eff_x = 1e-5
-        llr_tx = self.demapper([x, no_eff_x])
-        tx_bits_coded_intlvd = tf.cast(llr_tx > 0, tf.float32)
-        # Deinterleaving and LDPC decoding for transmit bits
-        llr_tx = self.dintlvr(llr_tx)
-        tx_bits = self.decoder(llr_tx)
+        # # [batch_size, num_rx, num_rxs_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
+        # h_freq_csi = h_freq_csi[:, :, :self.num_rxs_ant, :, :, :, :]
 
-        #############################################
-        # Processing received data
-        #############################################
+        # # [batch_size, num_rx_ue, num_ue_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
+        # h_freq_csi = tf.reshape(h_freq_csi, (-1, self.num_rx_ue, self.num_ue_ant, *h_freq_csi.shape[3:]))
 
-        if self.cfg.lmmse_chest:
-
-            # new shape: (batch_size, num_subcarrier, num_rx_ant, num_ltf)
-            he_ltf = tf.squeeze(tf.transpose(rx_heltf, [1, 0, 4, 2, 3]))
-
-            h1_hat = self.ncjt_rx.heltf_channel_estimate(he_ltf[..., 0:2])  # (num_batch, num_subcarrier, num_rx_ant, num_ss)
-            h2_hat = self.ncjt_rx.heltf_channel_estimate(he_ltf[..., 2:4])  # (num_batch, num_subcarrier, num_rx_ant, num_ss)
-            h_hat = tf.concat((h1_hat, h2_hat), axis=-1)
-            # h_hat_averaged = insert_dims(h_hat, 1, axis=2)
-            # h_hat_averaged = tf.repeat(h_hat_averaged, len(self.ncjt_rx.data_syms) // 2, axis=2)
-
-            # Channel covariance statistics
-            freq_cov = self.ncjt_rx.estimate_freq_cov(h_hat)
-            lmmse_int = LMMSELinearInterp(self.rg.pilot_pattern, freq_cov)
-            self.lmmse_est = LSChannelEstimator(self.rg, interpolator=lmmse_int)
-            no = 5e-3
-            h_hat, err_var = self.lmmse_est([y, no])
-
+        # apply precoding to OFDM grids
+        if self.cfg.precoding_method == "ZF":
+            x_precoded, g = self.zf_precoder([x_rg, h_freq_csi_dl, self.cfg.ue_indices, self.cfg.ue_ranks])
+        elif self.cfg.precoding_method == "BD":
+            x_precoded, g = self.bd_precoder([x_rg, h_freq_csi_dl, self.cfg.ue_indices, self.cfg.ue_ranks])
+        elif self.cfg.precoding_method == "SLNR":
+            nvar = 5e-2  # TODO optimize value
+            x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi_dl, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
+        elif self.cfg.precoding_method == "none":
+            x_rg_shape = x_rg.shape
+            padding_shape = tf.tensor_scatter_nd_update(x_rg_shape, [[2]], [h_freq_csi_dl.shape[-3] - x_rg.shape[2]])
+            padding = tf.zeros(padding_shape, dtype=x_rg.dtype)
+            x_precoded = tf.concat([x_rg, padding], axis=2)
         else:
-            # LS channel estimation with linear interpolation
-            no = 1e-5  # initial noise estimation (tunable param)
-            h_hat, err_var = self.ls_estimator([y, no])
+            ValueError("unsupported precoding method")
 
-        debug = True
-        if debug:
-            sym_idx = 11 
-            plt.figure(figsize=(48, 12))
-            plot_idx = 1
-            for ue_idx in range(self.cfg.num_rx_ue_sel):
-                for ue_ant_idx in range(2):
-                    for bs_ant_idx in range(4):
-                        plt.subplot(self.cfg.num_rx_ue_sel, 4*2, plot_idx)
-                        plt.plot(np.real(h_hat[0, 0, bs_ant_idx, ue_idx, ue_ant_idx, sym_idx, :]), label='Real_Tx{}_Rx{}'.format(ue_ant_idx, bs_ant_idx), linewidth=2)
-                        plt.title(f'UE_{ue_idx}_UEAnt_{ue_ant_idx}_BSAnt_{bs_ant_idx}', fontsize=18, fontweight='bold')
-                        # plt.plot(np.imag(h_hat[0, 0, bs_ant_idx, ue_idx, ue_ant_idx, 0, :]), label='Imag_Tx{}_Rx{}'.format(ue_ant_idx, bs_ant_idx))
-                        # plt.plot(np.abs(h_hat[0, 0, bs_ant_idx, ue_idx, ue_ant_idx, 0, :]), label='Abs_Tx{}_Rx{}'.format(ue_ant_idx, bs_ant_idx))
-                        plot_idx += 1
-            plt.legend()
-            plt.suptitle("Channel Real Part for UEs and Antennas", fontsize=24, fontweight='bold', y=1.02)  # Main title
-            plt.tight_layout(rect=[0, 0, 1, 0.98])  # Adjust layout to fit title
-            plt.savefig('channel_estimates_all')
+        # add CFO/STO to simulate synchronization errors
+        if np.any(np.not_equal(self.cfg.random_sto_vals, 0)):
+            x_precoded = add_timing_offset(x_precoded, self.cfg.random_sto_vals)
+        if np.any(np.not_equal(self.cfg.random_cfo_vals, 0)):
+            x_precoded = add_frequency_offset(x_precoded, self.cfg.random_cfo_vals)
 
+        # apply dMIMO channels to the resource grid in the frequency domain.
+        y, _ = p3_chans_ul([x_precoded, self.cfg.first_slot_idx])
 
-            # plt.figure()
-            # plt.plot(np.real(h_hat[0,0,0,ue_idx,0,0,:]), label='Real')
-            # # plt.plot(np.imag(h_hat[0,0,0,0,0,0,:]), label='Imag')
-            # # plt.plot(np.abs(h_hat[0,0,0,0,0,0,:]), label='Abs')
-            # plt.legend()
-            # plt.title('Antenna_0_0')
-            # plt.savefig('Antenna_0_0')
+        if self.cfg.precoding_method == "BD":
+            y = self.bd_equalizer([y, h_freq_csi_dl, self.cfg.ue_indices, self.cfg.ue_ranks])
+        elif self.cfg.precoding_method == "SLNR":
+            y = self.slnr_equalizer([y, h_freq_csi_dl, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
 
-            # plt.figure()
-            # plt.plot(np.real(h_hat[0,0,2,ue_idx,1,0,:]), label='Real')
-            # # plt.plot(np.imag(h_hat[0,0,2,0,1,0,:]), label='Imag')
-            # # plt.plot(np.abs(h_hat[0,0,2,0,1,0,:]), label='Abs')
-            # plt.legend()
-            # plt.title('Antenna_2_1')
-            # plt.savefig('Antenna_2_1')
+        no = 5e-2  # initial noise estimation (tunable param)
 
-            # plt.figure()
-            # plt.plot(np.real(h_hat[0,0,3,ue_idx,1,0,:]), label='Real')
-            # # plt.plot(np.imag(h_hat[0,0,3,0,1,0,:]), label='Imag')
-            # # plt.plot(np.abs(h_hat[0,0,3,0,1,0,:]), label='Abs')
-            # plt.legend()
-            # plt.title('Antenna_3_1')
-            # plt.savefig('Antenna_3_1')
-
-            # y_np = y.numpy()
-            # x_rg_np = x_rg.numpy()
-            # h_ls_np = np.zeros((y_np.shape[2], x_rg_np.shape[2], 2, len(self.rg.effective_subcarrier_ind)), dtype=np.complex64)
-
-            # sym_ids = [2, 11]
-            # for sym_idx, sym_id in enumerate(sym_ids):
-            #     for rx_id in range(y.shape[2]):
-            #         for tx_id in range(x_rg.shape[2]):
-
-            #             h_ls_np[rx_id, tx_id, sym_idx, :] = y_np[0, 0, rx_id, sym_id, self.rg.effective_subcarrier_ind] / x_rg_np[0, 0, tx_id, sym_id, self.rg.effective_subcarrier_ind]
-            
-            # h_ls = tf.convert_to_tensor(h_ls_np)
-            
-            # num_ue_ants = 2
-            # h_ls_reshaped = np.reshape(h_ls_np, [h_ls_np.shape[0], self.cfg.num_rx_ue_sel, num_ue_ants, len(sym_ids), self.rg.num_effective_subcarriers])
-            # for sym_idx, sym_id in enumerate(sym_ids):
-            #     for rx_ant_id in range(y.shape[2]):
-            #         for tx_node_id in range(self.cfg.num_rx_ue_sel):
-            #             for tx_ant_id in range(num_ue_ants):
-                            
-            #                 curr_h_ls_all = h_ls_reshaped[rx_ant_id, tx_node_id, tx_ant_id, sym_idx, :]
-            #                 pilot_indices = np.where(np.isfinite(curr_h_ls_all))[0]
-            #                 non_pilot_indices = np.where(~np.isfinite(curr_h_ls_all))[0]
-
-            #                 curr_h_ls_pilots = curr_h_ls_all[pilot_indices]
-
-            #                 interp_real = interp1d(pilot_indices, curr_h_ls_pilots.real, kind='linear', fill_value="extrapolate")
-            #                 interp_imag = interp1d(pilot_indices, curr_h_ls_pilots.imag, kind='linear', fill_value="extrapolate")
-            #                 interpolated_real = interp_real(non_pilot_indices)
-            #                 interpolated_imag = interp_imag(non_pilot_indices)
-
-            #                 h_ls_reshaped[rx_ant_id, tx_node_id, tx_ant_id, sym_idx, non_pilot_indices] = interpolated_real + 1j * interpolated_imag
-
-            # h_ls_np = np.reshape(h_ls_reshaped, [h_ls_reshaped.shape[0], -1, h_ls_reshaped.shape[-2], h_ls_reshaped.shape[-1]])
-            
-            # plt.figure()
-            # plt.plot(np.real(h_ls_np[0,0,0,:]))
-            # plt.plot(np.real(h_hat[0,0,0,0,0,2,:]))
-            # plt.savefig('a')
-        debug = False
+        # Reshaping
+        # [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, num_effective_subcarriers]
+        h_freq_csi_ul = tf.gather(h_freq_csi_ul, tf.range(self.cfg.num_scheduled_rx_ue * 2), axis=4)
+        h_freq_csi_ul = tf.reshape(h_freq_csi_ul, tf.concat([h_freq_csi_ul.shape[:3], [-1], [self.cfg.num_scheduled_rx_ue], h_freq_csi_ul.shape[5:]], axis=0))
+        h_freq_csi_ul = self.remove_nulled_scs(h_freq_csi_ul)
+        
+        # [batch_size, num_rx, 1, num_tx, num_tx_ant, num_ofdm_symbols, num_effective_subcarriers]
+        _, err_var = self.ls_estimator([y, no])
+        err_var = tf.reshape(err_var, tf.concat([err_var.shape[:3], [self.cfg.num_scheduled_rx_ue], [-1], err_var.shape[5:]], axis=0))
 
         if self.cfg.receiver == 'PIC':
 
             # PIC Detector
-            prior = tf.zeros(llr_tx.shape[1:])
-            prior = prior[tf.newaxis, ...]
-            det_out = self.detector((y, h_hat, prior, err_var, no))
+            prior = tf.zeros((self.batch_size, x_rg.shape[2] // self.cfg.num_scheduled_rx_ue, self.cfg.num_scheduled_rx_ue, h_freq_csi_ul.shape[-1] * self.cfg.modulation_order * (self.rg.num_ofdm_symbols - 2)))
+            det_out = self.detector((y, h_freq_csi_ul, prior, err_var, no))
             
             # Hard-decision bit error rate
             d_hard = tf.cast(det_out > 0, tf.float32)
 
-            # # LLR deinterleaving
-            # llr = tf.reshape(det_out, prior.shape)
-            # llr = self.dintlvr(llr)
-
-            # # LDPC decoder
-            # llr = tf.reshape(llr, [1, 1, self.num_streams_per_tx, num_codewords * self.encoder.n])
-            # dec_bits = self.decoder(llr)
-
-            uncoded_ber = 0.5
-            start_subframe_idx = 0
-            for curr_batch_idx in range(tx_bits_coded_intlvd.shape[0]):                
-                curr_ber = compute_ber(tx_bits_coded_intlvd[curr_batch_idx:curr_batch_idx+1, ...], d_hard).numpy()
-
-                if curr_ber < uncoded_ber:
-                    uncoded_ber = curr_ber
-                    start_subframe_idx = curr_batch_idx
-
-            per_stream_ber = np.zeros((self.cfg.num_rx_ue_sel, self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel))
-            for ue_idx in range(self.cfg.num_rx_ue_sel):
-                for stream_idx in range(self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel):
-                    per_stream_ber[ue_idx, stream_idx] = compute_ber(tx_bits_coded_intlvd[start_subframe_idx:start_subframe_idx+1, ue_idx, stream_idx, :], d_hard[:,ue_idx, stream_idx,:]).numpy()
-        
         elif self.cfg.receiver == 'LMMSE':
 
             # LMMSE equalization
-            x_hat, no_eff = self.lmmse_equ([y, h_hat, err_var, no])
-
+            x_hat, no_eff = self.lmmse_equ([y, h_freq_csi_ul, err_var, no])
+            
             # Soft-output QAM demapper
             llr = self.demapper([x_hat, no_eff])
 
             # Hard-decision bit error rate
-            d_hard = tf.cast(llr > 0, tf.float32)
-            
-            sc_ind = 6
-            sym_ind = 1
-            uncoded_ber = 0.5
-            start_subframe_idx = 0
-            for curr_batch_idx in range(tx_bits_coded_intlvd.shape[0]):                
-                curr_ber = compute_ber(tx_bits_coded_intlvd[curr_batch_idx:curr_batch_idx+1, ...], d_hard).numpy()
-
-                # expected_signal = h_hat[curr_batch_idx,0,:,0,:,sym_ind,sc_ind-6] @ x_rg[0,0,:,sym_ind,sc_ind:sc_ind+1]
-                # actual_signal = y[curr_batch_idx, 0, :, sym_ind,sc_ind:sc_ind+1]
-
-                if curr_ber < uncoded_ber:
-                    uncoded_ber = curr_ber
-                    start_subframe_idx = curr_batch_idx
-            
-            per_stream_ber = np.zeros((self.cfg.num_rx_ue_sel, self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel))
-            for ue_idx in range(self.cfg.num_rx_ue_sel):
-                for stream_idx in range(self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel):
-                    per_stream_ber[ue_idx, stream_idx] = compute_ber(tx_bits_coded_intlvd[start_subframe_idx:start_subframe_idx+1, ue_idx, stream_idx, :], d_hard[:,ue_idx, stream_idx,:]).numpy()
-
-
-            debug = True
-            if debug:
-                x_hat_np = x_hat[0,0,0,:].numpy()
-                x_real = np.real(x_hat_np)
-                x_imag = np.imag(x_hat_np)
-
-                plt.figure()
-                plt.scatter(x_real, x_imag, alpha=0.7)
-                plt.grid(True)
-                plt.savefig('b')
-            debug = False
+            d_hard = tf.cast(llr > 0, tf.float32)       
         
         elif self.cfg.receiver == 'SIC':
             
-            # LMMSE equalization
-            x_hat, no_eff = self.sic_lmmse_equ([y, h_hat, err_var, no, self.num_streams_per_tx])
+            # SIC+LMMSE equalization
+            x_hat, no_eff = self.sic_lmmse_equ([y, h_freq_csi_ul, err_var, no, self.num_streams_per_tx])
 
             # Soft-output QAM demapper
             llr = self.demapper([x_hat, no_eff])
 
             # Hard-decision bit error rate
             d_hard = tf.cast(llr > 0, tf.float32)
+        
+        uncoded_ber = compute_ber(d, d_hard).numpy()
 
-            # Take the data carrying ofdm symbols of d_hard
-            data_ofdm_syms = tf.range(self.rg.num_ofdm_symbols)
-            mask = ~tf.reduce_any(tf.equal(tf.expand_dims(data_ofdm_syms, 1), self.rg._pilot_ofdm_symbol_indices), axis=1)
-            data_ofdm_syms = tf.boolean_mask(data_ofdm_syms, mask)
-            d_hard = tf.gather(d_hard, data_ofdm_syms, axis=-2)
-            d_hard = tf.reshape(d_hard, (d_hard.shape[0], d_hard.shape[1], d_hard.shape[2], -1))
-            
-            sc_ind = 6
-            sym_ind = 1
-            uncoded_ber = 0.5
-            start_subframe_idx = 0
-            for curr_batch_idx in range(tx_bits_coded_intlvd.shape[0]):                
-                curr_ber = compute_ber(tx_bits_coded_intlvd[curr_batch_idx:curr_batch_idx+1, ...], d_hard).numpy()
-
-                # expected_signal = h_hat[curr_batch_idx,0,:,0,:,sym_ind,sc_ind-6] @ x_rg[0,0,:,sym_ind,sc_ind:sc_ind+1]
-                # actual_signal = y[curr_batch_idx, 0, :, sym_ind,sc_ind:sc_ind+1]
-
-                if curr_ber < uncoded_ber:
-                    uncoded_ber = curr_ber
-                    start_subframe_idx = curr_batch_idx
-            
-            per_stream_ber = np.zeros((self.cfg.num_rx_ue_sel, self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel))
-            for ue_idx in range(self.cfg.num_rx_ue_sel):
-                for stream_idx in range(self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel):
-                    per_stream_ber[ue_idx, stream_idx] = compute_ber(tx_bits_coded_intlvd[start_subframe_idx:start_subframe_idx+1, ue_idx, stream_idx, :], d_hard[:,ue_idx, stream_idx,:]).numpy()
-
+        per_stream_ber = np.zeros((self.cfg.num_rx_ue_sel, self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel))
+        for ue_idx in range(self.cfg.num_rx_ue_sel):
+            for stream_idx in range(self.cfg.num_tx_streams // self.cfg.num_rx_ue_sel):
+                per_stream_ber[ue_idx, stream_idx] = compute_ber(d[:, ue_idx, stream_idx, :], d_hard[:,ue_idx, stream_idx,:]).numpy()
 
         # Hard-decision symbol error rate
         x_hard = self.mapper(d_hard)
-        uncoded_ser = np.count_nonzero(x[start_subframe_idx:start_subframe_idx+1, ...] - x_hard) / np.prod(x_hard.shape)
+        uncoded_ser = np.count_nonzero(x - x_hard) / np.prod(x.shape)
 
-        print("subframe index = ", start_subframe_idx, "\n", "per_stream_ber = ", per_stream_ber, "\n \n")
+        # LLR deinterleaver for LDPC decoding
+        llr = self.dintlvr(llr)
+        llr = tf.reshape(llr, [self.batch_size, self.cfg.num_scheduled_rx_ue, self.rg.num_streams_per_tx, self.num_codewords, self.encoder.n])
 
-        return uncoded_ber, uncoded_ser, per_stream_ber
+        # LDPC hard-decision decoding
+        dec_bits = self.decoder(llr)
 
+        print("per_stream_ber = ", per_stream_ber, "\n \n")
+
+        return dec_bits, uncoded_ber, uncoded_ser, x_hat
 
 def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     """
-    Simulation of MU-MIMO scenarios using different settings
+    Simulation of NCJT Phase 3 scenarios using different settings
 
     :param cfg: simulation settings
     :param ns3cfg: ns-3 channel settings
@@ -437,7 +287,7 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
         ns3cfg.reset_ue_selection()
         tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
         ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
-        cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
+        cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel) * 2), (ns3cfg.num_rxue_sel, -1))
 
     # dMIMO channels from ns-3 simulator
     p3_chans_ul = dMIMOChannels(ns3cfg, "RxSquad", forward=True, add_noise=True)
@@ -487,35 +337,10 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
                                                            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                            cfo_vals=cfg.random_cfo_vals,
                                                            sto_vals=cfg.random_sto_vals)
-
-    # # Rank and link adaptation
-    
-    # _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-    #                                             batch_size=cfg.num_slots_p2)
-    # rank_feedback_report, n_var, mcs_feedback_report = \
-    #     do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
-
-    # if cfg.rank_adapt and cfg.link_adapt:
-    #     # Update rank and total number of streams
-    #     rank = rank_feedback_report[0]
-    #     cfg.ue_ranks = [rank]
-    #     cfg.num_tx_streams = rank * (ns3cfg.num_rxue_sel + 2)  # treat BS as two UEs
-
-    #     qam_order_arr = mcs_feedback_report[0]
-    #     code_rate_arr = mcs_feedback_report[1]
-    #     values, counts = np.unique(qam_order_arr, return_counts=True)
-    #     most_frequent_value = values[np.argmax(counts)]
-    #     cfg.modulation_order = int(most_frequent_value)
-
-    #     print("\n", "rank per user (MU-MIMO) = ", rank, "\n")
-    #     # print("\n", "rate per user (MU-MIMO) = ", rate, "\n")
-
-    #     values, counts = np.unique(code_rate_arr, return_counts=True)
-    #     most_frequent_value = values[np.argmax(counts)]
-    #     cfg.code_rate = most_frequent_value
-
-    #     print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
-    #     print("\n", "Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
+        h_freq_csi_ul, err_var_csi_ul = lmmse_channel_estimation(p3_chans_ul, rg_csi,
+                                                           slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+                                                           cfo_vals=cfg.random_cfo_vals,
+                                                           sto_vals=cfg.random_sto_vals)
 
     # Create MU-MIMO simulation
     ncjt_phase_3 = NCJT_phase_3(cfg, rg_csi)
@@ -525,42 +350,19 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     info_bits = binary_source([cfg.num_slots_p1, ncjt_phase_3.num_bits_per_frame])
 
     # Phase 3 NCJT transmission
-    dec_bits, uncoded_ber, uncoded_ser, x_hat = ncjt_phase_3(p3_chans_ul, p3_chans_dl, h_freq_csi_dl, info_bits)
+    dec_bits, uncoded_ber, uncoded_ser = ncjt_phase_3(p3_chans_ul, h_freq_csi_dl, h_freq_csi_ul, err_var_csi_ul, info_bits)
 
     # Update average error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape)
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
 
-    # Update per-node error statistics
-    num_tx_streams_per_node = int(cfg.num_tx_streams/(cfg.num_rx_ue_sel+2))
-    node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, num_tx_streams_per_node, cfg.num_tx_streams)
-    
-
-    # RxSquad transmission (P3)
-    if cfg.enable_rxsquad is True:
-        rxcfg = cfg.clone()
-        rxcfg.csi_delay = 0
-        rxcfg.perfect_csi = True
-        rx_squad = RxSquad(rxcfg, mu_mimo.num_bits_per_frame)
-        # print("RxSquad using modulation order {} for {} streams / {}".format(
-        #     rx_squad.num_bits_per_symbol, mu_mimo.num_streams_per_tx, mu_mimo.mapper.constellation.num_bits_per_symbol))
-        rxscfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
-        rxs_chans = dMIMOChannels(rxscfg, "RxSquad", add_noise=True)
-        received_bits, rxs_ber, rxs_bler, rxs_ber_max, rxs_bler_max = rx_squad(rxs_chans, dec_bits)
-        print("BER: {}  BLER: {}".format(rxs_ber, rxs_bler))
-        assert rxs_ber <= 1e-3 and rxs_ber_max <= 1e-2, "RxSquad transmission BER too high"
-
     # Goodput and throughput estimation
-    goodbits = (1.0 - coded_ber) * mu_mimo.num_bits_per_frame
-    userbits = (1.0 - coded_bler) * mu_mimo.num_bits_per_frame
-    ratedbits = (1.0 - uncoded_ser) * mu_mimo.num_uncoded_bits_per_frame
+    goodbits = (1.0 - coded_ber) * ncjt_phase_3.num_bits_per_frame
+    userbits = (1.0 - coded_bler) * ncjt_phase_3.num_bits_per_frame
+    ratedbits = (1.0 - uncoded_ser) * ncjt_phase_3.num_uncoded_bits_per_frame
 
-    node_wise_goodbits = (1.0 - node_wise_ber) * mu_mimo.num_bits_per_frame / (cfg.num_rx_ue_sel + 1)
-    node_wise_userbits = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_rx_ue_sel + 1)
-    node_wise_ratedbits = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_rx_ue_sel + 1)
-
-    return [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits], [node_wise_goodbits, node_wise_userbits, node_wise_ratedbits, ranks_list, sinr_dB_arr]
+    return [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits]
 
 
 
@@ -598,12 +400,6 @@ def sim_ncjt_phase_3_all(cfg: SimConfig, ns3cfg: Ns3Config):
         goodput += bits[0]
         throughput += bits[1]
         bitrate += bits[2]
-        
-        nodewise_goodput.append(additional_KPIs[0])
-        nodewise_throughput.append(additional_KPIs[1])
-        nodewise_bitrate.append(additional_KPIs[2])
-        ranks_list.append(additional_KPIs[3])
-        sinr_dB_list.append(additional_KPIs[4])
 
 
     slot_time = cfg.slot_duration  # default 1ms subframe/slot duration
@@ -612,13 +408,4 @@ def sim_ncjt_phase_3_all(cfg: SimConfig, ns3cfg: Ns3Config):
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
-    nodewise_goodput = np.concatenate(nodewise_goodput) / (slot_time * 1e6) * overhead  # Mbps
-    nodewise_throughput = np.concatenate(nodewise_throughput) / (slot_time * 1e6) * overhead  # Mbps
-    nodewise_bitrate = np.concatenate(nodewise_bitrate) / (slot_time * 1e6) * overhead  # Mbps
-    ranks = np.concatenate(ranks_list)
-    if sinr_dB_list[0] is not None:
-        sinr_dB = np.concatenate(sinr_dB_list)
-    else:
-        sinr_dB = None
-
-    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate, nodewise_goodput, nodewise_throughput, nodewise_bitrate, ranks, uncoded_ber_list, ldpc_ber_list, sinr_dB]
+    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate]
