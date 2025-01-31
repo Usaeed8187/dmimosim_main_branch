@@ -81,14 +81,14 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 20        # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
-    cfg.csi_delay = 0           # feedback delay in number of subframe
+    cfg.total_slots = 20                                            # total number of slots in ns-3 channels
+    cfg.start_slot_idx = 15                                         # starting slots (must be greater than csi_delay + 5)
+    cfg.csi_delay = cfg.num_slots_p1 + cfg.num_slots_p2             # feedback delay in number of subframe
     cfg.perfect_csi = False
-    cfg.rank_adapt = False      # disable rank adaptation
-    cfg.link_adapt = False      # disable link adaptation
+    cfg.rank_adapt = False                                          # disable rank adaptation
+    cfg.link_adapt = False                                          # disable link adaptation
     cfg.csi_prediction = False
-    cfg.receiver = 'SIC'      # 'LMMSE', 'PIC', 'SIC'
+    cfg.receiver = 'SIC'                                            # 'LMMSE', 'PIC', 'SIC'
     cfg.num_tx_streams = 4
     num_rx_ues = cfg.num_tx_streams // 2
     cfg.num_rx_ue_sel = num_rx_ues
