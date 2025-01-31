@@ -271,7 +271,7 @@ class NCJT_phase_3(Model):
 
         print("per_stream_ber = ", per_stream_ber, "\n \n")
 
-        return dec_bits, uncoded_ber, uncoded_ser, x_hat
+        return dec_bits, uncoded_ber, uncoded_ser, per_stream_ber
 
 def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     """
@@ -355,7 +355,7 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     info_bits = binary_source([cfg.num_slots_p1, ncjt_phase_3.num_bits_per_frame])
 
     # Phase 3 NCJT transmission
-    dec_bits, uncoded_ber, uncoded_ser = ncjt_phase_3(p3_chans_ul, h_freq_csi_dl, h_freq_csi_ul, err_var_csi_ul, info_bits)
+    dec_bits, uncoded_ber, uncoded_ser, per_stream_ber = ncjt_phase_3(p3_chans_ul, h_freq_csi_dl, h_freq_csi_ul, err_var_csi_ul, info_bits)
 
     # Update average error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape)
@@ -367,7 +367,7 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     userbits = (1.0 - coded_bler) * ncjt_phase_3.num_bits_per_frame
     ratedbits = (1.0 - uncoded_ser) * ncjt_phase_3.num_uncoded_bits_per_frame
 
-    return [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits]
+    return [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits], [per_stream_ber]
 
 
 
@@ -388,6 +388,7 @@ def sim_ncjt_phase_3_all(cfg: SimConfig, ns3cfg: Ns3Config):
     ldpc_ber_list = []
     uncoded_ber_list = []
     sinr_dB_list = []
+    per_stream_ber = 0
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
 
@@ -399,6 +400,7 @@ def sim_ncjt_phase_3_all(cfg: SimConfig, ns3cfg: Ns3Config):
         
         uncoded_ber += bers[0]
         ldpc_ber += bers[1]
+        per_stream_ber += additional_KPIs[0]
         uncoded_ber_list.append(bers[0])
         ldpc_ber_list.append(bers[1])
         
@@ -413,4 +415,4 @@ def sim_ncjt_phase_3_all(cfg: SimConfig, ns3cfg: Ns3Config):
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
-    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate]
+    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate, per_stream_ber/total_cycles]

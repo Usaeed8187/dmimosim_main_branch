@@ -81,14 +81,14 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 90        # total number of slots in ns-3 channels
+    cfg.total_slots = 20        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 0           # feedback delay in number of subframe
     cfg.perfect_csi = False
     cfg.rank_adapt = False      # disable rank adaptation
     cfg.link_adapt = False      # disable link adaptation
     cfg.csi_prediction = False
-    cfg.receiver = 'LMMSE'      # 'LMMSE', 'PIC', 'SIC'
+    cfg.receiver = 'SIC'      # 'LMMSE', 'PIC', 'SIC'
     cfg.num_tx_streams = 4
     num_rx_ues = cfg.num_tx_streams // 2
     cfg.num_rx_ue_sel = num_rx_ues
@@ -130,10 +130,11 @@ if __name__ == "__main__":
     # Testing
     #############################################
 
-    uncoded_ber, uncoded_ser, per_stream_ber_all = sim_ncjt_phase_3_all(cfg, ns3cfg)
+    uncoded_ber, uncoded_ser, goodput, throughput, bitrate, per_stream_ber  = sim_ncjt_phase_3_all(cfg, ns3cfg)
 
-    file_path = "results/phase_3/usrp_channels_perfect_synch/{}_receiver/UEs_{}_streams_{}_modulation_order_{}.npz".format(
-                cfg.receiver, num_rx_ues, cfg.num_tx_streams, cfg.modulation_order)
+    file_path = "results/phase_3_sim/{}_receiver/{}_drop_idx_{}_UEs_{}_streams_per_tx_{}_modulation_order_{}.npz".format(
+                cfg.receiver, mobility, drop_idx, num_rx_ues, cfg.num_tx_streams // cfg.num_scheduled_rx_ue, cfg.modulation_order)
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
-    np.savez(file_path, uncoded_ber=uncoded_ber, uncoded_ser=uncoded_ser, per_stream_ber_all=per_stream_ber_all)
+    np.savez(file_path, uncoded_ber=uncoded_ber, uncoded_ser=uncoded_ser, per_stream_ber=per_stream_ber, goodput=goodput, 
+             throughput=throughput, bitrate=bitrate)
