@@ -33,7 +33,7 @@ dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
 sys.path.append(os.path.join('..'))
-source_dir = '/home/data/ns3_channels_q4/'
+source_dir = '/home/data/ns3_channels_2way/'
 destination_dir = 'ns3/'
 if not os.path.exists(destination_dir):
     os.makedirs(destination_dir)
@@ -68,7 +68,7 @@ print(f"Arguments: {arguments}")
 if len(arguments) > 0:
     mobility = arguments[0]
     drop_idx = arguments[1]
-    
+
     rx_ues_arr = arguments[2:]
     rx_ues_arr = np.array(rx_ues_arr, dtype=int)
     
@@ -100,7 +100,7 @@ if __name__ == "__main__":
         receiver = 'SIC'                                        # 'LMMSE', 'PIC', 'SIC'
     cfg.num_rx_ue_sel = rx_ues_arr[0]
     cfg.num_scheduled_rx_ue = rx_ues_arr[0]
-    cfg.num_tx_streams = 4
+    cfg.num_tx_streams = 2
     cfg.modulation_order = 2
     cfg.precoding_method = precoding_method
     cfg.receiver = receiver
