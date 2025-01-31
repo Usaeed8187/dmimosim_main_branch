@@ -20,6 +20,7 @@ from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
 from dmimo.channel import standard_rc_pred_freq_mimo
 from dmimo.channel import LMMSELinearInterp
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, SLNREqualizer, SICLMMSEEqualizer
+from dmimo.mimo.eigenmode_precoding import eigenmode_precoder
 from dmimo.mimo import update_node_selection
 from dmimo.utils import add_frequency_offset, add_timing_offset
 from dmimo.ncjt_demo_branch import MC_NCJT_RxUE
@@ -46,6 +47,7 @@ class NCJT_phase_3(Model):
         # To use sionna-compatible interface, regard TxSquad as one BS transmitter
         # A 4-antennas basestation is regarded as the combination of two 2-antenna UEs
         self.num_streams_per_tx = cfg.num_tx_streams // cfg.num_scheduled_rx_ue
+        # self.num_streams_per_tx = 1
 
         self.num_ue_ant = 2  # assuming 2 antennas per UE for reshaping data/channels
         if cfg.ue_indices is None:
@@ -167,6 +169,8 @@ class NCJT_phase_3(Model):
         x = self.mapper(d)
         x_rg = self.rg_mapper(x)
 
+        print("x_rg", x_rg.shape)
+
         # # [batch_size, num_rx, num_rxs_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
         # h_freq_csi = h_freq_csi[:, :, :self.num_rxs_ant, :, :, :, :]
 
@@ -181,6 +185,14 @@ class NCJT_phase_3(Model):
         elif self.cfg.precoding_method == "SLNR":
             nvar = 5e-2  # TODO optimize value
             x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi_dl, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
+        elif self.cfg.precoding_method == "eigenmode":
+            x_precoded, g = eigenmode_precoder(x_rg, h_freq_csi_dl, return_precoding_matrix = True)
+            x_precoded = tf.reshape(x_precoded, tf.concat([[x_precoded.shape[0]], [-1], x_precoded.shape[3:]], axis=0))
+            x_precoded_shape = x_precoded.shape
+            padding_shape = tf.tensor_scatter_nd_update(x_precoded_shape, [[1]], [h_freq_csi_dl.shape[-3] - x_precoded.shape[1]])
+            padding = tf.zeros(padding_shape, dtype=x_rg.dtype)
+            x_precoded = tf.concat([x_precoded, padding], axis=1)
+            x_precoded = x_precoded[:, tf.newaxis, ...]
         elif self.cfg.precoding_method == "none":
             x_rg = tf.reshape(x_rg, tf.concat([[x_rg.shape[0]], [-1], x_rg.shape[3:]], axis=0))
             x_rg_shape = x_rg.shape
@@ -190,6 +202,8 @@ class NCJT_phase_3(Model):
             x_precoded = x_precoded[:, tf.newaxis, ...]
         else:
             ValueError("unsupported precoding method")
+
+        print("x_precoded", x_precoded.shape)
 
         # add CFO/STO to simulate synchronization errors
         if np.any(np.not_equal(self.cfg.random_sto_vals, 0)):
@@ -205,13 +219,15 @@ class NCJT_phase_3(Model):
         elif self.cfg.precoding_method == "SLNR":
             y = self.slnr_equalizer([y, h_freq_csi_dl, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
 
+        # LS channel estimation with linear interpolation
         no = 5e-2  # initial noise estimation (tunable param)
+        h_freq_csi_ul, err_var = self.ls_estimator([y, no])
 
         # Reshaping
         # [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, num_effective_subcarriers]
-        h_freq_csi_ul = tf.gather(h_freq_csi_ul, tf.range(self.cfg.num_scheduled_rx_ue * 2), axis=4)
-        h_freq_csi_ul = tf.reshape(h_freq_csi_ul, tf.concat([h_freq_csi_ul.shape[:3], [-1], [self.cfg.num_scheduled_rx_ue], h_freq_csi_ul.shape[5:]], axis=0))
-        h_freq_csi_ul = self.remove_nulled_scs(h_freq_csi_ul)
+        # h_freq_csi_ul = tf.gather(h_freq_csi_ul, tf.range(self.cfg.num_scheduled_rx_ue * 2), axis=4)
+        # h_freq_csi_ul = tf.reshape(h_freq_csi_ul, tf.concat([h_freq_csi_ul.shape[:3], [-1], [self.cfg.num_scheduled_rx_ue], h_freq_csi_ul.shape[5:]], axis=0))
+        # h_freq_csi_ul = self.remove_nulled_scs(h_freq_csi_ul)
         
         # [batch_size, num_rx, 1, num_tx, num_tx_ant, num_ofdm_symbols, num_effective_subcarriers]
         _, err_var = self.ls_estimator([y, no])
@@ -346,6 +362,9 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
                                                            slot_idx=cfg.first_slot_idx,
                                                            cfo_vals=cfg.random_cfo_vals,
                                                            sto_vals=cfg.random_sto_vals)
+
+    print ("h_freq_dl", h_freq_csi_dl.shape)
+    print ("h_freq_ul", h_freq_csi_ul.shape)
 
     # Create MU-MIMO simulation
     ncjt_phase_3 = NCJT_phase_3(cfg, rg_csi)

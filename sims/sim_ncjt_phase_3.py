@@ -96,7 +96,7 @@ if __name__ == "__main__":
         mobility = 'high_mobility'
         drop_idx = '1'
         rx_ues_arr = [2]
-        precoding_method = 'none'                               # 'none', 'SVD'
+        precoding_method = 'eigenmode'                          # 'none', 'eigenmode'
         receiver = 'SIC'                                        # 'LMMSE', 'PIC', 'SIC'
     cfg.num_rx_ue_sel = rx_ues_arr[0]
     cfg.num_scheduled_rx_ue = rx_ues_arr[0]
