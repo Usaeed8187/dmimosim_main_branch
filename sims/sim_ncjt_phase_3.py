@@ -68,8 +68,9 @@ print(f"Arguments: {arguments}")
 if len(arguments) > 0:
     mobility = arguments[0]
     drop_idx = arguments[1]
-
-    rx_ues_arr = arguments[2:]
+    precoding_method = arguments[2]
+    receiver = arguments[3]
+    rx_ues_arr = arguments[4:]
     rx_ues_arr = np.array(rx_ues_arr, dtype=int)
     
     print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
@@ -82,7 +83,7 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 20                                            # total number of slots in ns-3 channels
+    cfg.total_slots = 90                                            # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15                                         # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = cfg.num_slots_p1 + cfg.num_slots_p2             # feedback delay in number of subframe
     cfg.perfect_csi = False
@@ -135,8 +136,8 @@ if __name__ == "__main__":
 
     uncoded_ber, uncoded_ser, goodput, throughput, bitrate, per_stream_ber  = sim_ncjt_phase_3_all(cfg, ns3cfg)
 
-    file_path = "results/phase_3_sim/{}_receiver/{}_drop_idx_{}_UEs_{}_streams_per_tx_{}_modulation_order_{}.npz".format(
-                cfg.receiver, mobility, drop_idx, num_rx_ues, cfg.num_tx_streams // cfg.num_scheduled_rx_ue, cfg.modulation_order)
+    file_path = "results/phase_3_sim/{}_receiver_{}_precoding_method/{}_drop_idx_{}_UEs_{}_streams_per_tx_{}_modulation_order_{}.npz".format(
+                cfg.receiver, precoding_method, mobility, drop_idx, cfg.num_scheduled_rx_ue, cfg.num_tx_streams // cfg.num_scheduled_rx_ue, cfg.modulation_order)
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
     np.savez(file_path, uncoded_ber=uncoded_ber, uncoded_ser=uncoded_ser, per_stream_ber=per_stream_ber, goodput=goodput, 
