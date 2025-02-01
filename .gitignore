@@ -10,4 +10,7 @@ results
 __pycache__
 *.npy
 *.npz
+*.mat
+*.png
+*.jpg
 *~
