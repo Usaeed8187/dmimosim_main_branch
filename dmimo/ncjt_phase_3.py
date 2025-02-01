@@ -146,7 +146,7 @@ class NCJT_phase_3(Model):
         # Using LMMSE CE from NCJT Demo code
         self.ncjt_rx = MC_NCJT_RxUE(self.cfg, batch_size=self.batch_size , modulation_order_list=[self.cfg.modulation_order])
 
-    def call(self, p3_chans_ul, h_freq_csi_dl, info_bits, h_freq_csi_ul=None, err_var_csi_ul=None):
+    def call(self, p3_chans_ul, precoding_channel, info_bits):
         """
         Signal processing for one MU-MIMO transmission cycle (P2)
 
@@ -169,7 +169,7 @@ class NCJT_phase_3(Model):
         x = self.mapper(d)
         x_rg = self.rg_mapper(x)
 
-        print("x_rg", x_rg.shape)
+        # print("x_rg", x_rg.shape)
 
         # # [batch_size, num_rx, num_rxs_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
         # h_freq_csi = h_freq_csi[:, :, :self.num_rxs_ant, :, :, :, :]
@@ -179,31 +179,31 @@ class NCJT_phase_3(Model):
 
         # apply precoding to OFDM grids
         if self.cfg.precoding_method == "ZF":
-            x_precoded, g = self.zf_precoder([x_rg, h_freq_csi_dl, self.cfg.ue_indices, self.cfg.ue_ranks])
+            x_precoded, g = self.zf_precoder([x_rg, precoding_channel, self.cfg.ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "BD":
-            x_precoded, g = self.bd_precoder([x_rg, h_freq_csi_dl, self.cfg.ue_indices, self.cfg.ue_ranks])
+            x_precoded, g = self.bd_precoder([x_rg, precoding_channel, self.cfg.ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "SLNR":
             nvar = 5e-2  # TODO optimize value
-            x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi_dl, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
+            x_precoded, g = self.slnr_precoder([x_rg, precoding_channel, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "eigenmode":
-            x_precoded, g = eigenmode_precoder(x_rg, h_freq_csi_dl, return_precoding_matrix = True)
+            x_precoded, g = eigenmode_precoder(x_rg, precoding_channel, return_precoding_matrix = True)
             x_precoded = tf.reshape(x_precoded, tf.concat([[x_precoded.shape[0]], [-1], x_precoded.shape[3:]], axis=0))
             x_precoded_shape = x_precoded.shape
-            padding_shape = tf.tensor_scatter_nd_update(x_precoded_shape, [[1]], [h_freq_csi_dl.shape[-3] - x_precoded.shape[1]])
+            padding_shape = tf.tensor_scatter_nd_update(x_precoded_shape, [[1]], [precoding_channel.shape[-3] - x_precoded.shape[1]])
             padding = tf.zeros(padding_shape, dtype=x_rg.dtype)
             x_precoded = tf.concat([x_precoded, padding], axis=1)
             x_precoded = x_precoded[:, tf.newaxis, ...]
         elif self.cfg.precoding_method == "none":
             x_rg = tf.reshape(x_rg, tf.concat([[x_rg.shape[0]], [-1], x_rg.shape[3:]], axis=0))
             x_rg_shape = x_rg.shape
-            padding_shape = tf.tensor_scatter_nd_update(x_rg_shape, [[1]], [h_freq_csi_dl.shape[-3] - x_rg.shape[1]])
+            padding_shape = tf.tensor_scatter_nd_update(x_rg_shape, [[1]], [precoding_channel.shape[-3] - x_rg.shape[1]])
             padding = tf.zeros(padding_shape, dtype=x_rg.dtype)
             x_precoded = tf.concat([x_rg, padding], axis=1)
             x_precoded = x_precoded[:, tf.newaxis, ...]
         else:
             ValueError("unsupported precoding method")
 
-        print("x_precoded", x_precoded.shape)
+        # print("x_precoded", x_precoded.shape)
 
         # add CFO/STO to simulate synchronization errors
         if np.any(np.not_equal(self.cfg.random_sto_vals, 0)):
@@ -215,9 +215,9 @@ class NCJT_phase_3(Model):
         y, _ = p3_chans_ul([x_precoded, self.cfg.first_slot_idx])
 
         if self.cfg.precoding_method == "BD":
-            y = self.bd_equalizer([y, h_freq_csi_dl, self.cfg.ue_indices, self.cfg.ue_ranks])
+            y = self.bd_equalizer([y, precoding_channel, self.cfg.ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "SLNR":
-            y = self.slnr_equalizer([y, h_freq_csi_dl, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
+            y = self.slnr_equalizer([y, precoding_channel, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
 
         # LS channel estimation with linear interpolation
         no = 5e-2  # initial noise estimation (tunable param)
@@ -344,16 +344,18 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     #     h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
     else:
         # LMMSE channel estimation
-        h_freq_csi_dl, err_var_csi_dl = lmmse_channel_estimation(p3_chans_dl, rg_csi,
-                                                           slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                           cfo_vals=cfg.random_cfo_vals,
-                                                           sto_vals=cfg.random_sto_vals)
-        # h_freq_csi_ul, err_var_csi_ul = lmmse_channel_estimation(p3_chans_ul, rg_csi,
-        #                                                    slot_idx=cfg.first_slot_idx,
+        # h_freq_csi_dl, _ = lmmse_channel_estimation(p3_chans_dl, rg_csi,
+        #                                                    slot_idx=cfg.first_slot_idx - cfg.csi_delay,
         #                                                    cfo_vals=cfg.random_cfo_vals,
         #                                                    sto_vals=cfg.random_sto_vals)
-        h_freq_csi_ul = None
-        err_var_csi_ul = None
+        h_freq_csi_ul, _ = lmmse_channel_estimation(p3_chans_ul, rg_csi,
+                                                           slot_idx=cfg.first_slot_idx,
+                                                           cfo_vals=cfg.random_cfo_vals,
+                                                           sto_vals=cfg.random_sto_vals)
+        # h_freq_csi_ul = None
+        # err_var_csi_ul = None
+
+        precoding_channel = h_freq_csi_ul
 
     # print ("h_freq_dl", h_freq_csi_dl.shape)
     # print ("h_freq_ul", h_freq_csi_ul.shape)
@@ -366,7 +368,7 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     info_bits = binary_source([cfg.num_slots_p1, ncjt_phase_3.num_bits_per_frame])
 
     # Phase 3 NCJT transmission
-    dec_bits, uncoded_ber, uncoded_ser, per_stream_ber = ncjt_phase_3(p3_chans_ul, h_freq_csi_dl, info_bits, h_freq_csi_ul, err_var_csi_ul)
+    dec_bits, uncoded_ber, uncoded_ser, per_stream_ber = ncjt_phase_3(p3_chans_ul, precoding_channel, info_bits)
 
     # Update average error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape)

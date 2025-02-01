@@ -85,7 +85,7 @@ if __name__ == "__main__":
     cfg = SimConfig()
     cfg.total_slots = 90                                            # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15                                         # starting slots (must be greater than csi_delay + 5)
-    cfg.csi_delay = cfg.num_slots_p1 + cfg.num_slots_p2             # feedback delay in number of subframe
+    cfg.csi_delay = 0#cfg.num_slots_p1 + cfg.num_slots_p2             # feedback delay in number of subframe
     cfg.perfect_csi = False
     cfg.rank_adapt = False                                          # disable rank adaptation
     cfg.link_adapt = False                                          # disable link adaptation
@@ -97,7 +97,7 @@ if __name__ == "__main__":
         mobility = 'high_mobility'
         drop_idx = '1'
         rx_ues_arr = [2]
-        precoding_method = 'none'                               # 'none', 'eigenmode'
+        precoding_method = 'eigenmode'                               # 'none', 'eigenmode'
         receiver = 'SIC'                                        # 'LMMSE', 'PIC', 'SIC'
     cfg.num_rx_ue_sel = rx_ues_arr[0]
     cfg.num_scheduled_rx_ue = rx_ues_arr[0]
@@ -136,7 +136,7 @@ if __name__ == "__main__":
 
     uncoded_ber, ldpc_ber, goodput, throughput, bitrate, per_stream_ber  = sim_ncjt_phase_3_all(cfg, ns3cfg)
 
-    file_path = "results/phase_3_sim/{}_receiver_{}_precoding_method/{}_drop_idx_{}_UEs_{}_streams_per_tx_{}_modulation_order_{}.npz".format(
+    file_path = "results/phase_3_sim_ul_channels/{}_receiver_{}_precoding_method/{}_drop_idx_{}_UEs_{}_streams_per_tx_{}_modulation_order_{}.npz".format(
                 cfg.receiver, precoding_method, mobility, drop_idx, cfg.num_scheduled_rx_ue, cfg.num_tx_streams // cfg.num_scheduled_rx_ue, cfg.modulation_order)
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
 

@@ -109,7 +109,7 @@ class SICLMMSEEqualizer(Layer):
             # Save current detected symbols and curr_no_eff
             ue_index = streams_all[min_index] // num_streams_per_tx
             stream_index = streams_all[min_index] % num_streams_per_tx
-            print("currently removing interference of ue {} stream {}".format(ue_index, stream_index))
+            # print("currently removing interference of ue {} stream {}".format(ue_index, stream_index))
             streams_all = tf.concat([streams_all[:min_index], streams_all[min_index+1:]], axis=0)
             ue_mask = tf.scatter_nd(indices=[[ue_index]], updates=[True], shape=[num_tx])
             stream_mask = tf.scatter_nd(indices=[[stream_index]], updates=[True], shape=[num_streams_per_tx])
