@@ -146,7 +146,7 @@ class NCJT_phase_3(Model):
         # Using LMMSE CE from NCJT Demo code
         self.ncjt_rx = MC_NCJT_RxUE(self.cfg, batch_size=self.batch_size , modulation_order_list=[self.cfg.modulation_order])
 
-    def call(self, p3_chans_ul, h_freq_csi_dl, h_freq_csi_ul, err_var_csi_ul, info_bits):
+    def call(self, p3_chans_ul, h_freq_csi_dl, info_bits, h_freq_csi_ul=None, err_var_csi_ul=None):
         """
         Signal processing for one MU-MIMO transmission cycle (P2)
 
@@ -221,17 +221,7 @@ class NCJT_phase_3(Model):
 
         # LS channel estimation with linear interpolation
         no = 5e-2  # initial noise estimation (tunable param)
-        h_freq_csi_ul, err_var = self.ls_estimator([y, no])
-
-        # Reshaping
-        # [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, num_effective_subcarriers]
-        # h_freq_csi_ul = tf.gather(h_freq_csi_ul, tf.range(self.cfg.num_scheduled_rx_ue * 2), axis=4)
-        # h_freq_csi_ul = tf.reshape(h_freq_csi_ul, tf.concat([h_freq_csi_ul.shape[:3], [-1], [self.cfg.num_scheduled_rx_ue], h_freq_csi_ul.shape[5:]], axis=0))
-        # h_freq_csi_ul = self.remove_nulled_scs(h_freq_csi_ul)
-        
-        # [batch_size, num_rx, 1, num_tx, num_tx_ant, num_ofdm_symbols, num_effective_subcarriers]
-        _, err_var = self.ls_estimator([y, no])
-        err_var = tf.reshape(err_var, tf.concat([err_var.shape[:3], [self.cfg.num_scheduled_rx_ue], [-1], err_var.shape[5:]], axis=0))
+        h_freq_csi_ul, err_var = self.ls_estimator([y, no]) # h_freq_csi_ul.shape: [batch_size, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_ofdm_symbols, num_effective_subcarriers]
 
         if self.cfg.receiver == 'PIC':
 
@@ -362,9 +352,11 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
                                                            slot_idx=cfg.first_slot_idx,
                                                            cfo_vals=cfg.random_cfo_vals,
                                                            sto_vals=cfg.random_sto_vals)
+        # h_freq_csi_ul = None
+        # err_var_csi_ul = None
 
-    print ("h_freq_dl", h_freq_csi_dl.shape)
-    print ("h_freq_ul", h_freq_csi_ul.shape)
+    # print ("h_freq_dl", h_freq_csi_dl.shape)
+    # print ("h_freq_ul", h_freq_csi_ul.shape)
 
     # Create MU-MIMO simulation
     ncjt_phase_3 = NCJT_phase_3(cfg, rg_csi)
@@ -374,7 +366,7 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     info_bits = binary_source([cfg.num_slots_p1, ncjt_phase_3.num_bits_per_frame])
 
     # Phase 3 NCJT transmission
-    dec_bits, uncoded_ber, uncoded_ser, per_stream_ber = ncjt_phase_3(p3_chans_ul, h_freq_csi_dl, h_freq_csi_ul, err_var_csi_ul, info_bits)
+    dec_bits, uncoded_ber, uncoded_ser, per_stream_ber = ncjt_phase_3(p3_chans_ul, h_freq_csi_dl, info_bits, h_freq_csi_ul, err_var_csi_ul)
 
     # Update average error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape)

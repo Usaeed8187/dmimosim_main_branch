@@ -96,11 +96,12 @@ if __name__ == "__main__":
         mobility = 'high_mobility'
         drop_idx = '1'
         rx_ues_arr = [2]
-        precoding_method = 'eigenmode'                          # 'none', 'eigenmode'
+        precoding_method = 'none'                               # 'none', 'eigenmode'
         receiver = 'SIC'                                        # 'LMMSE', 'PIC', 'SIC'
     cfg.num_rx_ue_sel = rx_ues_arr[0]
     cfg.num_scheduled_rx_ue = rx_ues_arr[0]
-    cfg.num_tx_streams = 2
+    streams_per_tx = 1
+    cfg.num_tx_streams = cfg.num_scheduled_rx_ue * streams_per_tx
     cfg.modulation_order = 2
     cfg.precoding_method = precoding_method
     cfg.receiver = receiver
