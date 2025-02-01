@@ -134,11 +134,11 @@ if __name__ == "__main__":
     # Testing
     #############################################
 
-    uncoded_ber, uncoded_ser, goodput, throughput, bitrate, per_stream_ber  = sim_ncjt_phase_3_all(cfg, ns3cfg)
+    uncoded_ber, ldpc_ber, goodput, throughput, bitrate, per_stream_ber  = sim_ncjt_phase_3_all(cfg, ns3cfg)
 
     file_path = "results/phase_3_sim/{}_receiver_{}_precoding_method/{}_drop_idx_{}_UEs_{}_streams_per_tx_{}_modulation_order_{}.npz".format(
                 cfg.receiver, precoding_method, mobility, drop_idx, cfg.num_scheduled_rx_ue, cfg.num_tx_streams // cfg.num_scheduled_rx_ue, cfg.modulation_order)
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
-    np.savez(file_path, uncoded_ber=uncoded_ber, uncoded_ser=uncoded_ser, per_stream_ber=per_stream_ber, goodput=goodput, 
+    np.savez(file_path, uncoded_ber=uncoded_ber, ldpc_ber=ldpc_ber, per_stream_ber=per_stream_ber, goodput=goodput, 
              throughput=throughput, bitrate=bitrate)
