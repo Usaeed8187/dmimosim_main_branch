@@ -427,4 +427,6 @@ def sim_ncjt_phase_3_all(cfg: SimConfig, ns3cfg: Ns3Config):
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
+    print("ber:", uncoded_ber/total_cycles)
+
     return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate, per_stream_ber/total_cycles]
