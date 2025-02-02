@@ -36,6 +36,8 @@ def eigenmode_precoder(x, h, return_precoding_matrix=False):
         # Compute SVD: H_ue = U * Σ * V^H
         s, u, v = tf.linalg.svd(h_ue, compute_uv=True)
 
+        v = tf.sign(v) * v
+
         # Select dominant eigenmode (first column of V)
         v1 = tf.expand_dims(v[..., 0], axis=-1)  # Shape: [batch, num_ofdm_sym, fft_size, num_tx_ant, 1]
 
