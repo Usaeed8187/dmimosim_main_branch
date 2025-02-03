@@ -288,11 +288,6 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     :return: [uncoded_ber, coded_ber], [goodbits, userbits]
     """
 
-    # CFO and STO settings
-    if cfg.gen_sync_errors:
-        cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_rxue_sel, 1))
-        cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_rxue_sel, 1))
-
     # Update UE selection
     if cfg.enable_ue_selection is True:
         ns3cfg.reset_ue_selection()
@@ -300,6 +295,11 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
         ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
         cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel) * 2), (ns3cfg.num_rxue_sel, -1))
 
+    # CFO and STO settings
+    if cfg.gen_sync_errors:
+        cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_rxue_sel, 1))
+        cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_rxue_sel, 1))
+        
     # dMIMO channels from ns-3 simulator
     p3_chans_ul = dMIMOChannels(ns3cfg, "RxSquad", forward=True, add_noise=True)
     p3_chans_dl = dMIMOChannels(ns3cfg, "RxSquad", forward=False, add_noise=True)
@@ -344,18 +344,18 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     #     h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
     else:
         # LMMSE channel estimation
-        # h_freq_csi_dl, _ = lmmse_channel_estimation(p3_chans_dl, rg_csi,
-        #                                                    slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-        #                                                    cfo_vals=cfg.random_cfo_vals,
-        #                                                    sto_vals=cfg.random_sto_vals)
-        h_freq_csi_ul, _ = lmmse_channel_estimation(p3_chans_ul, rg_csi,
-                                                           slot_idx=cfg.first_slot_idx,
+        h_freq_csi_dl, _ = lmmse_channel_estimation(p3_chans_dl, rg_csi,
+                                                           slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                            cfo_vals=cfg.random_cfo_vals,
                                                            sto_vals=cfg.random_sto_vals)
+        # h_freq_csi_ul, _ = lmmse_channel_estimation(p3_chans_ul, rg_csi,
+        #                                                    slot_idx=cfg.first_slot_idx,
+        #                                                    cfo_vals=cfg.random_cfo_vals,
+        #                                                    sto_vals=cfg.random_sto_vals)
         # h_freq_csi_ul = None
         # err_var_csi_ul = None
 
-        precoding_channel = h_freq_csi_ul
+        precoding_channel = h_freq_csi_dl
 
     # print ("h_freq_dl", h_freq_csi_dl.shape)
     # print ("h_freq_ul", h_freq_csi_ul.shape)

@@ -83,9 +83,9 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 90                                            # total number of slots in ns-3 channels
+    cfg.total_slots = 50                                            # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15                                         # starting slots (must be greater than csi_delay + 5)
-    cfg.csi_delay = 0#cfg.num_slots_p1 + cfg.num_slots_p2             # feedback delay in number of subframe
+    cfg.csi_delay = cfg.num_slots_p1 + cfg.num_slots_p2             # feedback delay in number of subframe
     cfg.perfect_csi = False
     cfg.rank_adapt = False                                          # disable rank adaptation
     cfg.link_adapt = False                                          # disable link adaptation
@@ -103,9 +103,16 @@ if __name__ == "__main__":
     cfg.num_scheduled_rx_ue = rx_ues_arr[0]
     streams_per_tx = 1
     cfg.num_tx_streams = cfg.num_scheduled_rx_ue * streams_per_tx
-    cfg.modulation_order = 2
+    cfg.modulation_order = 4
     cfg.precoding_method = precoding_method
     cfg.receiver = receiver
+    cfg.gen_sync_errors = True
+    if cfg.gen_sync_errors:
+        sto_arr = [10, 30, 50, 70]
+        cfo_arr = [100, 250, 400, 550]
+    else:
+        sto_arr = [0]
+        cfo_arr = [0]
 
     # NS3 Configs
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
@@ -134,11 +141,17 @@ if __name__ == "__main__":
     # Testing
     #############################################
 
-    uncoded_ber, ldpc_ber, goodput, throughput, bitrate, per_stream_ber  = sim_ncjt_phase_3_all(cfg, ns3cfg)
+    for sto in sto_arr:
+        for cfo in cfo_arr:
+            cfg.sto_sigma = sto
+            cfg.cfo_sigma = cfo
 
-    file_path = "results/phase_3_sim_ul_channels/{}_receiver_{}_precoding_method/{}_drop_idx_{}_UEs_{}_streams_per_tx_{}_modulation_order_{}.npz".format(
-                cfg.receiver, precoding_method, mobility, drop_idx, cfg.num_scheduled_rx_ue, cfg.num_tx_streams // cfg.num_scheduled_rx_ue, cfg.modulation_order)
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            uncoded_ber, ldpc_ber, goodput, throughput, bitrate, per_stream_ber  = sim_ncjt_phase_3_all(cfg, ns3cfg)
 
-    np.savez(file_path, uncoded_ber=uncoded_ber, ldpc_ber=ldpc_ber, per_stream_ber=per_stream_ber, goodput=goodput, 
-             throughput=throughput, bitrate=bitrate)
+            file_path = "results/phase_3_sim_dl_channels_gen_sync_errors_{}/{}_receiver_{}_precoding_method/{}_drop_idx_{}_UEs_{}_streams_per_tx_{}_modulation_order_{}_cfo_{}_sto_{}.npz".format(
+                        cfg.gen_sync_errors, cfg.receiver, precoding_method, mobility, drop_idx, cfg.num_scheduled_rx_ue, cfg.num_tx_streams // cfg.num_scheduled_rx_ue, 
+                        cfg.modulation_order, cfg.cfo_sigma, cfg.sto_sigma)
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            np.savez(file_path, uncoded_ber=uncoded_ber, ldpc_ber=ldpc_ber, per_stream_ber=per_stream_ber, goodput=goodput, 
+                    throughput=throughput, bitrate=bitrate)

@@ -116,9 +116,9 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
 
     # add CFO/STO to simulate synchronization errors
     if np.any(np.not_equal(sto_vals, 0)):
-        dx_rg = add_timing_offset(dx_rg, sto_vals)
+        dx_rg = add_timing_offset(dx_rg, sto_vals, channel_type=dmimo_chans.channel_type)
     if np.any(np.not_equal(cfo_vals, 0)):
-        dx_rg = add_frequency_offset(dx_rg, cfo_vals)
+        dx_rg = add_frequency_offset(dx_rg, cfo_vals, channel_type=dmimo_chans.channel_type)
 
     # Pass through ns3 channels
     # output has shape: [1, num_rx, num_rx_ant, num_ofdm_sym, fft_size]

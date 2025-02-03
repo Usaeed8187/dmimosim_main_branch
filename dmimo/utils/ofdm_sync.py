@@ -32,7 +32,7 @@ def normalize_sto(subcarrier_spacing, fft_size, sto_ns):
     return (sto_ns * 1e-9) / ts
 
 
-def add_frequency_offset(x, cfo_vals, subcarrier_spacing=15e3, cp_len=64):
+def add_frequency_offset(x, cfo_vals, subcarrier_spacing=15e3, cp_len=64, channel_type="dMIMO"):
     """
     Add frequency offset errors to OFDM signals
     1) BS antennas has zero CFO errors
@@ -52,8 +52,16 @@ def add_frequency_offset(x, cfo_vals, subcarrier_spacing=15e3, cp_len=64):
     num_ofdm_sym, fft_size = x.shape[-2:]
     num_slots = x.shape[0]  # number of slots in one Phase 2 dMIMO transmission cycle
 
-    cfo_vals = np.repeat(cfo_vals, repeats=2, axis=0)
-    cfo_vals = np.concatenate((np.zeros((1, 4, 1, 1)), np.reshape(cfo_vals, (1, -1, 1, 1))), axis=1)
+    if channel_type == 'dMIMO':
+        cfo_vals = np.repeat(cfo_vals, repeats=2, axis=0)
+        cfo_vals = np.concatenate((np.zeros((1, 4, 1, 1)), np.reshape(cfo_vals, (1, -1, 1, 1))), axis=1)
+    elif channel_type == 'RxSquad':
+        cfo_vals = np.repeat(cfo_vals, repeats=2, axis=0)
+        cfo_vals[:2, :] = 0
+        cfo_vals = np.reshape(cfo_vals, (1, -1, 1, 1))
+    else:
+        raise Exception(f"Unsupported channel_type.")
+    
     cfo_vals = normalize_cfo(subcarrier_spacing, cfo_vals[:, :num_total_ant])
 
     # normalized sampling time indices for multiple subframes
@@ -74,7 +82,7 @@ def add_frequency_offset(x, cfo_vals, subcarrier_spacing=15e3, cp_len=64):
     return xf
 
 
-def add_timing_offset(x, sto_vals, subcarrier_spacing=15e3):
+def add_timing_offset(x, sto_vals, subcarrier_spacing=15e3, channel_type="dMIMO"):
     """
     Modeling fractional STO in frequency domain
     1) BS antennas has zero STO errors
@@ -92,8 +100,15 @@ def add_timing_offset(x, sto_vals, subcarrier_spacing=15e3):
     # num_ue = int(np.ceil((num_total_ant - num_bs_ant) / num_ue_ant))
     num_ofdm_sym, fft_size = x.shape[-2:]
 
-    sto_vals = np.repeat(sto_vals, repeats=2, axis=0)
-    sto_vals = np.concatenate((np.zeros((4, 1, 1)), np.reshape(sto_vals, (-1, 1, 1))), axis=0)
+    if channel_type == 'dMIMO':
+        sto_vals = np.repeat(sto_vals, repeats=2, axis=0)
+        sto_vals = np.concatenate((np.zeros((4, 1, 1)), np.reshape(sto_vals, (-1, 1, 1))), axis=0)
+    elif channel_type == 'RxSquad':
+        sto_vals = np.repeat(sto_vals, repeats=2, axis=0)
+        sto_vals[:2, :] = 0
+        sto_vals = np.reshape(sto_vals, (1, -1, 1, 1))
+    else:
+        raise Exception(f"Unsupported channel_type.")
     sto_vals = normalize_sto(subcarrier_spacing, fft_size, sto_vals[:num_total_ant])
     # maximum relative STO magnitude is 0.5
     sto_vals[sto_vals > 0.5] = 0.5
