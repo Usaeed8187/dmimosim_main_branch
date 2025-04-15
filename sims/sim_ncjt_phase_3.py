@@ -108,8 +108,8 @@ if __name__ == "__main__":
     cfg.receiver = receiver
     cfg.gen_sync_errors = True
     if cfg.gen_sync_errors:
-        sto_arr = [10, 30, 50, 70]
-        cfo_arr = [100, 250, 400, 550]
+        sto_arr = [0, 10, 30, 50, 70]
+        cfo_arr = [0, 100, 250, 400, 550]
     else:
         sto_arr = [0]
         cfo_arr = [0]
