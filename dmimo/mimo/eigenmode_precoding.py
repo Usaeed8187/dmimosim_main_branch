@@ -8,7 +8,6 @@ def eigenmode_precoder(x, h, return_precoding_matrix=False):
     :param h: Channel matrix [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]
     :return: Precoded symbols [batch_size, num_ues, 1, num_ofdm_sym, fft_size]
     """
-
     
     batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_sym, fft_size = h.shape
     h_reshape = tf.transpose(h, perm=[0,5,6,1,2,3,4]) # batch_size, num_ofdm_symbols, fft_size, num_rx, num_rx_ant, num_tx, num_tx_ant

@@ -3,6 +3,8 @@ import tensorflow as tf
 from tensorflow.python.keras import Model
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
+from scipy.fft import fft, ifft
+from scipy.signal import find_peaks
 
 from sionna.ofdm import ResourceGrid, ResourceGridMapper, ResourceGridDemapper,  LSChannelEstimator, LMMSEEqualizer, MMSEPICDetector, RemoveNulledSubcarriers
 from sionna.mimo import StreamManagement
@@ -24,6 +26,7 @@ from dmimo.mimo.eigenmode_precoding import eigenmode_precoder
 from dmimo.mimo import update_node_selection
 from dmimo.utils import add_frequency_offset, add_timing_offset
 from dmimo.ncjt_demo_branch import MC_NCJT_RxUE
+from dmimo.channel import dl_to_ul_channel_adapt 
 
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
@@ -148,13 +151,16 @@ class NCJT_phase_3(Model):
 
     def call(self, p3_chans_ul, precoding_channel, info_bits):
         """
-        Signal processing for one MU-MIMO transmission cycle (P2)
+        Signal processing for one MU-MIMO transmission cycle (P3)
 
         :param dmimo_chans: dMIMO channels
         :param h_freq_csi: CSI feedback for precoding
         :param info_bits: information bits
         :return: decoded bits, uncoded BER, demodulated QAM symbols (for debugging purpose)
         """
+        # precoding_channel = self.r2f2_channel_inference(precoding_channel)
+        channel_adapter = dl_to_ul_channel_adapt()
+        # precoding_channel = channel_adapter(precoding_channel)
 
         # LDPC encoder processing
         info_bits = tf.reshape(info_bits, [self.batch_size, self.cfg.num_scheduled_rx_ue, self.rg.num_streams_per_tx,

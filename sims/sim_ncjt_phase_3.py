@@ -106,13 +106,15 @@ if __name__ == "__main__":
     cfg.modulation_order = 4
     cfg.precoding_method = precoding_method
     cfg.receiver = receiver
-    cfg.gen_sync_errors = True
+    cfg.gen_sync_errors = False
     if cfg.gen_sync_errors:
         sto_arr = [0, 10, 30, 50, 70]
         cfo_arr = [0, 100, 250, 400, 550]
     else:
         sto_arr = [0]
         cfo_arr = [0]
+    cfg.ul_freq = 3.5e9
+    cfg.dl_freq = 3.5e9    
 
     # NS3 Configs
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
