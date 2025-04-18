@@ -4,7 +4,7 @@ from scipy.optimize import minimize
 import matplotlib.pyplot as plt
 
 class dl_to_ul_channel_adapt:
-    def __init__(self, carrier_freq=3.5e9, antenna_spacing_ue=0.5, antenna_spacing_gnb=0.5, coherence_time=0.01, time_gap=1e-3, max_paths=2, num_ues=10, subcarrier_spacing=15e3):
+    def __init__(self, carrier_freq=3.5e9, antenna_spacing_ue=0.5, antenna_spacing_gnb=0.5, coherence_time=0.01, time_gap=1e-3, max_paths=3, num_ues=10, subcarrier_spacing=15e3):
         self.num_ue_antennas = 2
         self.num_gnb_antennas = 4
         self.num_ues = num_ues
@@ -25,13 +25,14 @@ class dl_to_ul_channel_adapt:
         self.num_subcarriers = len(self.subcarrier_indices)
         self.psi_grid = np.linspace(-1, 1, 100)  # Discretized psi values
 
-    def fourier_matrix(self, num_antennas, antenna_spacing, wavelength):
+    def fourier_matrix(self, num_antennas, antenna_spacing, curr_wavelength):
         
         K = num_antennas
-        indices = tf.range(K, dtype=tf.float32)
-        psi_prime = tf.range(K, dtype=tf.float32) * (wavelength / (K * antenna_spacing * wavelength))  # ψ' = j' * λ/(K l)
-        phase = -2 * np.pi * indices[:, None] * antenna_spacing * wavelength * psi_prime[None, :] / wavelength
-        F = tf.complex(tf.cos(phase), tf.sin(phase)) / tf.complex(tf.sqrt(tf.cast(K, tf.float32)), 0.0)
+        indices = tf.range(K, dtype=tf.float32)[:, None]  # [K, 1]
+        j_prime = tf.range(K, dtype=tf.float32)[None, :]  # [1, K]
+        psi_prime = 2.0 / K  # psi' = 2/K as per paper
+        phase = -2 * np.pi * indices * antenna_spacing * self.wavelength * j_prime * psi_prime / curr_wavelength  # [K, K]
+        F = tf.complex(tf.cos(phase), tf.sin(phase))
         
         return F
 
@@ -53,26 +54,63 @@ class dl_to_ul_channel_adapt:
         return S_i
 
     def initialize_paths(self, channel_data, wavelengths):
-        """Initialize psi_n^gNB, psi_n^UE, and d_n using power profile P(d, psi^gNB, psi^UE)."""
-        P = tf.zeros((100, len(self.psi_grid), len(self.psi_grid)), dtype=tf.float32)
-        d_grid = np.linspace(0, 100, 100)  # Distance grid in meters
-        psi_grid_ue = self.psi_grid
-        for i, lambda_i in enumerate(wavelengths):
-            h_i = channel_data[:, :, i]  # [4, 2]
-            for k in range(self.num_gnb_antennas):
-                for m in range(self.num_ue_antennas):
+        """Initialize psi_n^gNB and d_n per UE antenna as per Section 5.3.
+        
+        Args:
+            channel_data: Channel matrix [num_gnb_antennas, num_ue_antennas, num_subcarriers].
+            wavelengths: Wavelengths for each subcarrier [num_subcarriers].
+        
+        Returns:
+            init_psi_gnb: Initial gNB angles [max_paths].
+            init_psi_ue: Initial UE angles [max_paths], set to 0.0.
+            init_d: Initial path distances [max_paths].
+        """
+        num_d = 100
+        num_psi = 100
+        d_grid = np.linspace(1, 100, num_d)
+        psi_grid = np.linspace(-1, 1, num_psi)
+        P = tf.zeros((num_d, num_psi, self.num_ue_antennas), dtype=tf.float32)
+
+        for m in range(self.num_ue_antennas):
+            sum_result = tf.zeros((num_d, num_psi), dtype=tf.complex64)
+            for i, lambda_i in enumerate(wavelengths):
+                h_i = channel_data[:, :, i]  # [4, 2]
+                for k in range(self.num_gnb_antennas):
                     phase = 2 * np.pi * (
-                        d_grid[:, None, None] +
-                        k * self.antenna_spacing_gnb * self.wavelength * self.psi_grid[None, :, None] +
-                        m * self.antenna_spacing_ue * self.wavelength * psi_grid_ue[None, None, :]
+                        d_grid[:, None] + k * self.antenna_spacing_gnb * psi_grid[None, :]
                     ) / lambda_i
-                    P += tf.abs(tf.reduce_sum(h_i[k, m] * tf.exp(tf.complex(0.0, tf.cast(phase, tf.float32))), axis=-1)) ** 2
+                    sum_result += h_i[k, m] * tf.exp(tf.complex(0.0, tf.cast(phase, tf.float32)))
+
+            indices = tf.stack([
+                tf.repeat(tf.range(num_d), num_d),  # Row indices
+                tf.tile(tf.range(num_psi), [num_psi]),  # Column indices
+                tf.fill([num_d * num_psi], m)         # mth index in the last dimension
+            ], axis=-1)
+            updates = tf.reshape(tf.abs(sum_result)**2, [-1])
+
+            P = tf.tensor_scatter_nd_update(P, indices, updates)
+
+        # Select peaks per UE antenna
         P = P.numpy()
-        indices = np.unravel_index(np.argsort(P.ravel())[-self.max_paths:], P.shape)
-        init_d = d_grid[indices[0]]
-        init_psi_gnb = self.psi_grid[indices[1]]
-        init_psi_ue = self.psi_grid[indices[2]]
-        return init_psi_gnb, init_psi_ue, init_d
+        init_d = np.zeros((self.max_paths, self.num_ue_antennas), dtype=np.float32)
+        init_psi_gnb = np.zeros((self.max_paths, self.num_ue_antennas), dtype=np.float32)
+        init_psi_ue = np.zeros((self.max_paths, self.num_ue_antennas), dtype=np.float32)
+
+        for m in range(self.num_ue_antennas):
+            curr_P = P[:, :, m]
+            indices = np.unravel_index(np.argsort(curr_P.ravel())[-self.max_paths:], curr_P.shape)
+            # Sort peaks by index to maintain order
+            peak_indices = list(zip(indices[0], indices[1]))
+            peak_indices.sort(key=lambda x: curr_P[x[0], x[1]], reverse=True)
+            for i, (d_idx, psi_idx) in enumerate(peak_indices[:self.max_paths]):
+                init_d[i, m] = d_grid[d_idx]
+                init_psi_gnb[i, m] = psi_grid[psi_idx]
+
+        tf.print("P max values per UE antenna:", [np.max(P[:, :, m]) for m in range(self.num_ue_antennas)])
+        tf.print("Selected init_d:", init_d)
+        tf.print("Selected init_psi_gnb:", init_psi_gnb)
+
+        return init_psi_gnb, init_d
 
     def estimate_paths_for_ue(self, channel_ue):
         """Estimate path parameters for a single UE using spatial-domain optimization."""
@@ -93,70 +131,142 @@ class dl_to_ul_channel_adapt:
                 P_m.append(P_i_m)
             P_m = tf.concat(P_m, axis=0)  # [self.num_gnb_antennas * self.num_subcarriers]
             P_list.append(P_m)
-        self.P = tf.stack(P_list, axis=-1)  # [self.num_gnb_antennas * self.num_subcarriers, 2]
+        self.P = tf.cast(tf.stack(P_list, axis=-1), tf.complex128)  # [self.num_gnb_antennas * self.num_subcarriers, 2]
 
         # Initialize parameters
-        init_psi_gnb, init_psi_ue, init_d = self.initialize_paths(channel_mean, self.wavelengths)
-        init_params = np.concatenate([
-            init_psi_gnb, init_psi_ue, init_d,
-            np.ones(self.max_paths) * 0.1, np.zeros(self.max_paths)
-        ])
-
-        def objective(params):
-            """
-            Compute the L2 norm error between P and S * a.
-            """
-            psi_gnb = params[:self.max_paths]  # Path angles
-            psi_ue = params[self.max_paths:2 * self.max_paths]
-            d = params[2 * self.max_paths:3 * self.max_paths]  # Delays
-            a = params[3 * self.max_paths:4 * self.max_paths]  # Amplitudes
-            phi = params[4 * self.max_paths:]  # Phases
-
-            psi_gnb = np.clip(psi_gnb, -1, 1)
-            psi_ue = np.clip(psi_ue, -1, 1)
-            d = np.clip(d, 0, 100)
-            a = np.clip(a, 0, 1)
-            phi = np.clip(phi, -np.pi, np.pi)
-
-            error = 0.0
-            # Assuming P is provided externally with shape [I * K, 2]
-            P = self.P
-
-            for m in range(self.num_ue_antennas):
-                S_concat = []
-                for i, lambda_i in enumerate(self.wavelengths):
-                    # Compute S_i;
-                    S_i = self.sinc_matrix(lambda_i, psi_gnb, L=self.num_gnb_antennas * self.antenna_spacing_gnb * self.wavelength, psi_prime=2/self.num_gnb_antennas)  # [K, N]
-                    # Compute D_i
-                    D_i = tf.linalg.diag(tf.exp(tf.complex(0.0, -2 * np.pi * d / lambda_i)))  # [N, N]
-                    # Compute S_i * D_i
-                    S_i_D_i = tf.matmul(S_i, tf.cast(D_i, S_i.dtype))  # [K, N]
-                    S_concat.append(S_i_D_i)
-                # Concatenate across subcarriers
-                S_concat = tf.concat(S_concat, axis=0)  # [I * K, N]
-
-                # Compute a vector
-                a_complex = a * tf.exp(tf.complex(0.0, tf.cast(phi, tf.float32)))  # [N]
-                a_vec = tf.cast(a_complex, tf.complex64)[:, None]  # [N, 1]
-
-                # Predicted profile: S * a
-                P_pred = tf.matmul(tf.complex(S_concat, 0.0), a_vec)  # [I * K, 1]
-
-                # L2 norm error
-                error += tf.reduce_sum(tf.abs(P[:, m:m+1] - P_pred) ** 2).numpy()
-            return error
-
-        result = minimize(objective, init_params, method='SLSQP', bounds=[
-            (-1, 1)] * self.max_paths + [(-1, 1)] * self.max_paths + [(0, 100)] * self.max_paths +
-            [(0, 1)] * self.max_paths + [(-np.pi, np.pi)] * self.max_paths)
+        init_psi_gnb, init_d = self.initialize_paths(channel_mean, self.wavelengths)
         
-        psi_gnb = result.x[:self.max_paths]
-        psi_ue = result.x[self.max_paths:2*self.max_paths]
-        d = result.x[2*self.max_paths:3*self.max_paths]
-        a = result.x[3*self.max_paths:4*self.max_paths]
-        phi = result.x[4*self.max_paths:]
+        # ---------------------------------------------------------------------------
+        # configuration and dtype helpers
+        # ---------------------------------------------------------------------------
+        R = tf.float64                # real scalars
+        C = tf.complex128             # complex scalars
 
-        return psi_gnb, psi_ue, d, a, phi
+        l_gnb = self.antenna_spacing_gnb          # 0.5 (in λ units)
+        l_ue  = self.antenna_spacing_ue           # 0.5 (in λ units)
+        K     = self.num_gnb_antennas
+        M     = 1                                 # we fit one UE antenna at a time
+        I     = self.num_subcarriers
+        N     = self.max_paths
+
+        # ---------------------------------------------------------------------------
+        # build S_i(d,ψ_gNB) · D_i(d) · A_UE(ψ_ue,m)   and stack over i
+        # ---------------------------------------------------------------------------
+        def build_big_S(psi_gnb, psi_ue, d, m_ant):
+            blocks = []
+            psi_prime = 2.0 / K              # Eq.(3) footnote
+            L_const = K * l_gnb * self.wavelength
+
+            for lam in self.wavelengths:     # scalar, float64
+                lam = tf.cast(lam, R)
+
+                # ----- gNB spatial sinc -----------------------------------------
+                k   = tf.range(K, dtype=R)[:, None]
+                psi = tf.constant(psi_gnb, dtype=R)[None, :]
+                x   = (L_const * (k * psi_prime - psi)) / lam      # same as  k*l – ψ term
+                S_i = (L_const / lam) * tf.experimental.numpy.sinc(x)
+
+                # ----- propagation delay -------------------------------------------
+                phase_d = -2.0 * np.pi * tf.constant(d, R) / lam   # (N,)
+                D_i     = tf.linalg.diag(tf.exp(1j * tf.cast(phase_d, C)))  # (N,N)
+
+                # ----- UE steering (single antenna m_ant) --------------------------
+                phase_ue = -2.0 * np.pi * m_ant * l_ue * tf.constant(psi_ue, R) / lam
+                A_ue     = tf.exp(1j * tf.cast(phase_ue, C))[None, :]        # (1,N)
+
+                # stack:  (K,N)·(N,N)→(K,N)  then multiply UE scalar row‑wise
+                blocks.append(tf.cast(S_i, C) @ D_i * A_ue)                  # (K,N)
+
+            return tf.concat(blocks, axis=0)                                 # (I*K,N)
+        # ---------------------------------------------------------------------------
+
+        all_psi_gnb = np.zeros((N, self.num_ue_antennas))
+        all_psi_ue  = np.zeros_like(all_psi_gnb)
+        all_d       = np.zeros_like(all_psi_gnb)
+        all_a       = np.zeros_like(all_psi_gnb, dtype=np.complex128)
+
+        for m in range(self.num_ue_antennas):
+
+            # ---------- initial guess ------------------------------------------------
+            psi0_g = init_psi_gnb[:, m]                # from peak picker
+            psi0_u = np.zeros(N)                       # broadside
+            d0     = init_d[:, m]
+
+            x0 = np.concatenate([psi0_g, psi0_u, d0])  # length 3N
+
+            P_m = tf.reshape(self.P[:, m], [-1, 1])    # (I*K ,1) complex128
+
+            # ---------- objective function ------------------------------------------
+            def obj(x):
+                psi_g = x[0:N]
+                psi_u = x[N:2*N]
+                d     = x[2*N:3*N]
+
+                # hard bounds
+                if (np.any(np.abs(psi_g) > 1.0) or
+                    np.any(np.abs(psi_u) > 1.0) or
+                    np.any(d < 0.0) or np.any(d > 100.0)):
+                    return 1e20
+
+                S_big = build_big_S(psi_g, psi_u, d, m_ant=m)
+
+                # closed‑form least squares for a
+                a_ls = tf.linalg.lstsq(S_big, P_m, fast=False)     # (N,1)
+                res = tf.norm(P_m - S_big @ a_ls)**2
+                return res.numpy().astype(np.float64)
+
+            bounds = [(-1.0, 1.0)] * N + \
+                    [(-1.0, 1.0)] * N + \
+                    [(0.0, 100.0)] * N
+
+            res = minimize(obj,
+                        x0,
+                        method='L-BFGS-B',
+                        bounds=bounds,
+                        options={'maxiter': 500, 'disp': True})
+
+            # ---------- save fitted parameters --------------------------------------
+            psi_g_opt = res.x[0:N]
+            psi_u_opt = res.x[N:2*N]
+            d_opt     = res.x[2*N:3*N]
+
+            S_big_opt = build_big_S(psi_g_opt, psi_u_opt, d_opt, m_ant=m)
+            a_opt     = tf.squeeze(tf.linalg.lstsq(S_big_opt, P_m, fast=False))  # (N,)
+
+            all_psi_gnb[:, m] = psi_g_opt
+            all_psi_ue[:,  m] = psi_u_opt
+            all_d      [:, m] = d_opt
+            all_a      [:, m] = a_opt.numpy()
+        
+        debug = True
+        if debug:
+            m_dbg = 0
+            psi_g = all_psi_gnb[:, m_dbg]
+            psi_u = all_psi_ue[:, m_dbg]
+            d_g   = all_d[:, m_dbg]
+            a_g   = all_a[:, m_dbg][:, None]             # (N,1) complex128
+
+            # --- reconstruct full channel -----------------------------------------
+            h_hat = []
+            for i, lam in enumerate(self.wavelengths):
+                F_i  = self.fourier_matrix(K, l_gnb, lam)   # uses fractional λ spacing
+                blk  = build_big_S(psi_g, psi_u, d_g, m_ant=m_dbg)
+                SiDi = blk[i*K:(i+1)*K, :]                  # pick sub‑carrier i
+                h_i  = tf.cast(F_i, C) @ (SiDi @ a_g)       # (K,1)
+                h_hat.append(tf.squeeze(h_i))
+            h_hat = tf.stack(h_hat, axis=-1)                # (K , I)
+
+            plt.figure()
+            plt.plot(np.real(h_hat[0, :]), label='reconstructed')
+            plt.plot(np.real(channel_mean[0, m_dbg, :]), label='original')
+            plt.legend(); plt.title(f'UE antenna {m_dbg}')
+            plt.savefig('debug_h.png')
+
+            rel = tf.abs(tf.norm(channel_mean[:, m_dbg, :] - tf.cast(h_hat, tf.complex64)) / \
+                tf.norm(channel_mean[:, m_dbg, :]))
+            tf.print("relative L2 error (dB):", 20*tf.math.log(rel)/tf.math.log(10.0))
+
+        return all_psi_gnb, all_d, all_a
 
     def compute_steering_vectors(self, num_antennas, antenna_spacing, wavelengths, psi):
         """Compute steering vectors for all paths and subcarriers.
@@ -178,7 +288,7 @@ class dl_to_ul_channel_adapt:
         return a
     
     def reconstruct_uplink_channel(self, psi_gnb, psi_ue, d, a, phi, carrier_freq):
-        """Reconstruct uplink channel for the given carrier frequency.
+        """Reconstruct uplink channel for the given carrier frequency, predicting 1 ms into the future.
         
         Args:
             psi_gnb: gNB angle parameters [max_paths].
@@ -189,13 +299,19 @@ class dl_to_ul_channel_adapt:
             carrier_freq: Carrier frequency in Hz (float).
         
         Returns:
-            Uplink channel tensor [num_gnb_antennas, num_ue_antennas, subcarriers].
+            Uplink channel tensor [num_gnb_antennas, num_ue_antennas, subcarriers] at t + 1 ms.
         """
+        # Compute wavelengths and frequencies for all subcarriers
         wavelengths = self.speed_of_light / (carrier_freq + self.subcarrier_spacing * tf.range(self.subcarriers, dtype=tf.float32))
         freqs = carrier_freq + self.subcarrier_spacing * tf.range(self.subcarriers, dtype=tf.float32)
         
-        phase_freq = -2 * np.pi * d[None, :] * freqs[:, None] / self.speed_of_light
-        amplitude_freq = a[None, :] * tf.exp(tf.complex(0.0, tf.cast(phase_freq + phi[None, :], tf.float32)))  # [subcarriers, max_paths]
+        # Compute phase at t + time_gap (1 ms)
+        time_future = self.time_gap  # 0.001 s
+        tau = d / self.speed_of_light  # Path delays [max_paths]
+        phase_freq = -2 * np.pi * tau[None, :] * freqs[:, None]  # Base phase due to delay [subcarriers, max_paths]
+        doppler_phase = -2 * np.pi * tau[None, :] * freqs[:, None] * time_future / self.coherence_time  # Approximate Doppler effect
+        total_phase = phase_freq + doppler_phase + phi[None, :]  # Total phase including future shift
+        amplitude_freq = a[None, :] * tf.exp(tf.complex(0.0, tf.cast(total_phase, tf.float32)))  # [subcarriers, max_paths]
         
         # Compute steering vectors
         a_gnb_all = self.compute_steering_vectors(self.num_gnb_antennas, self.antenna_spacing_gnb, wavelengths, psi_gnb)  # [num_gnb_antennas, max_paths, subcarriers]

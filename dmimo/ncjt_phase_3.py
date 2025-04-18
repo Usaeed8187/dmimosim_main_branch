@@ -149,7 +149,7 @@ class NCJT_phase_3(Model):
         # Using LMMSE CE from NCJT Demo code
         self.ncjt_rx = MC_NCJT_RxUE(self.cfg, batch_size=self.batch_size , modulation_order_list=[self.cfg.modulation_order])
 
-    def call(self, p3_chans_ul, precoding_channel, info_bits):
+    def call(self, p3_chans_ul, h_freq_csi_dl, info_bits, h_freq_csi_ul=None):
         """
         Signal processing for one MU-MIMO transmission cycle (P3)
 
@@ -158,9 +158,19 @@ class NCJT_phase_3(Model):
         :param info_bits: information bits
         :return: decoded bits, uncoded BER, demodulated QAM symbols (for debugging purpose)
         """
-        # precoding_channel = self.r2f2_channel_inference(precoding_channel)
-        channel_adapter = dl_to_ul_channel_adapt()
-        # precoding_channel = channel_adapter(precoding_channel)
+        precoding_channel = h_freq_csi_dl
+        channel_adapter = dl_to_ul_channel_adapt(max_paths=3)
+        precoding_channel = channel_adapter(precoding_channel)
+
+        debug = True
+        if debug:
+            plt.figure()
+            plt.plot(np.real(precoding_channel[0,0,0,0,0,0,:]), label='precoding_channel')
+            plt.plot(np.real(h_freq_csi_dl[0,0,0,0,0,0,:]), label='h_freq_csi_dl')
+            plt.plot(np.real(h_freq_csi_ul[0,0,0,0,0,0,:]), label='h_freq_csi_ul')
+            plt.legend()
+            plt.savefig('a')
+        debug = False
 
         # LDPC encoder processing
         info_bits = tf.reshape(info_bits, [self.batch_size, self.cfg.num_scheduled_rx_ue, self.rg.num_streams_per_tx,
@@ -354,10 +364,10 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
                                                            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                            cfo_vals=cfg.random_cfo_vals,
                                                            sto_vals=cfg.random_sto_vals)
-        # h_freq_csi_ul, _ = lmmse_channel_estimation(p3_chans_ul, rg_csi,
-        #                                                    slot_idx=cfg.first_slot_idx,
-        #                                                    cfo_vals=cfg.random_cfo_vals,
-        #                                                    sto_vals=cfg.random_sto_vals)
+        h_freq_csi_ul, _ = lmmse_channel_estimation(p3_chans_dl, rg_csi,
+                                                           slot_idx=cfg.first_slot_idx - cfg.csi_delay + 1,
+                                                           cfo_vals=cfg.random_cfo_vals,
+                                                           sto_vals=cfg.random_sto_vals)
         # h_freq_csi_ul = None
         # err_var_csi_ul = None
 
@@ -374,7 +384,7 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
     info_bits = binary_source([cfg.num_slots_p1, ncjt_phase_3.num_bits_per_frame])
 
     # Phase 3 NCJT transmission
-    dec_bits, uncoded_ber, uncoded_ser, per_stream_ber = ncjt_phase_3(p3_chans_ul, precoding_channel, info_bits)
+    dec_bits, uncoded_ber, uncoded_ser, per_stream_ber = ncjt_phase_3(p3_chans_ul, precoding_channel, info_bits, h_freq_csi_ul)
 
     # Update average error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape)
