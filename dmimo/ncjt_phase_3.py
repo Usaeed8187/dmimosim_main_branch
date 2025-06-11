@@ -398,8 +398,6 @@ def ncjt_phase_3(cfg: SimConfig, ns3cfg: Ns3Config):
 
     return [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits], [per_stream_ber]
 
-
-
 def sim_ncjt_phase_3_all(cfg: SimConfig, ns3cfg: Ns3Config):
     """"
     Testing of phase 3 receiver using USRP received signal 

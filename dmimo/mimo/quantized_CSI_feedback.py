@@ -11,6 +11,7 @@ class quantized_CSI_feedback(Layer):
                 num_tx_streams,
                 architecture,
                 snrdb,
+                wideband=False,
                 total_bits=None,
                 VectorLength=None,
                 dtype=tf.complex64,
@@ -47,6 +48,7 @@ class quantized_CSI_feedback(Layer):
         
         self.num_tx_streams = num_tx_streams
         self.architecture = architecture # 'baseline', 'dMIMO_phase1'
+        self.wideband = wideband
         
         snr_linear = 10**(snrdb/10)
         self.snr_linear = np.mean(snr_linear)
@@ -151,7 +153,6 @@ class quantized_CSI_feedback(Layer):
             per_precoder_rate = np.zeros((h_est.shape[-1],num_codebook_elements))
 
             PMI = np.zeros((h_est.shape[-1]),dtype=int)
-            rate_for_selected_precoder = np.zeros((h_est.shape[-1]))
             
             for codebook_idx in range(num_codebook_elements):
 
@@ -160,7 +161,8 @@ class quantized_CSI_feedback(Layer):
                 snr_linear = np.sum(self.snr_linear)
                 n_var = self.cal_n_var(h_eff, snr_linear)
 
-                mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True)/self.num_tx_streams + n_var
+                mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True) + n_var*tf.eye(N_r, dtype=h_eff.dtype)
+                mmse_inv = tf.linalg.inv(mmse_inv)
 
                 per_stream_sinr = self.compute_sinr(h_eff, mmse_inv, n_var)
 
@@ -169,12 +171,21 @@ class quantized_CSI_feedback(Layer):
                 curr_codebook_rate = A_info * np.log2(1 + B_info * avg_sinr)
                 per_precoder_rate[:, codebook_idx] = np.sum(curr_codebook_rate, axis=-1)
 
-            precoding_matrices = np.zeros((h_est.shape[-1], codebook.shape[1], codebook.shape[2]), dtype=complex)
-
-            for n in range(h_est.shape[-1]):
-                PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
-                rate_for_selected_precoder[n] = per_precoder_rate[n, PMI[n]]
-                precoding_matrices[n, ...] = codebook[PMI[n]]
+            if self.wideband:
+                precoding_matrices = np.zeros((1, codebook.shape[1], codebook.shape[2]), dtype=complex)
+                for n in range(h_est.shape[-1]):
+                    PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
+                unique, counts = np.unique(PMI, return_counts=True)
+                PMI = unique[np.argmax(counts)]
+                rate_for_selected_precoder = np.mean(per_precoder_rate[:, PMI])
+                precoding_matrices[0, ...] = codebook[PMI]
+            else:
+                precoding_matrices = np.zeros((h_est.shape[-1], codebook.shape[1], codebook.shape[2]), dtype=complex)
+                rate_for_selected_precoder = np.zeros((h_est.shape[-1]))
+                for n in range(h_est.shape[-1]):
+                    PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
+                    rate_for_selected_precoder[n] = per_precoder_rate[n, PMI[n]]
+                    precoding_matrices[n, ...] = codebook[PMI[n]]
             
             precoding_matrices = precoding_matrices[np.newaxis, ...]
 

@@ -85,8 +85,8 @@ class rankAdaptation(Layer):
 
                         n_var = self.cal_n_var(h_eff, self.snr_linear)
 
-                        mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True)/rank_idx + n_var
-                        # mmse_inv = tf.matmul(h_eff, matrix_inv(mmse_inv), adjoint_a=True)
+                        mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True) + n_var*tf.eye(N_r, dtype=h_eff.dtype)
+                        mmse_inv = tf.linalg.inv(mmse_inv)
 
                         per_stream_sinr = self.compute_sinr(h_eff, mmse_inv, n_var)
 
@@ -183,8 +183,8 @@ class rankAdaptation(Layer):
                         snr_linear = np.sum(self.snr_linear[ant_indices])
                         n_var = self.cal_n_var(h_eff_per_node, snr_linear)
 
-                        mmse_inv = tf.matmul(h_eff_per_node, h_eff_per_node, adjoint_b=True)/rank_idx + n_var
-                        # mmse_inv = tf.linalg.inv(mmse_inv)
+                        mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True) + n_var*tf.eye(N_r, dtype=h_eff.dtype)
+                        mmse_inv = tf.linalg.inv(mmse_inv)
 
                         per_stream_sinr = self.compute_sinr(h_eff_per_node, mmse_inv, n_var)
                         if rank_idx == 1:

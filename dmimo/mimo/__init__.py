@@ -20,3 +20,5 @@ from .fiveG_precoder import fiveGPrecoder
 from .quantized_CSI_feedback import quantized_CSI_feedback
 from .mu_mimo_scheduler import MUMIMOScheduler
 from .sic_lmmse_equalizer import SICLMMSEEqualizer
+from .p1_demo_precoder import P1DemoPrecoder
+from .p1_demo_precoding import weighted_mean_precoder
