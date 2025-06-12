@@ -28,43 +28,22 @@ class P1DemoPrecoder(Layer):
     def _compute_effective_channel(self, h, g):
         """Compute effective channel after precoding"""
 
-        # Input dimensions:
-        # h: [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]
-        # g: [batch_size, num_tx, num_ofdm_symbols, fft_size, num_tx_ant, num_streams_per_tx]
-
         # Transpose h to shape:
-        # [batch_size, num_rx, num_tx, num_ofdm_symbols, fft_size, num_rx_ant,...
-        #  ..., num_tx_ant]
-        h = tf.transpose(h, [0, 1, 3, 5, 6, 2, 4])
+        # [num_rx, num_rx_ant, num_tx_ant]
+        h = tf.transpose(h, [0, 2, 1])
         h = tf.cast(h, g.dtype)
 
-        # Add one dummy dimension to g to be broadcastable to h:
-        # [batch_size, 1, num_tx, num_ofdm_symbols, fft_size, num_tx_ant,...
-        #  ..., num_streams_per_tx]
-        g = tf.expand_dims(g, 1)
-
         # Compute post precoding channel:
-        # [batch_size, num_rx, num_tx, num_ofdm, fft_size, num_rx_ant,...
-        #  ..., num_streams_per_tx]
+        # [num_rx, num_rx_ant, num_streams_per_tx]
         h_eff = tf.matmul(h, g)
-
-        # Permute dimensions to common format of channel tensors:
-        # [batch_size, num_rx, num_rx_ant, num_tx, num_streams_per_tx,...
-        #  ..., num_ofdm, fft_size]
-        h_eff = tf.transpose(h_eff, [0, 1, 5, 2, 6, 3, 4])
-
-        # Remove nulled subcarriers:
-        # [batch_size, num_rx, num_rx_ant, num_tx, num_streams_per_tx,...
-        #  ..., num_ofdm, num_effective_subcarriers]
-        h_eff = self._remove_nulled_scs(h_eff)
 
         return h_eff
 
     def call(self, inputs):
 
         ue_rank_adapt = False
-        if len(inputs) == 5:
-            x, h, ue_indices, ue_ranks, precoding_method = inputs
+        if len(inputs) == 4:
+            x, h, rx_snr_db, precoding_method = inputs
         else:
             ValueError("calling BD precoder with incorrect params")
 
@@ -88,9 +67,20 @@ class P1DemoPrecoder(Layer):
         h = np.squeeze(h)
         h_pc_desired = tf.transpose(h, [0, 2, 1])
 
-        x_precoded, g = weighted_mean_precoder(x_precoded,
-                                        h_pc_desired,
-                                        return_precoding_matrix=True)
+        if precoding_method == 'baseline':
+            x_precoded, g, starting_SINR, best_SINR = weighted_mean_precoder(x_precoded,
+                                    h_pc_desired,
+                                    rx_snr_db,
+                                    num_iterations=0,
+                                    return_precoding_matrix=True)
+        elif precoding_method == 'weighted_mean':
+            x_precoded, g, starting_SINR, best_SINR = weighted_mean_precoder(x_precoded,
+                                                        h_pc_desired,
+                                                        rx_snr_db,
+                                                        num_iterations=3,
+                                                        return_precoding_matrix=True)
+        else:
+            ValueError("unsupported precoding method for phase 1 demo")
 
         # Transpose output to desired shape:
         # [batch_size, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]
@@ -98,6 +88,6 @@ class P1DemoPrecoder(Layer):
 
         if self._return_effective_channel:
             h_eff = self._compute_effective_channel(h, g)
-            return x_precoded, h_eff
+            return x_precoded, h_eff, starting_SINR, best_SINR
         else:
-            return x_precoded
+            return x_precoded, None, starting_SINR, best_SINR

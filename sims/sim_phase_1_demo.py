@@ -96,13 +96,13 @@ if __name__ == "__main__":
     if arguments == []:
         mobility = 'high_mobility'
         drop_idx = '1'
-        rx_ues_arr = [2]
-        precoding_method = 'weighted_mean'                               # 'none', 'eigenmode'
+        rx_ues_arr = [4]
+        precoding_method = 'weighted_mean'                               # 'weighted_mean', 'power_allocation'
         receiver = 'SIC'                                        # 'LMMSE', 'PIC', 'SIC'
     cfg.num_rx_ue_sel = rx_ues_arr[0]
-    cfg.num_scheduled_rx_ue = rx_ues_arr[0]
-    streams_per_tx = 1
-    cfg.num_tx_streams = cfg.num_scheduled_rx_ue * streams_per_tx
+    cfg.num_scheduled_tx_ue = rx_ues_arr[0]
+    streams_per_tx = 2
+    cfg.num_tx_streams = streams_per_tx
     cfg.modulation_order = 4
     cfg.precoding_method = precoding_method
     cfg.receiver = receiver
@@ -143,17 +143,10 @@ if __name__ == "__main__":
     # Testing
     #############################################
 
-    for sto in sto_arr:
-        for cfo in cfo_arr:
-            cfg.sto_sigma = sto
-            cfg.cfo_sigma = cfo
+    uncoded_bers  = sim_phase_1_all(cfg, ns3cfg)
 
-            uncoded_ber, ldpc_ber, goodput, throughput, bitrate, per_stream_ber  = sim_phase_1_all(cfg, ns3cfg)
+    file_path = "results/phase_1_sim_dl_channels/{}_precoding_method/{}_drop_idx_{}_UEs_{}_streams_per_tx_{}_modulation_order_{}.npz".format(
+                precoding_method, mobility, drop_idx, cfg.num_scheduled_tx_ue, cfg.num_tx_streams, cfg.modulation_order)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
 
-            file_path = "results/phase_1_sim_dl_channels/{}_receiver_{}_precoding_method/{}_drop_idx_{}_UEs_{}_streams_per_tx_{}_modulation_order_{}_cfo_{}_sto_{}.npz".format(
-                        cfg.receiver, precoding_method, mobility, drop_idx, cfg.num_scheduled_rx_ue, cfg.num_tx_streams, 
-                        cfg.modulation_order, cfg.cfo_sigma, cfg.sto_sigma)
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-            np.savez(file_path, uncoded_ber=uncoded_ber, ldpc_ber=ldpc_ber, per_stream_ber=per_stream_ber, goodput=goodput, 
-                    throughput=throughput, bitrate=bitrate)
+    np.savez(file_path, uncoded_bers=uncoded_bers)

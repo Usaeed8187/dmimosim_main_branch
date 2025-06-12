@@ -219,8 +219,6 @@ class NCJT_phase_3(Model):
         else:
             ValueError("unsupported precoding method")
 
-        # print("x_precoded", x_precoded.shape)
-
         # add CFO/STO to simulate synchronization errors
         if np.any(np.not_equal(self.cfg.random_sto_vals, 0)):
             x_precoded = add_timing_offset(x_precoded, self.cfg.random_sto_vals)

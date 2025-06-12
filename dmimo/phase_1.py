@@ -115,6 +115,8 @@ class Phase1(Model):
         # The decoder provides hard-decisions on the information bits
         self.decoder = LDPC5GDecoder(self.encoder, hard_out=True)
 
+        self.apply_channel = ApplyOFDMChannel(add_awgn=False, dtype=tf.as_dtype(tf.complex64))
+
         self.zf_precoder = ZFPrecoder(self.rg, sm, return_effective_channel=True)
 
 
@@ -134,29 +136,38 @@ class Phase1(Model):
         x_rg = self.rg_mapper(x)
         
         SNR_range = np.arange(0, 20, 2)
-        uncoded_bers = np.zeros((1, np.arange(0, 20, 2).shape[0]))
+        uncoded_bers = np.zeros((2, SNR_range.shape[0], self.cfg.num_scheduled_tx_ue))
 
         h_freq_csi = np.linalg.pinv(precoding_matrices)
         h_freq_csi = tf.transpose(h_freq_csi, perm=[0, 1, 2, 4, 3])
+
+        all_symbols = tf.range(self.rg.num_ofdm_symbols)
+        pilot_symbols = self.rg._pilot_ofdm_symbol_indices
+
+        # Get the set difference: symbols not used for pilots
+        data_symbol_indices = tf.sets.difference(
+            tf.expand_dims(all_symbols, 0), tf.expand_dims(pilot_symbols, 0)
+        ).values
+
+        # apply dMIMO channels to the resource grid in the frequency domain.
+        h_freq, _, _ = dmimo_chans.load_channel(slot_idx=self.cfg.first_slot_idx,
+                                                            batch_size=self.batch_size)
+        h_freq = tf.gather(h_freq, tf.range(0, self.cfg.num_scheduled_tx_ue*2), axis=2)
         
         for snr_idx, snr in enumerate(SNR_range):
             
             rx_snr_db = snr
 
-            for curr_method in range(1):
+            for curr_method in range(2):
                 
                 # apply precoding to OFDM grids
-                if self.cfg.precoding_method == "weighted_mean" or self.cfg.precoding_method == "power_allocation":
-                    ue_indices = [[i] for i in range(self.cfg.num_scheduled_rx_ue)]
-                    ue_ranks = self.num_streams_per_tx
-                    x_precoded, h_eff = self.p1_demo_precoder([x_rg, h_freq_csi, ue_indices, ue_ranks, self.cfg.precoding_method])
-                else:
-                    ValueError("unsupported precoding method for phase 1 demo")
-
-                # apply dMIMO channels to the resource grid in the frequency domain.
-                h_freq, _ = dmimo_chans.load_channel(slot_idx=self.cfg.first_slot_idx,
-                                                                    batch_size=self.batch_size)
-                h_freq = tf.gather(h_freq, tf.range(0, h_freq.shape[2], 2), axis=2)
+                if curr_method == 0:
+                    x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'baseline'])
+                elif curr_method == 1:
+                    if self.cfg.precoding_method == "weighted_mean" or self.cfg.precoding_method == "power_allocation":
+                        x_precoded, h_eff, starting_SINR, best_SINR = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, self.cfg.precoding_method])
+                    else:
+                        ValueError("unsupported precoding method for phase 1 demo")
                 
                 y = self.apply_channel([x_precoded, h_freq])
                 no = np.power(10.0, rx_snr_db / (-10.0))
@@ -168,39 +179,47 @@ class Phase1(Model):
                 h_hat, err_var = self.ls_estimator([y, no])
 
                 x_hat = np.zeros(x_rg.shape, dtype=np.complex64)
+                x_hat = x_hat[np.newaxis, ...]
+                x_hat = np.repeat(x_hat, self.cfg.num_scheduled_tx_ue, axis=0)
                 x_hat = x_hat[..., :self.rg.num_effective_subcarriers]
-                for rx_node in range(self.num_rx_ue):
-                    curr_y = tf.gather(y, rx_node, axis=2)
+                x_hat = x_hat[..., data_symbol_indices, :]
+                for rx_node in range(self.cfg.num_scheduled_tx_ue):
+                    curr_y = tf.gather(y, tf.range(rx_node*2, rx_node*2+2), axis=2)
                     curr_y = tf.gather(curr_y, self.rg.effective_subcarrier_ind, axis=-1)
                     curr_y = tf.squeeze(curr_y)
-
-                    curr_h = tf.gather(h_hat, rx_node, axis=2)
+                    curr_y = curr_y[np.newaxis, np.newaxis, ...]
+                    
+                    curr_h = tf.gather(h_hat, tf.range(rx_node*2, rx_node*2+2), axis=2)
                     curr_h = tf.squeeze(curr_h)
-                    curr_h = tf.gather(curr_h, rx_node, axis=1)
+                    curr_h = curr_h[np.newaxis, np.newaxis, :, np.newaxis, ...]
+                    
+                    curr_x_hat, no_eff = self.lmmse_equ([curr_y, curr_h, err_var, no])
+                    x_hat[rx_node, ...] = np.reshape(curr_x_hat, x_hat.shape[1:])
 
-                    curr_x_hat = curr_y / curr_h
-                    curr_x_hat = curr_x_hat[:, np.newaxis, ...]
-                    curr_x_hat = np.asarray(curr_x_hat)
+                    llr = self.demapper([curr_x_hat, no_eff])
 
-                    x_hat[:,:,rx_node,:,:] = curr_x_hat
-                
-                all_symbols = tf.range(self.rg.num_ofdm_symbols)
-                pilot_symbols = self.rg._pilot_ofdm_symbol_indices
+                    d_hard = tf.cast(llr > 0, tf.float32)
 
-                # Get the set difference: symbols not used for pilots
-                data_symbol_indices = tf.sets.difference(
-                    tf.expand_dims(all_symbols, 0), tf.expand_dims(pilot_symbols, 0)
-                ).values
-                x_hat = x_hat[:,:,:,data_symbol_indices ,:]
-                x_hat = tf.reshape(x_hat, (x_hat.shape[0], x_hat.shape[1], x_hat.shape[2], x_hat.shape[3] * x_hat.shape[4]))
-                x_hat = tf.convert_to_tensor(x_hat)
+                    uncoded_bers[curr_method, snr_idx, rx_node] = compute_ber(d, d_hard).numpy()
 
-                # Soft-output QAM demapper
-                llr = self.demapper([x_hat, no])
+        plt.figure()
+        mean_ber = np.mean(uncoded_bers, axis=1)
+        # best_user = np.argmin(mean_ber[0, :])
+        # plt.semilogy(SNR_range, uncoded_bers[0,:,best_user], label='BER for best user (user {}) after weighted mean precoding'.format(best_user))
+        # best_user = np.argmin(mean_ber[1, :])
+        # plt.semilogy(SNR_range, uncoded_bers[1,:,best_user], label='BER for best user (user {}) after mean precoding'.format(best_user))
 
-                # Hard-decision bit error rate
-                d_hard = tf.cast(llr > 0, tf.float32) # Shape: [nbatches, 1, number of streams, number of effective subcarriers * number of data OFDM symbols * QAM order]
-                uncoded_bers[curr_method, snr_idx] = compute_ber(d, d_hard).numpy()
+        worst_user = np.argmax(mean_ber[0, :])
+        plt.semilogy(SNR_range, uncoded_bers[0,:,worst_user], label='BER for worst user (user {}) after weighted mean precoding'.format(worst_user))
+        worst_user = np.argmax(mean_ber[1, :])
+        plt.semilogy(SNR_range, uncoded_bers[1,:,worst_user], label='BER for worst user (user {}) after mean precoding'.format(worst_user))
+        plt.legend()
+        plt.grid()
+        plt.xlabel('SNR (dB)')
+        plt.ylabel('BER')
+        plt.title('')
+        plt.savefig('Mean and Weighted Mean - {} Users'.format(self.cfg.num_scheduled_tx_ue))
+
 
         return uncoded_bers, x_hat
     
@@ -321,6 +340,8 @@ def sim_phase_1(cfg: SimConfig, ns3cfg: Ns3Config):
     else:
         quantized_channels = None
 
+    quantized_channels = quantized_channels[:cfg.num_scheduled_tx_ue, ...]
+
     # Create MU-MIMO simulation
     phase_1 = Phase1(cfg, rg_csi)
 
@@ -329,19 +350,9 @@ def sim_phase_1(cfg: SimConfig, ns3cfg: Ns3Config):
     info_bits = binary_source([cfg.num_slots_p1, phase_1.num_bits_per_frame])
 
     # Phase 3 NCJT transmission
-    dec_bits, uncoded_ber, uncoded_ser, per_stream_ber = phase_1(p1_chans_dl, info_bits, quantized_channels)
+    uncoded_bers, x_hat = phase_1(p1_chans_dl, info_bits, quantized_channels)
 
-    # Update average error statistics
-    info_bits = tf.reshape(info_bits, dec_bits.shape)
-    coded_ber = compute_ber(info_bits, dec_bits).numpy()
-    coded_bler = compute_bler(info_bits, dec_bits).numpy()
-
-    # Goodput and throughput estimation
-    goodbits = (1.0 - coded_ber) * ncjt_phase_3.num_bits_per_frame
-    userbits = (1.0 - coded_bler) * ncjt_phase_3.num_bits_per_frame
-    ratedbits = (1.0 - uncoded_ser) * ncjt_phase_3.num_uncoded_bits_per_frame
-
-    return [uncoded_ber, coded_ber], [goodbits, userbits, ratedbits], [per_stream_ber]
+    return uncoded_bers
 
 
 def sim_phase_1_all(cfg: SimConfig, ns3cfg: Ns3Config):
@@ -350,14 +361,8 @@ def sim_phase_1_all(cfg: SimConfig, ns3cfg: Ns3Config):
     """
 
     total_cycles = 0
-    
-    pred_nmse_pred_nmse_outdated = []
-    pred_nmse_wesn = []
-    pred_nmse_wgesn_per_antenna_pair = []
-    
-    uncoded_ber_outdated = []
-    uncoded_ber_wesn = []
-    uncoded_ber_wgesn = []
+        
+    uncoded_bers = []
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
 
@@ -366,14 +371,8 @@ def sim_phase_1_all(cfg: SimConfig, ns3cfg: Ns3Config):
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
 
-        [curr_pred_nmse_outdated, curr_pred_nmse_wesn, curr_pred_nmse_wgesn_per_antenna_pair], curr_uncoded_bers = sim_phase_1(cfg, ns3cfg)
+        curr_uncoded_bers = sim_phase_1(cfg, ns3cfg)
 
-        pred_nmse_pred_nmse_outdated.append(curr_pred_nmse_outdated)
-        pred_nmse_wesn.append(curr_pred_nmse_wesn)
-        pred_nmse_wgesn_per_antenna_pair.append(curr_pred_nmse_wgesn_per_antenna_pair)
+        uncoded_bers.append(curr_uncoded_bers)
 
-        uncoded_ber_outdated.append(curr_uncoded_bers[0])
-        uncoded_ber_wesn.append(curr_uncoded_bers[1])
-        uncoded_ber_wgesn.append(curr_uncoded_bers[2])
-
-    return pred_nmse_pred_nmse_outdated, pred_nmse_wesn, pred_nmse_wgesn_per_antenna_pair, uncoded_ber_outdated, uncoded_ber_wesn, uncoded_ber_wgesn
+    return uncoded_bers
