@@ -5,8 +5,7 @@ import sionna
 from sionna.utils import flatten_dims
 from sionna.ofdm import RemoveNulledSubcarriers
 
-from .p1_demo_precoding import weighted_mean_precoder
-
+from .p1_demo_precoding import weighted_mean_precoder, wmmse_precoder
 
 class P1DemoPrecoder(Layer):
     """Precoders for Phase 1 for demo"""
@@ -51,7 +50,7 @@ class P1DemoPrecoder(Layer):
         # [batch_size, num_tx, num_streams_per_tx, num_ofdm_symbols, fft_size]
         #
         # h has shape
-        # [num_rx, num_rx_ant, num_tx, num_tx_ant]
+        # [num_rx, batch_size, num_tx, num_tx_ant, num_streams_per_tx]
         num_tx, num_streams_per_tx = x.shape[1:3]
         assert num_streams_per_tx <= 2, "Invalid number of transmitted streams"
 
@@ -63,8 +62,8 @@ class P1DemoPrecoder(Layer):
         x_precoded = tf.cast(x_precoded, self._dtype)
     
         # Transpose h:
-        # [num_tx, num_streams_per_tx, num_tx_ant]
-        h = np.squeeze(h)
+        # [num_rx, num_streams_per_tx, num_tx_ant]
+        h = np.squeeze(h, axis=(1, 2))
         h_pc_desired = tf.transpose(h, [0, 2, 1])
 
         if precoding_method == 'baseline':
@@ -79,6 +78,14 @@ class P1DemoPrecoder(Layer):
                                                         rx_snr_db,
                                                         num_iterations=3,
                                                         return_precoding_matrix=True)
+        elif precoding_method == 'wmmse':
+            x_precoded, g, Hg = wmmse_precoder(x_precoded,
+                                                        h_pc_desired,
+                                                        rx_snr_db,
+                                                        num_iterations=10,
+                                                        return_precoding_matrix=True)
+            starting_SINR = None
+            best_SINR = None
         else:
             ValueError("unsupported precoding method for phase 1 demo")
 

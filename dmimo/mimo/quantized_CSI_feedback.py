@@ -8,6 +8,7 @@ class quantized_CSI_feedback(Layer):
 
     def __init__(self,
                 method,
+                codebook_selection_method,
                 num_tx_streams,
                 architecture,
                 snrdb,
@@ -20,6 +21,8 @@ class quantized_CSI_feedback(Layer):
         
         self.nfft = 512
         self.subcarriers_per_RB = 12
+
+        self.codebook_selection_method = codebook_selection_method # 'rate', 'chordal_dist'
 
         self.method = method
         if self.method == '5G':
@@ -150,44 +153,94 @@ class quantized_CSI_feedback(Layer):
             num_codebook_elements = np.product(codebook.shape[:-2])
             codebook = codebook.reshape(-1, codebook.shape[-2], codebook.shape[-1])
 
-            per_precoder_rate = np.zeros((h_est.shape[-1],num_codebook_elements))
+            if self.codebook_selection_method == 'rate':
 
-            PMI = np.zeros((h_est.shape[-1]),dtype=int)
+                per_precoder_rate = np.zeros((h_est.shape[-1],num_codebook_elements))
+
+                PMI = np.zeros((h_est.shape[-1]),dtype=int)
             
-            for codebook_idx in range(num_codebook_elements):
+                for codebook_idx in range(num_codebook_elements):
 
-                h_eff = self.calculate_effective_channel(h_est, codebook[codebook_idx,...])
+                    h_eff = self.calculate_effective_channel(h_est, codebook[codebook_idx,...])
 
-                snr_linear = np.sum(self.snr_linear)
-                n_var = self.cal_n_var(h_eff, snr_linear)
+                    snr_linear = np.sum(self.snr_linear)
+                    n_var = self.cal_n_var(h_eff, snr_linear)
 
-                mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True) + n_var*tf.eye(N_r, dtype=h_eff.dtype)
-                mmse_inv = tf.linalg.inv(mmse_inv)
+                    mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True) + n_var*tf.eye(N_r, dtype=h_eff.dtype)
+                    mmse_inv = tf.linalg.inv(mmse_inv)
 
-                per_stream_sinr = self.compute_sinr(h_eff, mmse_inv, n_var)
+                    per_stream_sinr = self.compute_sinr(h_eff, mmse_inv, n_var)
 
-                avg_sinr = self.eesm_average(per_stream_sinr, 0.25, 4)
+                    avg_sinr = self.eesm_average(per_stream_sinr, 0.25, 4)
 
-                curr_codebook_rate = A_info * np.log2(1 + B_info * avg_sinr)
-                per_precoder_rate[:, codebook_idx] = np.sum(curr_codebook_rate, axis=-1)
+                    curr_codebook_rate = A_info * np.log2(1 + B_info * avg_sinr)
+                    per_precoder_rate[:, codebook_idx] = np.sum(curr_codebook_rate, axis=-1)
 
-            if self.wideband:
-                precoding_matrices = np.zeros((1, codebook.shape[1], codebook.shape[2]), dtype=complex)
-                for n in range(h_est.shape[-1]):
-                    PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
-                unique, counts = np.unique(PMI, return_counts=True)
-                PMI = unique[np.argmax(counts)]
-                rate_for_selected_precoder = np.mean(per_precoder_rate[:, PMI])
-                precoding_matrices[0, ...] = codebook[PMI]
-            else:
-                precoding_matrices = np.zeros((h_est.shape[-1], codebook.shape[1], codebook.shape[2]), dtype=complex)
-                rate_for_selected_precoder = np.zeros((h_est.shape[-1]))
-                for n in range(h_est.shape[-1]):
-                    PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
-                    rate_for_selected_precoder[n] = per_precoder_rate[n, PMI[n]]
-                    precoding_matrices[n, ...] = codebook[PMI[n]]
-            
-            precoding_matrices = precoding_matrices[np.newaxis, ...]
+                if self.wideband:
+                    precoding_matrices = np.zeros((1, codebook.shape[1], codebook.shape[2]), dtype=complex)
+                    for n in range(h_est.shape[-1]):
+                        PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
+                    unique, counts = np.unique(PMI, return_counts=True)
+                    PMI = unique[np.argmax(counts)]
+                    rate_for_selected_precoder = np.mean(per_precoder_rate[:, PMI])
+                    precoding_matrices[0, ...] = codebook[PMI]
+                else:
+                    precoding_matrices = np.zeros((h_est.shape[-1], codebook.shape[1], codebook.shape[2]), dtype=complex)
+                    rate_for_selected_precoder = np.zeros((h_est.shape[-1]))
+                    for n in range(h_est.shape[-1]):
+                        PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
+                        rate_for_selected_precoder[n] = per_precoder_rate[n, PMI[n]]
+                        precoding_matrices[n, ...] = codebook[PMI[n]]
+                
+                precoding_matrices = precoding_matrices[np.newaxis, ...]
+            elif self.codebook_selection_method == 'chordal_dist':
+
+                B, _, N_r, _, N_t, N_sym, N_sc = h_est.shape
+                Ns = self.num_tx_streams
+                Nsb = N_sym * N_sc
+                h_est_rs = tf.reshape(h_est, np.asarray([B, -1, N_r, N_t]))
+
+                per_precoder_dist = np.zeros((Nsb, num_codebook_elements))
+                PMI = np.zeros((Nsb,), dtype=int)
+
+                vH_all = np.empty((Nsb, N_t, Ns), dtype=complex)
+
+                for sb in range(Nsb):
+                    _, _, vh = np.linalg.svd(h_est_rs[0, sb], full_matrices=False)
+                    vH_all[sb, ...] = vh[:Ns].T
+
+                for codebook_idx in range(num_codebook_elements):
+
+                    w_unit = codebook[codebook_idx] / np.linalg.norm(codebook[codebook_idx], axis=0, keepdims=True)
+
+                    vH_conjT = np.conj(vH_all).transpose(0, 2, 1)
+                    proj = vH_conjT @ w_unit
+
+                    frob_sq = np.sum(np.abs(proj) ** 2, axis=(1, 2))
+                    per_precoder_dist[:, codebook_idx] = 1.0 - frob_sq / Ns
+
+                if self.wideband:
+                    precoding_matrices = np.zeros((1,
+                                                codebook.shape[1],
+                                                codebook.shape[2]), dtype=complex)
+
+                    for sb in range(Nsb):
+                        PMI[sb] = np.argmin(per_precoder_dist[sb, :])
+
+                    unique, counts = np.unique(PMI, return_counts=True)
+                    PMI = unique[np.argmax(counts)]                     # mode over RBs
+                    precoding_matrices[0, ...] = codebook[PMI]
+
+                else:
+                    precoding_matrices = np.zeros((h_est.shape[-1],
+                                                codebook.shape[1],
+                                                codebook.shape[2]), dtype=complex)
+                    for sb in range(Nsb):
+                        PMI[sb] = np.argmin(per_precoder_dist[sb, :])
+                        precoding_matrices[sb, ...] = codebook[PMI[sb]]
+
+                precoding_matrices = precoding_matrices[np.newaxis, ...]
+                rate_for_selected_precoder = None
 
         return [PMI, rate_for_selected_precoder, precoding_matrices]
 

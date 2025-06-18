@@ -83,7 +83,7 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 50                                            # total number of slots in ns-3 channels
+    cfg.total_slots = 75                                            # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15                                         # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = cfg.num_slots_p1 + cfg.num_slots_p2             # feedback delay in number of subframe
     cfg.perfect_csi = False
@@ -95,17 +95,15 @@ if __name__ == "__main__":
     cfg.dc_null = False
     if arguments == []:
         mobility = 'high_mobility'
-        drop_idx = '1'
-        rx_ues_arr = [4]
-        precoding_method = 'weighted_mean'                               # 'weighted_mean', 'power_allocation'
-        receiver = 'SIC'                                        # 'LMMSE', 'PIC', 'SIC'
+        drop_idx = '7'
+        rx_ues_arr = [2]
+        precoding_method = 'weighted_mean'                               # 'weighted_mean', 'wmmse'
     cfg.num_rx_ue_sel = rx_ues_arr[0]
     cfg.num_scheduled_tx_ue = rx_ues_arr[0]
-    streams_per_tx = 2
+    streams_per_tx = 1
     cfg.num_tx_streams = streams_per_tx
     cfg.modulation_order = 4
     cfg.precoding_method = precoding_method
-    cfg.receiver = receiver
     cfg.gen_sync_errors = False
     if cfg.gen_sync_errors:
         sto_arr = [0, 10, 30, 50, 70]

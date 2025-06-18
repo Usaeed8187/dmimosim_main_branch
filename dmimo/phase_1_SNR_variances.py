@@ -155,69 +155,84 @@ class Phase1(Model):
                                                             batch_size=self.batch_size)
         h_freq = tf.gather(h_freq, tf.range(0, self.cfg.num_scheduled_tx_ue*2), axis=2)
 
-        SNR_range = np.arange(0,40,2)
-
-        uncoded_bers = np.zeros((2, SNR_range.shape[0], self.cfg.num_scheduled_tx_ue))
+        num_variances = 30
+        avg_SNR = 15
+        max_snr = 25
+        min_snr = 5
+        max_variance = (max_snr - min_snr)**2 / 12
+        variances = np.linspace(0.1, max_variance, num_variances)
+        num_realizations = 10
+        uncoded_bers = np.zeros((2, num_variances, num_realizations, self.cfg.num_scheduled_tx_ue))
         
-        for snr_idx, snr in enumerate(SNR_range):
-
-            rx_snr_db = np.ones(self.cfg.num_scheduled_tx_ue) * snr
-            rx_snr_db[-1:] -= 5
+        for var_idx in range(num_variances):
 
             for curr_method in range(2):
 
-                # apply precoding to OFDM grids
-                if curr_method == 0:
-                    x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'baseline'])
-                elif curr_method == 1:
-                    if self.cfg.precoding_method == "weighted_mean" or self.cfg.precoding_method == "wmmse":
-                        x_precoded, h_eff, starting_SINR, best_SINR = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, self.cfg.precoding_method])
-                    else:
-                        ValueError("unsupported precoding method for phase 1 demo")
+                hold = 1
+
+                for realisation_idx in range(num_realizations):
+
+                    width = np.sqrt(12 * variances[var_idx]) / 2
+                    a = avg_SNR - width
+                    b = avg_SNR + width
+                    rx_snr_db = np.random.uniform(a, b, self.cfg.num_scheduled_tx_ue)
                 
-                y = self.apply_channel([x_precoded, h_freq])
-                rx_snr_linear =  10**(rx_snr_db / 10)
-                no = np.mean(np.abs(y)**2) / rx_snr_linear
-                y = self.awgn([y, no])
-
-                # LS channel estimation with linear interpolation
-                # no = tf.reduce_mean(no)
-                no = tf.cast(no, tf.float32)
-
-                x_hat = np.zeros(x_rg.shape, dtype=np.complex64)
-                x_hat = x_hat[np.newaxis, ...]
-                x_hat = np.repeat(x_hat, self.cfg.num_scheduled_tx_ue, axis=0)
-                x_hat = x_hat[..., :self.rg.num_effective_subcarriers]
-                x_hat = x_hat[..., data_symbol_indices, :]
-                for rx_node in range(self.cfg.num_scheduled_tx_ue):
-                    curr_y = tf.gather(y, tf.range(rx_node*2, rx_node*2+2), axis=2)
-
-                    curr_h, err_var = self.ls_estimator([curr_y, no[rx_node]])
-
-                    curr_y = tf.gather(curr_y, self.rg.effective_subcarrier_ind, axis=-1)
+                    # apply precoding to OFDM grids
+                    if curr_method == 0:
+                        x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'baseline'])
+                    elif curr_method == 1:
+                        if self.cfg.precoding_method == "weighted_mean" or self.cfg.precoding_method == "power_allocation":
+                            x_precoded, h_eff, starting_SINR, best_SINR = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, self.cfg.precoding_method])
+                        else:
+                            ValueError("unsupported precoding method for phase 1 demo")
                     
-                    # curr_h = tf.gather(h_hat, tf.range(rx_node*2, rx_node*2+2), axis=2)
-                    # curr_h = tf.squeeze(curr_h)
-                    # curr_h = curr_h[np.newaxis, np.newaxis, :, np.newaxis, ...]
-                    
-                    curr_x_hat, no_eff = self.lmmse_equ([curr_y, curr_h, err_var, no[rx_node]])
-                    x_hat[rx_node, ...] = np.reshape(curr_x_hat, x_hat.shape[1:])
+                    y = self.apply_channel([x_precoded, h_freq])
+                    no = np.power(10.0, rx_snr_db / (-10.0))
+                    y = self.awgn([y, no])
 
-                    llr = self.demapper([curr_x_hat, no_eff])
+                    # LS channel estimation with linear interpolation
+                    # no = tf.reduce_mean(no)
+                    no = tf.cast(no, tf.float32)
 
-                    d_hard = tf.cast(llr > 0, tf.float32)
+                    x_hat = np.zeros(x_rg.shape, dtype=np.complex64)
+                    x_hat = x_hat[np.newaxis, ...]
+                    x_hat = np.repeat(x_hat, self.cfg.num_scheduled_tx_ue, axis=0)
+                    x_hat = x_hat[..., :self.rg.num_effective_subcarriers]
+                    x_hat = x_hat[..., data_symbol_indices, :]
+                    for rx_node in range(self.cfg.num_scheduled_tx_ue):
+                        curr_y = tf.gather(y, tf.range(rx_node*2, rx_node*2+2), axis=2)
 
-                    uncoded_bers[curr_method, snr_idx, rx_node] = compute_ber(d, d_hard).numpy()
+                        curr_h, err_var = self.ls_estimator([curr_y, no[rx_node]])
+
+                        curr_y = tf.gather(curr_y, self.rg.effective_subcarrier_ind, axis=-1)
+                        
+                        # curr_h = tf.gather(h_hat, tf.range(rx_node*2, rx_node*2+2), axis=2)
+                        # curr_h = tf.squeeze(curr_h)
+                        # curr_h = curr_h[np.newaxis, np.newaxis, :, np.newaxis, ...]
+                        
+                        curr_x_hat, no_eff = self.lmmse_equ([curr_y, curr_h, err_var, no[rx_node]])
+                        x_hat[rx_node, ...] = np.reshape(curr_x_hat, x_hat.shape[1:])
+
+                        llr = self.demapper([curr_x_hat, no_eff])
+
+                        d_hard = tf.cast(llr > 0, tf.float32)
+
+                        uncoded_bers[curr_method, var_idx, realisation_idx, rx_node] = compute_ber(d, d_hard).numpy()
 
         plt.figure()
+        mean_ber = np.mean(uncoded_bers, axis=2)
+        # best_user = np.argmin(mean_ber[0, :])
+        # plt.semilogy(SNR_range, uncoded_bers[0,:,best_user], label='BER for best user (user {}) after weighted mean precoding'.format(best_user))
+        # best_user = np.argmin(mean_ber[1, :])
+        # plt.semilogy(SNR_range, uncoded_bers[1,:,best_user], label='BER for best user (user {}) after mean precoding'.format(best_user))
 
-        worst_users = np.argmax(uncoded_bers, axis=-1)
+        worst_users = np.argmax(mean_ber, axis=-1)
         worst_users  = mode(worst_users, axis=1, keepdims=False).mode
-        plt.semilogy(SNR_range, uncoded_bers[0,:,worst_users[0]], label='BER for worst user (user {}) after mean precoding'.format(worst_users[0]))
-        plt.semilogy(SNR_range, uncoded_bers[1,:,worst_users[1]], label='BER for worst user (user {}) after weighted mean precoding'.format(worst_users[1]))
+        plt.semilogy(variances, mean_ber[0,:,worst_users[0]], label='BER for worst user (user {}) after mean precoding'.format(worst_users[0]))
+        plt.semilogy(variances, mean_ber[1,:,worst_users[0]], label='BER for worst user (user {}) after weighted mean precoding'.format(worst_users[0]))
         plt.legend()
         plt.grid()
-        plt.xlabel('SNR (dB)')
+        plt.xlabel('SNR Variances')
         plt.ylabel('BER')
         plt.title('')
         plt.savefig('Mean and Weighted Mean - {} Users'.format(self.cfg.num_scheduled_tx_ue))
