@@ -95,7 +95,7 @@ if __name__ == "__main__":
     cfg.dc_null = False
     if arguments == []:
         mobility = 'high_mobility'
-        drop_idx = '7'
+        drop_idx = '8'
         rx_ues_arr = [2]
         precoding_method = 'weighted_mean'                               # 'weighted_mean', 'wmmse'
     cfg.num_rx_ue_sel = rx_ues_arr[0]
