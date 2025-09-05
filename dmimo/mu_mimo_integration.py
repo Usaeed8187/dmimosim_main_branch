@@ -153,9 +153,6 @@ class MU_MIMO(Model):
         x = self.mapper(d)
         x_rg = self.rg_mapper(x)
 
-        # [batch_size, num_rx_ue, num_ue_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
-        # h_freq_csi = tf.gather(h_freq_csi, tf.reshape(self.cfg.scheduled_rx_ue_indices, (1,-1)), axis=2, batch_dims=1)
-
         # apply precoding to OFDM grids
         if self.cfg.precoding_method == "ZF":
             x_precoded, g = self.zf_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
@@ -258,19 +255,17 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
         cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
         cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
 
-    # dMIMO channels from ns-3 simulator
-    dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
-
-    if cfg.scheduling:
-        tmp_num_rxue_sel = ns3cfg.num_rxue_sel
-        ns3cfg.num_rxue_sel = 10
-
-    # Reset UE selection, i.e. you tell the simulator how many UEs you want in either squad, and we select the best (by power) UEs of that number
+    # Reset UE selection. Start with all TX and RX UEs selected.
     # TODO: verify with Donald if this implementation is good
-    # ns3cfg.reset_ue_selection()
+    # TODO: check if tx UEs are being handled properly downstream
+    tmp_num_rxue_sel = ns3cfg.num_rxue_sel
+    ns3cfg.reset_ue_selection()
     tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
     ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
     # cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
+
+    # dMIMO channels from ns-3 simulator
+    dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
     
     # if cfg.scheduling:
     # if cfg.enable_ue_selection is True:
@@ -369,7 +364,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
         
         # Updating system parameters based on scheduling    
         rx_ue_mask = np.zeros(10)
-        rx_ue_mask[scheduled_rx_UEs] = 1
+        rx_ue_mask[scheduled_rx_UEs-1] = 1
         ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
 
         ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
@@ -382,13 +377,41 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
         cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
 
     else:
-        cfg.scheduled_rx_ue_indices = cfg.ue_indices
+        
+        rx_ue_mask = np.zeros(10)
+        rx_ue_mask[:tmp_num_rxue_sel] = 1
+        ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+
+        ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
+        scheduled_rx_UEs = np.arange(1, tmp_num_rxue_sel+1)
+        for ue_idx in scheduled_rx_UEs:
+            start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+            end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+            ue_indices.append(list(np.arange(start, end)))
+        cfg.scheduled_rx_ue_indices = np.array(ue_indices)
         cfg.num_scheduled_ues = cfg.scheduled_rx_ue_indices.shape[0]-2
         if not cfg.rank_adapt:
             cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
+
+    # debug_rx_UE_selection = np.asarray([1, 2, 3, 4])
+    # rx_ue_mask = np.zeros(10)
+    # rx_ue_mask[debug_rx_UE_selection-1] = 1
+    # ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+
+    # ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
+    # scheduled_rx_UEs = debug_rx_UE_selection
+    # for ue_idx in scheduled_rx_UEs:
+    #     start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+    #     end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+    #     ue_indices.append(list(np.arange(start, end)))
+    # cfg.scheduled_rx_ue_indices = np.array(ue_indices)
+    # cfg.num_scheduled_ues = scheduled_rx_UEs.size
+    # cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
     
-    # Rank and link adaptation
+    # Pick the selected UE's channels
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (1,-1)), axis=2, batch_dims=1)
+
+    # Rank and link adaptation
     rank_feedback_report, n_var, mcs_feedback_report = \
         do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
 

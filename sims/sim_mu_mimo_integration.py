@@ -79,25 +79,25 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 23        # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 20     # starting slots (must be greater than csi_delay + 5)
+    cfg.total_slots = 50        # total number of slots in ns-3 channels
+    cfg.start_slot_idx = 35     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = False
     cfg.rank_adapt = False      # enable/disable rank adaptation
     cfg.link_adapt = False      # enable/disable link adaptation
     cfg.csi_prediction = False
     cfg.enable_ue_selection = False
-    cfg.scheduling = True
+    cfg.scheduling = False
     if arguments == []:
         mobility = 'high_mobility'
-        drop_idx = '3'
+        drop_idx = '4'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
 
     # Select Number of TxSquad and RxSquad UEs to use.
     ns3cfg.num_txue_sel = 10
     if arguments == []:
-        rx_ues_arr = [4] # If using scheduling, ns3cfg.num_rxue_sel will initially be reset to 10, then the number selected here will be scheduled
+        rx_ues_arr = [4]
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)

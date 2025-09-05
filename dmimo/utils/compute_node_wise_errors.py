@@ -12,7 +12,7 @@ def compute_UE_wise_BER(info_bits, dec_bits, num_tx_streams_per_node, num_tx_str
     
     UE_indices_list = []
     start_value = num_tx_streams_per_node*2
-    num_rx_UEs = int((num_tx_streams - 4) / num_tx_streams_per_node)
+    num_rx_UEs = int((num_tx_streams - num_tx_streams_per_node * 2) / num_tx_streams_per_node)
     for i in range(num_rx_UEs):
         row = tf.range(start_value, start_value + num_tx_streams_per_node)
         UE_indices_list.append(row)
