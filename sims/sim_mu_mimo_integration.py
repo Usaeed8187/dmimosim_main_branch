@@ -97,7 +97,7 @@ if __name__ == "__main__":
     # Select Number of TxSquad and RxSquad UEs to use.
     ns3cfg.num_txue_sel = 10
     if arguments == []:
-        rx_ues_arr = [4]
+        rx_ues_arr = [3]
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)

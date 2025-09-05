@@ -393,20 +393,20 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
         if not cfg.rank_adapt:
             cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
 
-    # debug_rx_UE_selection = np.asarray([1, 2, 3, 4])
-    # rx_ue_mask = np.zeros(10)
-    # rx_ue_mask[debug_rx_UE_selection-1] = 1
-    # ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+    debug_rx_UE_selection = np.asarray([2, 3, 4])
+    rx_ue_mask = np.zeros(10)
+    rx_ue_mask[debug_rx_UE_selection-1] = 1
+    ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
 
-    # ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
-    # scheduled_rx_UEs = debug_rx_UE_selection
-    # for ue_idx in scheduled_rx_UEs:
-    #     start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
-    #     end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
-    #     ue_indices.append(list(np.arange(start, end)))
-    # cfg.scheduled_rx_ue_indices = np.array(ue_indices)
-    # cfg.num_scheduled_ues = scheduled_rx_UEs.size
-    # cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
+    ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
+    scheduled_rx_UEs = debug_rx_UE_selection
+    for ue_idx in scheduled_rx_UEs:
+        start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+        end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+        ue_indices.append(list(np.arange(start, end)))
+    cfg.scheduled_rx_ue_indices = np.array(ue_indices)
+    cfg.num_scheduled_ues = scheduled_rx_UEs.size
+    cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
     
     # Pick the selected UE's channels
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (1,-1)), axis=2, batch_dims=1)
