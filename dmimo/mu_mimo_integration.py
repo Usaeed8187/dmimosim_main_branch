@@ -1,6 +1,7 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow.python.keras import Model
+import matplotlib.pyplot as plt
 
 from sionna.ofdm import ResourceGrid, ResourceGridMapper, LSChannelEstimator, LMMSEEqualizer
 from sionna.mimo import StreamManagement
@@ -260,8 +261,13 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
     # dMIMO channels from ns-3 simulator
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
 
-    # Reset UE selection
-    ns3cfg.reset_ue_selection()
+    if cfg.scheduling:
+        tmp_num_rxue_sel = ns3cfg.num_rxue_sel
+        ns3cfg.num_rxue_sel = 10
+
+    # Reset UE selection, i.e. you tell the simulator how many UEs you want in either squad, and we select the best (by power) UEs of that number
+    # TODO: verify with Donald if this implementation is good
+    # ns3cfg.reset_ue_selection()
     tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
     ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
     # cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
@@ -302,6 +308,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
         rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams)
         # Get CSI history
         # TODO: optimize channel estimation and optimization procedures (currently very slow)
+        # TODO: Add graph ESN implementation here as an option
+        # TODO: right now, we run the ESN per antenna pair because otherwise the dimension of the matrices are too large to store in RAM. reduce to RB granularity have at least run per-node-pair ESNs
         h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
                                                           rg_csi, dmimo_chans, 
                                                           cfo_vals=cfg.random_cfo_vals,
@@ -309,7 +317,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
         # Do channel prediction
         h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
     else:
-        # LMMSE channel estimation
+        # LMMSE channel estimation. h_freq_csi shape: [_, _, num_rx_ants, _ num_tx_ants, num_syms, num_subcarriers]
         h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi,
                                                            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                            cfo_vals=cfg.random_cfo_vals,
@@ -318,53 +326,51 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
                                                 batch_size=cfg.num_slots_p2)
 
 
-    ######################################################
-    # Testing scheduler with no quantization for now
-    ######################################################
+    ###############################################################################################################################################
+    # Testing scheduler without explicit CSI calculation for now. Using right singular vectors and singular values as a surrogate for CSI.
+    ###############################################################################################################################################
 
-    if cfg.scheduling:
-        # Get effective channel estimate after MRC combining at the RxSquad Nodes
-        rank_adaptation = rankAdaptation(dmimo_chans.ns3_config.num_bs_ant, dmimo_chans.ns3_config.num_ue_ant,
-                                        architecture='MU-MIMO', snrdb=rx_snr_db, fft_size=cfg.fft_size,
-                                        precoder=cfg.precoding_method)
-        _, h_eff = rank_adaptation.generate_zf_precoding(cfg.ue_ranks[0], h_freq_csi) 
+    if cfg.scheduling: # Different from UE selection. Now, you treat the number of RX Squad UEs from UE selection as the maximum number to schedule. You schedule somewhere between 1 to ns3cfg.num_rxue_sel UEs in the RX Squad
+        # TODO: Currently only exhaustive search is implemented fully
 
         # Get right singular vectors and singular values of effective channels 
-        num_rx_nodes = cfg.ue_indices.shape[0]-1
+        num_rx_nodes = ns3cfg.num_rxue_sel+1
         h_reconstructed = np.zeros((h_freq_csi.shape), dtype=complex)
-        h_reconstructed = h_reconstructed[:, :, :h_eff.shape[-2], ...]
+        h_reconstructed = h_reconstructed[:, :, :(num_rx_nodes+1)*cfg.ue_ranks[0], ...]
         for rx_node_idx in range(num_rx_nodes):
 
             if rx_node_idx == 0:
-                num_streams = cfg.ue_ranks[0]*2
-                stream_idx = np.arange(cfg.ue_ranks[0]*2)
+                ant_idx = np.arange(4)
+                num_streams = 2
+                stream_idx = np.arange(2)
             else:
-                num_streams = cfg.ue_ranks[0]
+                ant_idx = np.arange((rx_node_idx-1) * 2 + 4, rx_node_idx * 2 + 4)
+                num_streams = 1
                 stream_idx = np.arange((rx_node_idx-1) * cfg.ue_ranks[0] + cfg.ue_ranks[0]*2, rx_node_idx * cfg.ue_ranks[0] + cfg.ue_ranks[0]*2)
 
-            curr_h_eff = tf.gather(h_eff, stream_idx, axis=-2)
+            curr_h = tf.gather(h_freq_csi, ant_idx, axis=2)
 
-            s, _, Vh = tf.linalg.svd(curr_h_eff, full_matrices=False)
+            s, _, Vh = tf.linalg.svd(curr_h, full_matrices=False)
             s = tf.cast(s, Vh.dtype)
             s = tf.expand_dims(s, axis=-2)
 
             curr_h_reconstructed = Vh * s
-            curr_h_reconstructed = curr_h_reconstructed[:,:,:,tf.newaxis,...]
+            curr_h_reconstructed = curr_h_reconstructed[:,:, :num_streams, ...]
+            # curr_h_reconstructed = curr_h_reconstructed[:,:,:,tf.newaxis,...]
 
-            h_reconstructed[:, :, stream_idx, ...] = tf.transpose(curr_h_reconstructed, [0, 1, 6, 3, 5, 2, 4])
+            h_reconstructed[:, :, stream_idx, ...] = tf.transpose(curr_h_reconstructed, [0, 1, 2, 3, 4, 6, 5])
         
         h_reconstructed = tf.convert_to_tensor(h_reconstructed)
 
         # Scheduling
-        mu_mimo_scheduler = MUMIMOScheduler(rx_snr_db)
+        mu_mimo_scheduler = MUMIMOScheduler(rx_snr_db, max_rx_UEs_scheduled=tmp_num_rxue_sel)
         scheduled_rx_nodes = mu_mimo_scheduler(h_reconstructed)
         scheduled_rx_UEs = scheduled_rx_nodes[1:] - 1 # Assuming gNB was scheduled
         
         # Updating system parameters based on scheduling    
-        # rx_ue_mask = np.zeros(cfg.num_rx_ue_sel)
-        # rx_ue_mask[scheduled_rx_UEs] = 1
-        # tx_ue_mask = np.ones(cfg.num_tx_ue_sel)
-        # ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+        rx_ue_mask = np.zeros(10)
+        rx_ue_mask[scheduled_rx_UEs] = 1
+        ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
 
         ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
         for node in scheduled_rx_nodes[1:]:
@@ -374,6 +380,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config):
         cfg.scheduled_rx_ue_indices = np.array(ue_indices)
         cfg.num_scheduled_ues = scheduled_rx_UEs.size
         cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
+
     else:
         cfg.scheduled_rx_ue_indices = cfg.ue_indices
         cfg.num_scheduled_ues = cfg.scheduled_rx_ue_indices.shape[0]-2

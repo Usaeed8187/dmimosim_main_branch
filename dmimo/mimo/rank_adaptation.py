@@ -144,11 +144,12 @@ class rankAdaptation(Layer):
                 
             return rank
         
-    def generate_rank_MU_MIMO(self, h_est, channel_type, prefixed_ranks=None):
+    def generate_rank_MU_MIMO(self, h_est, channel_type, prefixed_ranks=None, num_rx_nodes=None, pmi_input=False):
         
         N_t = h_est.shape[4]
         N_r = h_est.shape[2]
-        num_rx_nodes = int((N_r - self.num_BS_Ant)/self.num_UE_Ant) + 1
+        if num_rx_nodes is None:
+            num_rx_nodes = int((N_r - self.num_BS_Ant)/self.num_UE_Ant) + 1
         total_num_symbols = h_est.shape[5]
 
         if channel_type == 'Tx_squad':
@@ -169,28 +170,32 @@ class rankAdaptation(Layer):
 
                 for rank_idx in ranks:
 
-                    h_eff = self.calculate_effective_channel(rank_idx, h_est)
+                    h_eff = self.calculate_effective_channel(rank_idx, h_est, num_rx_nodes)
 
                     for rx_node_idx in range(num_rx_nodes):
                         
                         if rx_node_idx == 0:
                             ant_indices = np.arange(self.num_BS_Ant)
+                            stream_indices = np.arange(2*rank_idx)                          
                         else:
                             ant_indices = np.arange((rx_node_idx-1)*self.num_UE_Ant  + self.num_BS_Ant, rx_node_idx*self.num_UE_Ant + self.num_BS_Ant)
+                            stream_indices = np.arange((rx_node_idx-1)*rank_idx  + 2*rank_idx, rx_node_idx*rank_idx + 2*rank_idx)    
                         
-                        h_eff_per_node = tf.gather(h_eff, ant_indices, axis=-2)
+                        if pmi_input:
+                            h_eff_per_node = tf.gather(h_eff, stream_indices, axis=-2)
+                        else:
+                            h_eff_per_node = tf.gather(h_eff, ant_indices, axis=-2)
 
                         snr_linear = np.sum(self.snr_linear[ant_indices])
                         n_var = self.cal_n_var(h_eff_per_node, snr_linear)
 
-                        mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True) + n_var*tf.eye(N_r, dtype=h_eff.dtype)
+                        mmse_inv = tf.matmul(h_eff_per_node, h_eff_per_node, adjoint_b=True)
+                        mmse_inv  = mmse_inv + n_var*tf.eye(mmse_inv.shape[-1], dtype=mmse_inv.dtype)
                         mmse_inv = tf.linalg.inv(mmse_inv)
+                        mmse_inv = tf.matmul(h_eff_per_node, mmse_inv, adjoint_a=True)
 
                         per_stream_sinr = self.compute_sinr(h_eff_per_node, mmse_inv, n_var)
-                        if rank_idx == 1:
-                            per_stream_sinr = tf.gather(per_stream_sinr, rx_node_idx, axis=-1)
-                        elif rank_idx == 2:
-                            per_stream_sinr = per_stream_sinr
+                        per_stream_sinr = tf.gather(per_stream_sinr, stream_indices, axis=-1)
 
                         avg_sinr = self.eesm_average(per_stream_sinr, 0.25, 4)
 
@@ -247,7 +252,7 @@ class rankAdaptation(Layer):
                 return rank
 
     
-    def calculate_effective_channel(self, stream_idx, h_est):
+    def calculate_effective_channel(self, stream_idx, h_est, num_rx_nodes=None):
         
         if self.precoder == 'SVD':
             v, u_h = self.generate_svd_precoding(stream_idx, h_est) # calculating the svd precoder
@@ -256,7 +261,7 @@ class rankAdaptation(Layer):
         elif self.precoder == 'BD':
             v, u_h = self.generate_bd_precoding(stream_idx, h_est) # calculating the svd precoder
         elif self.precoder == 'ZF':
-            v, _ = self.generate_zf_precoding(stream_idx, h_est) # calculating the svd precoder
+            v, _ = self.generate_zf_precoding(stream_idx, h_est, num_rx_nodes) # calculating the svd precoder
 
         h_est_reshaped = tf.transpose(h_est, [0, 1, 3, 5, 6, 2, 4])
         h_est_reshaped = tf.cast(h_est_reshaped, dtype=v.dtype)
@@ -270,14 +275,17 @@ class rankAdaptation(Layer):
 
         return h_eff
 
-    def generate_zf_precoding(self, num_streams, h):
+    def generate_zf_precoding(self, num_streams, h, num_rx_nodes=None):
 
         # ZF precoding for MU-MIMO
 
         num_tx_ant = h.shape[-3]
         num_rx_ant = h.shape[2]
-        num_streams = num_streams
-        num_rx_nodes = int((num_rx_ant - self.num_BS_Ant)/self.num_UE_Ant) + 2 # treating BS as 2 UEs
+        # num_streams = num_streams
+        if num_rx_nodes is None:
+            num_rx_nodes = int((num_rx_ant - self.num_BS_Ant)/self.num_UE_Ant) + 2 # treating BS as 2 UEs
+        else:
+            num_rx_nodes = num_rx_nodes + 1 # treating BS as 2 UEs
         assert num_streams <= num_tx_ant, "Number of stream should not exceed number of tx antennas"
 
         # h has shape
@@ -447,36 +455,71 @@ class rankAdaptation(Layer):
         u_bd = tf.concat(u_all, axis=-1)  # [..., num_tx_ant, num_streams_per_tx]
         return v_bd, u_bd
 
-    def compute_sinr(self, h_eff, mmse_inv, n_var):
-        N_s = h_eff.shape[-1]
-        sinr_list = []
+    # def compute_sinr(self, h_eff, mmse_inv, n_var):
+    #     N_s = np.min([h_eff.shape[-1], h_eff.shape[-2]])
+    #     sinr_list = []
 
-        for i in range(N_s):
-            h_i = tf.gather(h_eff, i, axis=6)
-            h_i = tf.expand_dims(h_i, -1)
+    #     for i in range(N_s):
+    #         h_i = tf.gather(h_eff, i, axis=6)
+    #         h_i = tf.expand_dims(h_i, -1)
             
-            # Compute the numerator: |diag(h_i^H * MMSE_R_inv * h_i)|^2
-            numerator = tf.abs(tf.linalg.diag_part(tf.matmul(tf.linalg.adjoint(h_i), tf.matmul(mmse_inv, h_i))))**2
+    #         # Compute the numerator: |diag(h_i^H * MMSE_R_inv * h_i)|^2
+    #         numerator = tf.abs(tf.linalg.diag_part(tf.matmul(tf.linalg.adjoint(h_i), tf.matmul(mmse_inv, h_i))))**2
             
-            # Compute the denominator: n_var * diag(real(h_i^H * MMSE_R_inv * MMSE_R_inv^H * h_i)) + sum(|diag(h_i^H * MMSE_R_inv * h_j)|^2)
-            mmse_inv_h_i = tf.matmul(tf.linalg.adjoint(mmse_inv), h_i)
-            real_part = tf.linalg.diag_part(tf.math.real(tf.matmul(tf.linalg.adjoint(h_i), tf.matmul(mmse_inv, mmse_inv_h_i))))
-            interference_sum = tf.zeros_like(real_part)
+    #         # Compute the denominator: n_var * diag(real(h_i^H * MMSE_R_inv * MMSE_R_inv^H * h_i)) + sum(|diag(h_i^H * MMSE_R_inv * h_j)|^2)
+    #         mmse_inv_h_i = tf.matmul(tf.linalg.adjoint(mmse_inv), h_i)
+    #         real_part = tf.linalg.diag_part(tf.math.real(tf.matmul(tf.linalg.adjoint(h_i), tf.matmul(mmse_inv, mmse_inv_h_i))))
+    #         interference_sum = tf.zeros_like(real_part)
 
-            for j in range(N_s):
-                if j != i:
-                    h_j = tf.gather(h_eff, j, axis=6)
-                    h_j = tf.expand_dims(h_j, -1)
-                    interference_sum += tf.abs(tf.linalg.diag_part(tf.matmul(tf.linalg.adjoint(h_i), tf.matmul(mmse_inv, h_j))))**2
+    #         for j in range(N_s):
+    #             if j != i:
+    #                 h_j = tf.gather(h_eff, j, axis=6)
+    #                 h_j = tf.expand_dims(h_j, -1)
+    #                 interference_sum += tf.abs(tf.linalg.diag_part(tf.matmul(tf.linalg.adjoint(h_i), tf.matmul(mmse_inv, h_j))))**2
             
-            denominator = n_var * real_part + interference_sum
+    #         denominator = n_var * real_part + interference_sum
             
-            # Calculate SINR for h_i
-            sinr_i = numerator / denominator
-            sinr_list.append(sinr_i)
+    #         # Calculate SINR for h_i
+    #         sinr_i = numerator / denominator
+    #         sinr_list.append(sinr_i)
 
-        # Stack the SINR values to form the final SINR tensor
-        sinr = tf.stack(sinr_list, axis=-1)
+    #     # Stack the SINR values to form the final SINR tensor
+    #     sinr = tf.stack(sinr_list, axis=-1)
+    #     return sinr
+
+    def compute_sinr(self, h_eff, mmse_inv, n_var, eps=1e-12):
+        """
+        Per-stream SINR after linear MMSE combining.
+
+        Inputs:
+        h_eff    : [..., N_rx, N_s]   effective channel (antennas x streams)
+        mmse_inv : [..., N_s, N_rx]   MMSE combiner W = H^H (H H^H + n I)^{-1}
+        n_var    : scalar (or broadcastable) real noise variance
+
+        Returns:
+        sinr     : [..., N_s]         post-combiner SINR per stream
+        """
+        H = tf.convert_to_tensor(h_eff)
+        W = tf.convert_to_tensor(mmse_inv)
+
+        # Post-combiner effective channel S = W H  => [..., N_s, N_s]
+        S = tf.matmul(W, H)
+
+        # Desired signal power |S_ii|^2
+        signal = tf.abs(tf.linalg.diag_part(S)) ** 2                      # [..., N_s]
+
+        # Total power on each output stream: sum_j |S_ij|^2
+        total = tf.reduce_sum(tf.abs(S) ** 2, axis=-1)                    # [..., N_s]
+
+        # Multi-stream interference = total - desired
+        interf = total - signal                                           # [..., N_s]
+
+        # Noise term: n_var * ||W_i||^2  (row-wise squared norms of W)
+        W_row_norm2 = tf.reduce_sum(tf.abs(W) ** 2, axis=-1)              # [..., N_s]
+        noise = tf.cast(n_var, W.dtype.real_dtype) * W_row_norm2          # [..., N_s]
+
+        # SINR_i = |S_ii|^2 / (sum_{j≠i} |S_ij|^2 + n_var * ||W_i||^2)
+        sinr = signal / (interf + noise + tf.cast(eps, signal.dtype))
         return sinr
 
     def eesm_average(self, sinr, er, mod):
@@ -491,7 +534,7 @@ class rankAdaptation(Layer):
             raise ValueError('Supported modulation sizes are 2, 4, and 6 only.')
 
         N = int(np.size(sinr) / sinr.shape[-1])
-        exp_sum = np.sum(np.exp(-sinr / beta), axis=(0,1,2,3,4,5))
+        exp_sum = np.sum(np.exp(-sinr / beta), axis=(0,1,2,3,4))
         exp_sum = 1 / N * exp_sum
 
         if np.any(exp_sum == 0):

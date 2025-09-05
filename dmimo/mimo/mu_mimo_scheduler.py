@@ -88,7 +88,7 @@ class MUMIMOScheduler(Layer):
                         rx_ants = self.find_rx_ants(combo)
                         
                         curr_h_eff = tf.gather(h_eff, rx_ants, axis=2)
-                        _, _, curr_sum_rate = self.rank_adaptation.generate_rank_MU_MIMO(curr_h_eff, channel_type='dMIMO', prefixed_ranks=self.rank)
+                        _, _, curr_sum_rate = self.rank_adaptation.generate_rank_MU_MIMO(curr_h_eff, channel_type='dMIMO', prefixed_ranks=self.rank, num_rx_nodes=len(combo), pmi_input=True)
 
                         if curr_sum_rate >= max_rate:
                             best_combo = combo

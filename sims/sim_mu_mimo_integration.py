@@ -79,8 +79,8 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 16        # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 15     # starting slots (must be greater than csi_delay + 5)
+    cfg.total_slots = 23        # total number of slots in ns-3 channels
+    cfg.start_slot_idx = 20     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = False
     cfg.rank_adapt = False      # enable/disable rank adaptation
@@ -88,21 +88,16 @@ if __name__ == "__main__":
     cfg.csi_prediction = False
     cfg.enable_ue_selection = False
     cfg.scheduling = True
-    cfg.num_tx_ue_sel = 10
     if arguments == []:
         mobility = 'high_mobility'
         drop_idx = '3'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
-    ns3cfg.num_txue_sel = cfg.num_tx_ue_sel
-    # Select Number of TxSquad and RxSquad UEs to use. If using scheduling, leave the number of UEs to 10.
+
+    # Select Number of TxSquad and RxSquad UEs to use.
+    ns3cfg.num_txue_sel = 10
     if arguments == []:
-        if cfg.scheduling:
-            rx_ues_arr = [10]
-        else:
-            rx_ues_arr = [4]
-    if cfg.scheduling:
-        assert rx_ues_arr == [10], "If scheduling is on, rx_ues_arr should be = [10]"
+        rx_ues_arr = [4] # If using scheduling, ns3cfg.num_rxue_sel will initially be reset to 10, then the number selected here will be scheduled
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)
@@ -128,10 +123,9 @@ if __name__ == "__main__":
 
     for ue_arr_idx in range(np.size(rx_ues_arr)):
         
-        cfg.num_rx_ue_sel = rx_ues_arr[ue_arr_idx]
-        ns3cfg.num_rxue_sel = cfg.num_rx_ue_sel
+        ns3cfg.num_rxue_sel = rx_ues_arr[ue_arr_idx]
 
-        assert cfg.rank_adapt == False, "Current MU-MIMO code assumes fixed ranks."
+        assert cfg.rank_adapt == False, "Current MU-MIMO code assumes fixed rank transmission (single stream per RX UE)."
             
         num_rx_antennas = rx_ues_arr[ue_arr_idx] * 2 + 4
 
@@ -146,10 +140,12 @@ if __name__ == "__main__":
         # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
         cfg.modulation_order = 4
         
-        if not cfg.scheduling:
-            tx_ue_mask = np.ones(cfg.num_tx_ue_sel)
-            rx_ue_mask = np.ones(cfg.num_rx_ue_sel)
-            ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+        # if not cfg.scheduling:
+        #     tx_ue_mask = np.zeros(10)
+        #     tx_ue_mask[:ns3cfg.num_txue_sel] = np.ones(ns3cfg.num_txue_sel)
+        #     rx_ue_mask = np.zeros(10)
+        #     rx_ue_mask[:ns3cfg.num_rxue_sel] = np.ones(ns3cfg.num_rxue_sel)
+        #     ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
 
         cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
