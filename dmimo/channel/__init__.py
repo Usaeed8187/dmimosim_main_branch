@@ -11,7 +11,7 @@ from .channel_estimation import estimate_freq_cov, estimate_freq_time_cov, lmmse
 
 from .rc_pred_freq_mimo import standard_rc_pred_freq_mimo
 from .twomode_wesn_pred import twomode_wesn_pred
-
+from .twomode_wesn_pred_tf import twomode_wesn_pred_tf
 
 from.dl_to_ul_channel_adapt import dl_to_ul_channel_adapt
 

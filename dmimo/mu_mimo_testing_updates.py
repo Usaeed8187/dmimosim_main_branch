@@ -18,7 +18,7 @@ from sionna.utils.metrics import compute_ber, compute_bler
 from dmimo.config import Ns3Config, SimConfig, RCConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
 from dmimo.channel import standard_rc_pred_freq_mimo
-from dmimo.channel import twomode_wesn_pred
+from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf
 from dmimo.channel import RBwiseLinearInterp
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
 from dmimo.mimo import rankAdaptation, linkAdaptation
@@ -300,7 +300,7 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
 
     return rank_feedback_report, n_var, mcs_feedback_report
 
-3
+
 def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     """
     Simulation of MU-MIMO scenarios using different settings
@@ -421,7 +421,10 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
                     curr_h_freq_csi_history = h_freq_csi_history[:,:,:,rx_ant_idx,:,...]
                     curr_h_freq_csi_history = curr_h_freq_csi_history[:,:,:,:,:,tx_ant_idx,...]
+
+                    curr_h_freq_csi_history = tf.convert_to_tensor(curr_h_freq_csi_history)
                     
+                    start_time = time.time()
                     twomode_predictor = twomode_wesn_pred(rc_config=rc_config, 
                                                 num_freq_re=RB, 
                                                 num_rx_ant=RxAnt, 
@@ -429,6 +432,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                 )
                     rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
                     tmp = np.asarray(twomode_predictor.predict(curr_h_freq_csi_history))
+                    end_time = time.time()
+                    print("time elapsed for 1 link prediction: ", end_time - start_time)
                     h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
             end_time = time.time()
             print("total time for training and prediction: ", end_time-start_time)
