@@ -398,45 +398,98 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         end_time = time.time()
         print("Total time for channel history gathering: ", end_time - start_time)
         
-        if cfg.channel_prediction_method == "two_mode":
-            start_time_all_loops = time.time()
-            T, _, _, RxAnt, _, TxAnt, num_syms, RB = h_freq_csi_history.shape
-            h_freq_csi = np.zeros(h_freq_csi_history[0,...].shape, dtype=h_freq_csi_history.dtype)
-            num_bs_ant = 4
-            num_ue_ant = 2
+        if "two_mode" in cfg.channel_prediction_method:
 
-            for tx_node_idx in range(ns3cfg.num_txue_sel+1):
-                for rx_node_idx in range(ns3cfg.num_rxue_sel+1):
-                    if tx_node_idx == 0:
-                        tx_ant_idx = np.arange(0,num_bs_ant)
-                    else:
-                        tx_ant_idx = np.arange(num_bs_ant + (tx_node_idx-1)*num_ue_ant,num_bs_ant + (tx_node_idx)*num_ue_ant)
-                    TxAnt = len(tx_ant_idx)
+            if cfg.channel_prediction_method == "two_mode_tf":
 
-                    if rx_node_idx == 0:
-                        rx_ant_idx = np.arange(0,num_bs_ant)
-                    else:
-                        rx_ant_idx = np.arange(num_bs_ant + (rx_node_idx-1)*num_ue_ant,num_bs_ant + (rx_node_idx)*num_ue_ant)
-                    RxAnt = len(rx_ant_idx)
+                start_time_all_loops = time.time()
+                _, _, _, _, _, _, _, RB = h_freq_csi_history.shape
+                num_bs_ant = 4
+                num_ue_ant = 2
 
-                    curr_h_freq_csi_history = h_freq_csi_history[:,:,:,rx_ant_idx,:,...]
-                    curr_h_freq_csi_history = curr_h_freq_csi_history[:,:,:,:,:,tx_ant_idx,...]
+                # Convert once to TensorFlow tensor to avoid repeated host/device transfers
+                tf_h_freq_csi_history = tf.convert_to_tensor(h_freq_csi_history)
+                h_freq_csi = tf.Variable(tf.zeros(tf_h_freq_csi_history[0, ...].shape, dtype=tf_h_freq_csi_history.dtype))
 
-                    curr_h_freq_csi_history = tf.convert_to_tensor(curr_h_freq_csi_history)
-                    
-                    start_time = time.time()
-                    twomode_predictor = twomode_wesn_pred_tf(rc_config=rc_config, 
-                                                num_freq_re=RB, 
-                                                num_rx_ant=RxAnt, 
-                                                num_tx_ant=TxAnt
-                                                )
-                    rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
-                    tmp = np.asarray(twomode_predictor.predict(curr_h_freq_csi_history))
-                    end_time = time.time()
-                    print("time elapsed for 1 link prediction: ", end_time - start_time)
-                    h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
-            end_time_all_loops = time.time()
-            print("total time for training and prediction: ", end_time_all_loops-start_time_all_loops)
+                # Pre-compute antenna index ranges for all TX/RX nodes
+                tx_ant_ranges = [tf.range(0, num_bs_ant)] + [
+                    tf.range(num_bs_ant + (idx - 1) * num_ue_ant, num_bs_ant + idx * num_ue_ant)
+                    for idx in range(1, ns3cfg.num_txue_sel + 1)
+                ]
+                rx_ant_ranges = [tf.range(0, num_bs_ant)] + [
+                    tf.range(num_bs_ant + (idx - 1) * num_ue_ant, num_bs_ant + idx * num_ue_ant)
+                    for idx in range(1, ns3cfg.num_rxue_sel + 1)
+                ]
+
+                predictor_cache = {}
+
+                for tx_ant_idx in tx_ant_ranges:
+                    for rx_ant_idx in rx_ant_ranges:
+                        rx_start, rx_len = int(rx_ant_idx[0]), int(rx_ant_idx.shape[0])
+                        tx_start, tx_len = int(tx_ant_idx[0]), int(tx_ant_idx.shape[0])
+
+                        curr_h_freq_csi_history = tf.gather(tf_h_freq_csi_history, rx_ant_idx, axis=3)
+                        curr_h_freq_csi_history = tf.gather(curr_h_freq_csi_history, tx_ant_idx, axis=5)
+
+                        key = (rx_len, tx_len)
+                        if key not in predictor_cache:
+                            predictor_cache[key] = twomode_wesn_pred_tf(
+                                rc_config=rc_config,
+                                num_freq_re=RB,
+                                num_rx_ant=rx_len,
+                                num_tx_ant=tx_len,
+                            )
+                        
+                        start_time = time.time()
+                        tmp = tf.convert_to_tensor(predictor_cache[key].predict(curr_h_freq_csi_history))
+
+                        end_time = time.time()
+                        print("time elapsed for 1 link prediction: ", end_time - start_time)
+                        h_freq_csi[:, :, rx_start : rx_start + rx_len, :, tx_start : tx_start + tx_len, :, :].assign(tmp)
+
+                end_time_all_loops = time.time()
+                print("total time for training and prediction: ", end_time_all_loops-start_time_all_loops)
+
+            else:
+
+                start_time_all_loops = time.time()
+                T, _, _, RxAnt, _, TxAnt, num_syms, RB = h_freq_csi_history.shape
+                h_freq_csi = np.zeros(h_freq_csi_history[0,...].shape, dtype=h_freq_csi_history.dtype)
+                num_bs_ant = 4
+                num_ue_ant = 2
+
+                for tx_node_idx in range(ns3cfg.num_txue_sel+1):
+                    for rx_node_idx in range(ns3cfg.num_rxue_sel+1):
+                        if tx_node_idx == 0:
+                            tx_ant_idx = np.arange(0,num_bs_ant)
+                        else:
+                            tx_ant_idx = np.arange(num_bs_ant + (tx_node_idx-1)*num_ue_ant,num_bs_ant + (tx_node_idx)*num_ue_ant)
+                        TxAnt = len(tx_ant_idx)
+
+                        if rx_node_idx == 0:
+                            rx_ant_idx = np.arange(0,num_bs_ant)
+                        else:
+                            rx_ant_idx = np.arange(num_bs_ant + (rx_node_idx-1)*num_ue_ant,num_bs_ant + (rx_node_idx)*num_ue_ant)
+                        RxAnt = len(rx_ant_idx)
+
+                        curr_h_freq_csi_history = h_freq_csi_history[:,:,:,rx_ant_idx,:,...]
+                        curr_h_freq_csi_history = curr_h_freq_csi_history[:,:,:,:,:,tx_ant_idx,...]
+
+                        curr_h_freq_csi_history = tf.convert_to_tensor(curr_h_freq_csi_history)
+                        
+                        start_time = time.time()
+                        twomode_predictor = twomode_wesn_pred(rc_config=rc_config, 
+                                                    num_freq_re=RB, 
+                                                    num_rx_ant=RxAnt, 
+                                                    num_tx_ant=TxAnt
+                                                    )
+                        rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
+                        tmp = np.asarray(twomode_predictor.predict(curr_h_freq_csi_history))
+                        end_time = time.time()
+                        print("time elapsed for 1 link prediction: ", end_time - start_time)
+                        h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
+                end_time_all_loops = time.time()
+                print("total time for training and prediction: ", end_time_all_loops-start_time_all_loops)
         elif cfg.channel_prediction_method == "old":
             h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
         else:

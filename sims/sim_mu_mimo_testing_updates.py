@@ -92,7 +92,7 @@ if __name__ == "__main__":
     cfg.link_adapt = False      # enable/disable link adaptation
     cfg.csi_prediction = True
     cfg.use_perfect_csi_history_for_prediction = False
-    cfg.channel_prediction_method = "two_mode" # "old", "two_mode"
+    cfg.channel_prediction_method = "two_mode" # "old", "two_mode", "two_mode_tf"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
     modulation_order = 4
