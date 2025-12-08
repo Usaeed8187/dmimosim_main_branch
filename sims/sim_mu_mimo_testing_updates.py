@@ -98,7 +98,7 @@ if __name__ == "__main__":
     modulation_order = 4
     cfg.code_rate = 2/3
     if arguments == []:
-        mobility = 'low_mobility'
+        mobility = 'high_mobility'
         drop_idx = '5'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     # cfg.ns3_folder = "ns3/channels/LowMobility/"

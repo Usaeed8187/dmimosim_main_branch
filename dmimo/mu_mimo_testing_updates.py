@@ -399,7 +399,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         print("Total time for channel history gathering: ", end_time - start_time)
         
         if cfg.channel_prediction_method == "two_mode":
-            start_time = time.time()
+            start_time_all_loops = time.time()
             T, _, _, RxAnt, _, TxAnt, num_syms, RB = h_freq_csi_history.shape
             h_freq_csi = np.zeros(h_freq_csi_history[0,...].shape, dtype=h_freq_csi_history.dtype)
             num_bs_ant = 4
@@ -425,7 +425,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     curr_h_freq_csi_history = tf.convert_to_tensor(curr_h_freq_csi_history)
                     
                     start_time = time.time()
-                    twomode_predictor = twomode_wesn_pred_tf(rc_config=rc_config, 
+                    twomode_predictor = twomode_wesn_pred(rc_config=rc_config, 
                                                 num_freq_re=RB, 
                                                 num_rx_ant=RxAnt, 
                                                 num_tx_ant=TxAnt
@@ -435,8 +435,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     end_time = time.time()
                     print("time elapsed for 1 link prediction: ", end_time - start_time)
                     h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
-            end_time = time.time()
-            print("total time for training and prediction: ", end_time-start_time)
+            end_time_all_loops = time.time()
+            print("total time for training and prediction: ", end_time_all_loops-start_time_all_loops)
         elif cfg.channel_prediction_method == "old":
             h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
         else:
