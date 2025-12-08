@@ -59,7 +59,7 @@ class twomode_wesn_pred_tf:
         # This is mathematically equivalent to 
         # self.W_out_left = self.RS.randn(self.N_r, self.d_left)
         # self.W_out_right = self.RS.randn(self.d_right + self.N_in_right, self.N_t)
-        self.feature_dim = int(self.d_left * self.d_right * (self.window_length + 1))
+        self.feature_dim = int(self.d_left * (self.d_right + self.N_in_right))
 
         w_out_shape = (self.N_r * self.N_t, self.feature_dim)
         w_real = self.rng.normal(shape=w_out_shape, dtype=self.real_dtype)
@@ -70,80 +70,130 @@ class twomode_wesn_pred_tf:
 
         self.S_0 = tf.zeros([self.d_left, self.d_right], dtype=self.dtype)
     
+    @tf.function
     def predict(self, h_freq_csi_history):
 
         h_freq_csi_predicted = self.pred_v2(h_freq_csi_history)
 
         return h_freq_csi_predicted
-    
 
+    @tf.function
     def pred_v2(self, h_freq_csi_history):
-        
         
         tf.debugging.assert_equal(tf.rank(h_freq_csi_history), 8, message="\n The dimensions of h_freq_csi_history are not correct")
         h_freq_csi_history = tf.transpose(h_freq_csi_history, perm=[0,1,2,3,4,5,7,6])
         shape_tensor = tf.shape(h_freq_csi_history)
-        num_batches = int(shape_tensor[1])
-        num_rx_nodes = int(shape_tensor[2])
-        num_rx_antennas = int(shape_tensor[3])
-        num_tx_nodes = int(shape_tensor[4])
-        num_tx_antennas = int(shape_tensor[5])
-        num_freq_res = int(shape_tensor[6])
-        num_ofdm_syms = int(shape_tensor[7])
+        num_batches = shape_tensor[1]
+        num_tx_nodes = shape_tensor[2]
+        num_rx_antennas = shape_tensor[3]
+        num_rx_nodes = shape_tensor[4]
+        num_tx_antennas = shape_tensor[5]
+        num_freq_res = shape_tensor[6]
+        num_ofdm_syms = shape_tensor[7]
 
         channel_train_input = h_freq_csi_history[:-1, ...]
-        channel_train_gt    = h_freq_csi_history[1:,  ...]
+        channel_train_gt = h_freq_csi_history[1:, ...]
+
+        channel_train_input = tf.reshape(
+            channel_train_input,
+            [
+                tf.shape(channel_train_input)[0],
+                num_batches,
+                num_tx_nodes,
+                num_rx_antennas,
+                num_rx_nodes,
+                num_tx_antennas,
+                num_freq_res * num_ofdm_syms,
+            ],
+        )
+        channel_train_gt = tf.reshape(
+            channel_train_gt,
+            [
+                tf.shape(channel_train_gt)[0],
+                num_batches,
+                num_tx_nodes,
+                num_rx_antennas,
+                num_rx_nodes,
+                num_tx_antennas,
+                num_freq_res * num_ofdm_syms,
+            ],
+        )
+
+        combined_count = tf.shape(channel_train_input)[-1]
+        total_pairs = num_rx_nodes * num_tx_nodes
+
+        def process_pair(pair_idx):
+            rx_node = pair_idx // num_tx_nodes
+            tx_node = pair_idx % num_tx_nodes
+
+            self.init_weights()
+
+            train_input_pair = channel_train_input[:, 0, tx_node, :, rx_node, :, :]
+            train_gt_pair = channel_train_gt[:, 0, tx_node, :, rx_node, :, :]
+
+            def build_features(idx):
+                S_f, Y_f = self.build_S_Y(
+                    train_input_pair[..., idx], train_gt_pair[..., idx], curr_window_weights=None
+                )
+                return S_f, Y_f
+
+            S_stack, Y_stack = tf.map_fn(
+                build_features,
+                tf.range(combined_count),
+                fn_output_signature=(
+                    tf.TensorSpec(shape=(self.feature_dim, None), dtype=self.dtype),
+                    tf.TensorSpec(shape=(self.N_r * self.N_t, None), dtype=self.dtype),
+                ),
+            )
+
+            S_all = tf.reshape(tf.transpose(S_stack, perm=[1, 0, 2]), [self.feature_dim, -1])
+            Y_all = tf.reshape(
+                tf.transpose(Y_stack, perm=[1, 0, 2]), [self.N_r * self.N_t, -1]
+            )
+
+            G = self.reg_p_inv(S_all)
+            self.W_out = tf.matmul(Y_all, G)
+
+            def predict_block(idx):
+                channel_test_input = train_gt_pair[..., idx]
+                channel_pred_temp = self.test_train_predict(channel_test_input, curr_window_weights=None)
+                return channel_pred_temp[:, :, -1]
+
+            pair_pred = tf.map_fn(
+                predict_block,
+                tf.range(combined_count),
+                fn_output_signature=tf.TensorSpec(
+                    shape=(self.N_r, self.N_t), dtype=self.dtype
+                ),
+            )
+
+            return pair_pred
+
+        pair_predictions = tf.map_fn(
+            process_pair,
+            tf.range(total_pairs),
+            fn_output_signature=tf.TensorSpec(
+                shape=(None, self.N_r, self.N_t), dtype=self.dtype
+            ),
+        )
+
+        pair_predictions = tf.reshape(
+            pair_predictions,
+            [
+                num_rx_nodes,
+                num_tx_nodes,
+                num_freq_res,
+                num_ofdm_syms,
+                self.N_r,
+                self.N_t,
+            ],
+        )
+
+        pair_predictions = tf.transpose(pair_predictions, perm=[1, 4, 0, 5, 2, 3])
+        pair_predictions = tf.expand_dims(pair_predictions, axis=0)
+
+        chan_pred = tf.transpose(pair_predictions, perm=[0, 1, 2, 3, 4, 6, 5])
         
-        if not self.enable_window:
-            window_weights = None
-
-        chan_pred_var = tf.Variable(tf.zeros_like(h_freq_csi_history[0, ...], dtype=self.dtype))
-
-        # === ONE reservoir per (rx_node, tx_node) pair; shared across all RBs ===
-        for rx_node in range(num_rx_nodes):
-            for tx_node in range(num_tx_nodes):
-
-                # Initialize weights ONCE for all RBs of this (rx_node, tx_node)
-                self.init_weights()
-
-                # --------- (A) FEATURE BUILD PHASE: stack all RBs (and OFDM syms) ----------
-                S_list, Y_list = [], []
-                for freq_re in range(num_freq_res):
-                    for ofdm_sym in range(num_ofdm_syms):
-                        # Train sequences for this RB/symbol → [T, N_r, N_t]
-                        Y_in  = channel_train_input[:, 0, tx_node, :, rx_node, :, freq_re, ofdm_sym]
-                        Y_out = channel_train_gt[:,    0, tx_node, :, rx_node, :, freq_re, ofdm_sym]
-
-                        # Optional: do NOT reset S_0 here if you want cross-RB continuity
-                        # self.S_0 = tf.zeros([self.d_left, self.d_right], dtype=self.dtype)
-
-                        S_f, Y_f = self.build_S_Y(Y_in, Y_out, curr_window_weights=None)
-                        S_list.append(S_f); Y_list.append(Y_f)
-
-                S_all = tf.concat(S_list, axis=1)  # (F, sum_T)
-                Y_all = tf.concat(Y_list, axis=1)  # (N_r*N_t, sum_T)
-
-                # --------- (B) SINGLE READOUT SOLVE (shared across RBs) ----------
-                # Prefer ridge for stability:
-                G = self.reg_p_inv(S_all)               # (sum_T, F)  :=  S_all^H (S_all S_all^H + λI)^{-1}
-                self.W_out = tf.matmul(Y_all, G)        # (N_r*N_t, F)
-
-                # --------- (C) PREDICTION PHASE with the shared W_out ----------
-                for freq_re in range(num_freq_res):
-                    for ofdm_sym in range(num_ofdm_syms):
-                        # Use last known channel as test input; predict next step
-                        channel_test_input = channel_train_gt[:, 0, tx_node, :, rx_node, :, freq_re, ofdm_sym]
-
-                        # Optional: either carry S_0 across RBs for smoothness,
-                        # or reset it per RB. Start with reset; then try carry-over.
-                        self.S_0 = tf.zeros([self.d_left, self.d_right], dtype=self.dtype)
-
-                        channel_pred_temp = self.test_train_predict(channel_test_input, curr_window_weights=None)
-                        channel_pred_temp = channel_pred_temp[:, :, -1:]       # keep last step
-                        channel_pred_temp = tf.squeeze(channel_pred_temp)      # [N_r, N_t]
-                        chan_pred_var[:, tx_node, :, rx_node, :, freq_re, ofdm_sym].assign(channel_pred_temp)
-
-        chan_pred = tf.transpose(chan_pred_var.read_value(), perm=[0,1,2,3,4,6,5])
         return chan_pred
 
     def build_S_Y(self, channel_input, channel_output, curr_window_weights):
@@ -163,8 +213,8 @@ class twomode_wesn_pred_tf:
         S_3D = tf.concat([S_3D_transit, Y_3D_win], axis=-1)
 
         T = tf.shape(S_3D)[0]
-        S = tf.stack([tf.reshape(S_3D[t], [-1]) for t in tf.range(T)], axis=1)  # (feature_dim, T)
-        Y = tf.stack([tf.reshape(Y_target_3D[t], [-1]) for t in tf.range(T)], axis=1)  # (N_r*N_t, T)
+        S = tf.transpose(tf.reshape(S_3D, [T, -1]))  # (feature_dim, T)
+        Y = tf.transpose(tf.reshape(Y_target_3D, [T, -1]))  # (N_r*N_t, T)
         
         return S, Y
 
@@ -207,14 +257,10 @@ class twomode_wesn_pred_tf:
         S_3D = tf.concat([S_3D_transit, Y_3D_new], axis=-1)
 
         T = tf.shape(S_3D)[0]
-        S = tf.stack([
-            tf.reshape(S_3D[t], [-1]) for t in tf.range(T)
-        ], axis=1)  # (feature_dim, T)
+        S = tf.transpose(tf.reshape(S_3D, [T, -1]))  # (feature_dim, T)
 
         # vectorization trick. equivalent to having two W_out matrices on either side of the feature matrix being fed to the output
-        Y = tf.stack([
-            tf.reshape(Y_target_3D[t], [-1]) for t in tf.range(T)
-        ], axis=1)
+        Y = tf.transpose(tf.reshape(Y_target_3D, [T, -1]))
 
         self.W_out = tf.matmul(Y, tf.linalg.pinv(S))
 
@@ -265,27 +311,22 @@ class twomode_wesn_pred_tf:
 
         tf.debugging.assert_equal(tf.rank(Y_3D_complex), 3, message="Y must be [T, N_r, N_t]")
         shape_tensor = tf.shape(Y_3D_complex)
-        T = int(shape_tensor[0])
-        N_r = int(shape_tensor[1])
-        N_t = int(shape_tensor[2])
+        T = shape_tensor[0]
+        N_r = shape_tensor[1]
+        N_t = shape_tensor[2]
 
-        L = int(self.window_length)
+        L = tf.cast(self.window_length, tf.int32)
 
-        Y_3D_window = tf.TensorArray(self.dtype, size=T)
+        zero_pad = tf.zeros((tf.maximum(L - 1, 0), N_r, N_t), dtype=self.dtype)
+        padded = tf.concat([zero_pad, Y_3D_complex], axis=0)
 
-        zero_block = tf.zeros((N_r, N_t), dtype=self.dtype)
+        time_indices = tf.range(T)[:, None] + tf.range(L)[None, :]
+        windows = tf.gather(padded, time_indices, axis=0)  # [T, L, N_r, N_t]
 
-        for k in range(T):
-            blocks = []
-            for ell in range(L):
-                t = k - ell
-                if t >= 0:
-                    blocks.append(Y_3D_complex[t])       # [N_r, N_t]
-                else:
-                    blocks.append(zero_block)  # causal zero-pad
-            Y_3D_window = Y_3D_window.write(k, tf.concat(blocks, axis=-1))
+        windows = tf.transpose(windows, perm=[0, 2, 3, 1])
+        Y_3D_window = tf.reshape(windows, [T, N_r, N_t * L])
 
-        return Y_3D_window.stack()
+        return Y_3D_window
 
     def test_train_predict(self, channel_train_input, curr_window_weights):
         self.S_0 = tf.zeros([self.d_left, self.d_right], dtype=self.dtype)
@@ -300,9 +341,7 @@ class twomode_wesn_pred_tf:
 
         # vectorization trick. equivalent to having two W_out matrices on either side of the feature matrix being fed to the output
         T = tf.shape(S_3D)[0]
-        S = tf.stack([
-            tf.reshape(S_3D[t], [-1]) for t in tf.range(T)
-        ], axis=1)  # (feature_dim, T)
+        S = tf.transpose(tf.reshape(S_3D, [T, -1]))  # (feature_dim, T)
 
         curr_channel_pred = tf.matmul(self.W_out, S)
 
@@ -314,15 +353,13 @@ class twomode_wesn_pred_tf:
 
         T = tf.shape(Y_3D)[0] # number of samples
         
-        S_2D = tf.identity(self.S_0)
-        S_list = []
-        for t in tf.range(T):
-            S_2D = self.complex_tanh(tf.matmul(tf.matmul(self.W_res_left, S_2D), self.W_res_right) + tf.matmul(tf.matmul(self.W_in_left, Y_3D[t,:,:]), self.W_in_right))
-            S_list.append(S_2D)
+        def step(prev_state, curr_input):
+            update = tf.matmul(tf.matmul(self.W_res_left, prev_state), self.W_res_right)
+            update += tf.matmul(tf.matmul(self.W_in_left, curr_input), self.W_in_right)
+            return self.complex_tanh(update)
 
-        S_3D = tf.stack(S_list, axis=0)
-
-        self.S_0 = S_2D
+        S_3D = tf.scan(step, Y_3D, initializer=self.S_0)
+        self.S_0 = S_3D[-1]
 
         return S_3D
 

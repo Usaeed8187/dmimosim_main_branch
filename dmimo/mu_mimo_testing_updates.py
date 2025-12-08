@@ -425,7 +425,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     curr_h_freq_csi_history = tf.convert_to_tensor(curr_h_freq_csi_history)
                     
                     start_time = time.time()
-                    twomode_predictor = twomode_wesn_pred(rc_config=rc_config, 
+                    twomode_predictor = twomode_wesn_pred_tf(rc_config=rc_config, 
                                                 num_freq_re=RB, 
                                                 num_rx_ant=RxAnt, 
                                                 num_tx_ant=TxAnt
