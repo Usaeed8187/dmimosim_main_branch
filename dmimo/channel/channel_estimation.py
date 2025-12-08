@@ -4,6 +4,7 @@ Channel estimation for dMIMO scenarios
 
 import numpy as np
 import tensorflow as tf
+import time
 
 from sionna.ofdm import ResourceGrid, ResourceGridMapper, LSChannelEstimator
 from sionna.mapping import Mapper
@@ -87,7 +88,7 @@ def estimate_freq_time_cov(dmimo_chans: dMIMOChannels, rg: ResourceGrid, start_s
 
 
 def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_idx, cache_slots=5, ebno_db=12.0,
-                             cfo_vals=[0], sto_vals=[0]):
+                             cfo_vals=[0], sto_vals=[0], freq_cov_mat=None):
 
     # Only allow channel estimation from slot 1 onward
     assert slot_idx > 0, "Current slot index must be a positive integer"
@@ -101,9 +102,18 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
     binary_source = BinarySource()
     mapper = Mapper("qam", num_bits_per_symbol)
     rg_mapper = ResourceGridMapper(rg)
+    
+    start_time = time.time()
+    if freq_cov_mat is None:
+        freq_cov_mat = estimate_freq_cov(dmimo_chans, rg, start_slot=start_slot, total_slots=cache_slots)
+    end_time = time.time()
+    # print("Time taken for channel covariance estimation: ", end_time - start_time)
 
-    freq_cov_mat = estimate_freq_cov(dmimo_chans, rg, start_slot=start_slot, total_slots=cache_slots)
+    start_time = time.time()
     lmmse_int = LMMSELinearInterp(rg.pilot_pattern, freq_cov_mat)
+    end_time = time.time()
+    # print("Time taken for LMMSELinearInterp intitialization: ", end_time - start_time)
+    
     ls_estimator = LSChannelEstimator(rg, interpolator=lmmse_int)
 
     # Calculate noise variance for LS channel estimation

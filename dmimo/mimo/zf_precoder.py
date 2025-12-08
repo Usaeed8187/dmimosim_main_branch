@@ -5,7 +5,7 @@ import sionna
 from sionna.utils import flatten_dims
 from sionna.ofdm import RemoveNulledSubcarriers
 
-from .zf_precoding import sumimo_zf_precoder, sumimo_zf_precoder_modified, mumimo_zf_precoder
+from .zf_precoding import sumimo_zf_precoder, sumimo_zf_precoder_modified, mumimo_zf_precoder, mumimo_zf_precoder_quantized
 
 
 class ZFPrecoder(Layer):
@@ -148,3 +148,112 @@ class ZFPrecoder(Layer):
             return x_precoded, h_eff
         else:
             return x_precoded
+
+class QuantizedZFPrecoder(Layer):
+    """ZF Precoder for MU-MIMO"""
+
+    def __init__(self,
+                 resource_grid,
+                 stream_management,
+                 dtype=tf.complex64,
+                 **kwargs):
+        super().__init__(trainable=False, dtype=dtype, **kwargs)
+        assert isinstance(resource_grid, sionna.ofdm.ResourceGrid)
+        assert isinstance(stream_management, sionna.mimo.StreamManagement)
+        self._resource_grid = resource_grid
+        self._stream_management = stream_management
+        self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
+
+    def call(self, x_rg, h_freq_quantized, scheduled_rx_ue_indices, ue_ranks):
+        """
+        Returns precoded data symbols using ZF precoding with quantized CSI
+
+        :param x_rg: data stream symbols of shape [batch_size, num_tx, num_streams_per_tx, num_ofdm_symbols, fft_size]
+        :param h_freq_quantized: quantized channel coefficients of shape [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, num_subcarriers]
+        :param scheduled_rx_ue_indices: numpy array of scheduled RX UE antenna indices of shape [num_scheduled_rx_ues, num_rx_ant_per_ue]
+        :param ue_ranks: list of ranks for each scheduled RX UE
+        :return: precoded data symbols
+        """
+        ue_rank_adapt = False
+        if scheduled_rx_ue_indices is not None and ue_ranks is not None:
+            ue_rank_adapt = True
+            if np.size(np.array(ue_ranks)) == 1:
+                ue_ranks = np.repeat(ue_ranks, len(scheduled_rx_ue_indices), axis=0)
+        sinr_calculation = False
+
+        # x_rg has shape
+        # [batch_size, num_tx, num_streams_per_tx, num_ofdm_symbols, fft_size]
+        #
+        # h_freq_quantized has shape
+        # [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, num_subcarriers]
+        assert x_rg.shape[2] == h_freq_quantized.shape[1], "Invalid number of transmitted streams"
+        # check rx_indices and rx_ranks
+        num_rx_ant = [len(val) for val in scheduled_rx_ue_indices]
+        assert all(ue_ranks <= num_rx_ant), "UE rank should not exceed number of antennas"
+        # Transpose x:
+        # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx]
+        x_precoded = tf.transpose(x_rg, [0, 1, 3, 4, 2])
+
+        x_precoded, g = mumimo_zf_precoder_quantized(x_precoded,
+                                        h_freq_quantized,
+                                        scheduled_rx_ue_indices,
+                                        ue_ranks,
+                                        return_precoding_matrix=True)
+
+        x_precoded = tf.transpose(x_precoded, [0, 1, 4, 2, 3])
+        return x_precoded, g  # to be implemented
+    
+
+class QuantizedDirectPrecoder(Layer):
+    """A Precoder that directly uses quantized right singular vectors as precoding matrix"""
+
+    def __init__(self,
+                 resource_grid,
+                 stream_management,
+                 dtype=tf.complex64,
+                 **kwargs):
+        super().__init__(trainable=False, dtype=dtype, **kwargs)
+        assert isinstance(resource_grid, sionna.ofdm.ResourceGrid)
+        assert isinstance(stream_management, sionna.mimo.StreamManagement)
+        self._resource_grid = resource_grid
+        self._stream_management = stream_management
+        self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
+
+    def call(self, x_rg, right_singular_vectors, scheduled_rx_ue_indices, ue_ranks):
+        """
+        Returns precoded data symbols using ZF precoding with quantized CSI
+
+        :param x_rg: data stream symbols of shape [batch_size, num_tx, num_streams_per_tx, num_ofdm_symbols, fft_size]
+        :param right_singular_vectors: quantized right singular vectors of shape [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, num_subcarriers]
+        :param scheduled_rx_ue_indices: numpy array of scheduled RX UE antenna indices of shape [num_scheduled_rx_ues, num_rx_ant_per_ue]
+        :param ue_ranks: list of ranks for each scheduled RX UE
+        :return: precoded data symbols
+        """
+        ue_rank_adapt = False
+        if scheduled_rx_ue_indices is not None and ue_ranks is not None:
+            ue_rank_adapt = True
+            if np.size(np.array(ue_ranks)) == 1:
+                ue_ranks = np.repeat(ue_ranks, len(scheduled_rx_ue_indices), axis=0)
+        sinr_calculation = False
+
+        # x_rg has shape
+        # [batch_size, num_tx, num_streams_per_tx, num_ofdm_symbols, fft_size]
+        #
+        # right_singular_vectors has shape
+        # [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, num_subcarriers]
+        assert x_rg.shape[2] == right_singular_vectors.shape[1], "Invalid number of transmitted streams"
+        # check rx_indices and rx_ranks
+        num_rx_ant = [len(val) for val in scheduled_rx_ue_indices]
+        assert all(ue_ranks <= num_rx_ant), "UE rank should not exceed number of antennas"
+        # Transpose x:
+        # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx]
+        x_precoded = tf.transpose(x_rg, [0, 1, 3, 4, 2])
+        g = tf.transpose(right_singular_vectors, [0, 3, 4, 2, 1])  # [batch_size, num_ofdm_symbols, num_subcarriers, num_tx_ants, num_streams]
+        g = tf.expand_dims(g, 1)  # [batch_size, 1, num_ofdm_symbols, num_subcarriers, num_tx_ants, num_streams]
+        x_precoded = tf.expand_dims(x_precoded, -1)  # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx, 1]
+        x_precoded = tf.matmul(g, x_precoded)  # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_tx_ants, 1]
+        x_precoded = tf.squeeze(x_precoded, -1)  # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_tx_ants]
+
+        x_precoded = tf.transpose(x_precoded, [0, 1, 4, 2, 3])
+        return x_precoded, g  # x_precoded shape: [batch_size, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]
+        # g shape: [B, num_ofdm_symbols, num_subcarriers, num_tx_ants, num_streams] 

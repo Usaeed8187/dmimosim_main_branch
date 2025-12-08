@@ -4,7 +4,7 @@ from tensorflow.python.keras import Model
 from sionna.mapping import Mapper
 from sionna.ofdm import ResourceGrid, ResourceGridMapper
 
-from dmimo.config import SimConfig
+from dmimo.config import SimConfig, Ns3Config
 from .stbc import alamouti_encode
 
 from typing import List
@@ -22,12 +22,12 @@ class MC_NCJT_TxUE(Model):
 
     __call__() arguments
     --------------------
-    :param tf.Tensor bit_stream_dmimo: bi   tstream to transmit. Shape: [batch_size, num_subcarriers, num_ofdm_syms * modulation_order]
-    :param bool is_txbs: indicate transmitting from BS. Default False.
+    :param tf.Tensor bit_stream_dmimo: Bit stream to transmit. Shape: [batch_size, num_subcarriers, num_ofdm_syms * modulation_order]
+    :param bool is_txbs: Indicates transmitting from BS. Default False.
     :param int cluster_idx: the index of the transmitting cluster. Default 0.
     
     """
-    def __init__(self, cfg: SimConfig, num_clusters=1, modulation_order_list:list=None, **kwargs):
+    def __init__(self, cfg: SimConfig, ns3cfg: Ns3Config, num_clusters=1, modulation_order_list:list=None, **kwargs):
         
         super().__init__(trainable=False, **kwargs)
 
@@ -42,13 +42,20 @@ class MC_NCJT_TxUE(Model):
             self.modulation_orders = modulation_order_list
 
         self.mappers:List[Mapper] = [Mapper("qam", k) for k in self.modulation_orders]
+        # Total number of antennas in the TxSquad, always use all gNB antennas
+        num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
+
+        # Adjust guard subcarriers for channel estimation grid
+        self.effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
+        csi_guard_carriers_1 = (cfg.fft_size - self.effective_subcarriers) // 2
+        csi_guard_carriers_2 = (cfg.fft_size - self.effective_subcarriers) - csi_guard_carriers_1
         self.rg = ResourceGrid(num_ofdm_symbols=cfg.symbols_per_slot,
                                fft_size=cfg.fft_size,
                                subcarrier_spacing=cfg.subcarrier_spacing,
                                num_tx=1,
                                num_streams_per_tx=2*num_clusters,
                                cyclic_prefix_length=cfg.cyclic_prefix_len,
-                               num_guard_carriers=[0, 0],
+                               num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
                                dc_null=False,
                                pilot_pattern="kronecker",
                                pilot_ofdm_symbol_indices=cfg.pilot_indices)
@@ -63,7 +70,7 @@ class MC_NCJT_TxUE(Model):
         param bit_stream_dmimo: bitstream to transmit
         param is_txbs: indicate transmitting from BS
         """
-        assert bit_stream_dmimo.shape[-1] == (self.cfg.symbols_per_slot - len(self.cfg.pilot_indices))*(self.modulation_orders[cluster_idx]) and (bit_stream_dmimo.shape[-2]==self.cfg.fft_size) , \
+        assert bit_stream_dmimo.shape[-1] == (self.cfg.symbols_per_slot - len(self.cfg.pilot_indices))*(self.modulation_orders[cluster_idx]) and (bit_stream_dmimo.shape[-2]==self.effective_subcarriers) , \
             'Call to MC_NCJT_TxUE object: bit_stream_dmimo has the wrong shape.'
         num_tx_ant = self.nAntTxBs if is_txbs else self.nAntTxUe  # number of transmitting antennas
         batch_size = bit_stream_dmimo.shape[0]

@@ -107,7 +107,10 @@ class linkAdaptation(Layer):
 
                 h_eff = self.rank_adaptation.calculate_effective_channel(self.N_s, h_est)
                 n_var = self.rank_adaptation.cal_n_var(h_eff, self.snr_linear)
-                mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True)/self.N_s + n_var
+                mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True)
+                mmse_inv  = mmse_inv + n_var*tf.eye(mmse_inv.shape[-1], dtype=mmse_inv.dtype)
+                mmse_inv = tf.linalg.inv(mmse_inv)
+                mmse_inv = tf.matmul(h_eff, mmse_inv, adjoint_a=True)
                 per_stream_sinr = self.rank_adaptation.compute_sinr(h_eff, mmse_inv, n_var)
 
                 for stream_idx in range(self.N_s):
@@ -233,7 +236,10 @@ class linkAdaptation(Layer):
                     h_eff_per_node = tf.gather(h_eff, ant_indices, axis=-2)
                     
                     n_var = self.rank_adaptation.cal_n_var(h_eff_per_node, curr_sinr_linear)
-                    mmse_inv = tf.matmul(h_eff_per_node, h_eff_per_node, adjoint_b=True)/self.N_s + n_var
+                    mmse_inv = tf.matmul(h_eff_per_node, h_eff_per_node, adjoint_b=True)
+                    mmse_inv  = mmse_inv + n_var*tf.eye(mmse_inv.shape[-1], dtype=mmse_inv.dtype)
+                    mmse_inv = tf.linalg.inv(mmse_inv)
+                    mmse_inv = tf.matmul(h_eff_per_node, mmse_inv, adjoint_a=True)
                     per_stream_sinr = self.rank_adaptation.compute_sinr(h_eff_per_node, mmse_inv, n_var)
 
                     for stream_idx in range(self.N_s):

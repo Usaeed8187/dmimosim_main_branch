@@ -260,9 +260,10 @@ class rankAdaptation(Layer):
             u_h = tf.gather(u_h, np.arange(stream_idx), axis=4)
         elif self.precoder == 'BD':
             v, u_h = self.generate_bd_precoding(stream_idx, h_est) # calculating the svd precoder
-        elif self.precoder == 'ZF':
+        elif self.precoder == 'ZF' or ("QUANTIZED" in self.precoder):
             v, _ = self.generate_zf_precoding(stream_idx, h_est, num_rx_nodes) # calculating the svd precoder
-
+        else:
+            raise Exception(f"Precoding method {self.precoder} not recognized for rank adaptation.")
         h_est_reshaped = tf.transpose(h_est, [0, 1, 3, 5, 6, 2, 4])
         h_est_reshaped = tf.cast(h_est_reshaped, dtype=v.dtype)
 

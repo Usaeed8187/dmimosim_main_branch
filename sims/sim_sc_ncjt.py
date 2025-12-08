@@ -8,10 +8,11 @@ import sys
 # import numpy as np
 # import matplotlib.pyplot as plt
 
-gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
-os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
+gpu_num = str(0)  # Use "" to use the CPU, Use 0 to select first GPU
+os.environ["CUDA_VISIBLE_DEVICES"] = gpu_num
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
+# os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
+os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/x86_64-linux-gnu/libLLVM-16.so'
 
 # Configure to use only a single GPU and allocate only as much memory as needed
 import tensorflow as tf
@@ -33,13 +34,17 @@ from dmimo.sc_ncjt import sim_sc_ncjt
 
 # Main function
 if __name__ == "__main__":
-
+    import sionna
+    # for channel_seed in range(6,7):
     # Simulation settings
     cfg = SimConfig()
     cfg.total_slots = 26 #65        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15 #15     # starting slots (must be greater than csi_delay + 5)
+    sionna.config.seed = 25
+    channel_seed = 6
 
-    cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels/LowMobility")
+    # cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels/HighMobilitySeed%d" % channel_seed)  # folder where the ns-3 channels are stored
+    cfg.ns3_folder = ("/home/ramin/dmimo_minor_revision_channels/channels_40.0_40.0_seed_3007_drop_1")  # folder where the ns-3 channels are stored
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join(dmimo_root, "results", folder_name), exist_ok=True)
@@ -47,11 +52,13 @@ if __name__ == "__main__":
 
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     # Select different number of Tx/Rx nodes
-    ns3cfg.num_txue_sel = 8
-    ns3cfg.num_rxue_sel = 6
+    ns3cfg.num_txue_sel = 10
+    ns3cfg.num_rxue_sel = 2
 
-    cfg.modulation_order = 4
+    cfg.modulation_order = 6  # 2, 4, 6 for QPSK, 16QAM, 64QAM
     cfg.code_rate = 0.5
+
+    cfg.enable_ue_selection = False
 
     # Run the simulation
     uncoded_ber, coded_ber, coded_bler, goodput, throughput = sim_sc_ncjt(cfg, ns3cfg)

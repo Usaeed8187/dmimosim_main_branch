@@ -33,7 +33,7 @@ class HardLogLikelihood(Layer):
     """
 
     def __init__(self, constel: Constellation, signal_dims,
-                 sum_over_rx_syms=True, return_bit_llrs=False, **kwargs):
+                 sum_over_rx_syms=True, return_bit_llrs=False, max_num_copies = 11, **kwargs):
 
         super().__init__(trainable=False, **kwargs)
 
@@ -58,6 +58,7 @@ class HardLogLikelihood(Layer):
         self.left_inf_imag = tf.concat(([tf.float32.min], middle_points_imag), axis=0)  # shape [2**(k/2),]
         self.right_inf_real = tf.concat((middle_points_real, [tf.float32.max]), axis=0)  # shape [2**(k/2),]
         self.right_inf_imag = tf.concat((middle_points_imag, [tf.float32.max]), axis=0)  # shape [2**(k/2),]
+        self.EPS = (tf.experimental.numpy.finfo(tf.float32.as_numpy_dtype).tiny)#**(1/max_num_copies)
 
     # tf.where does not support XLA
     @tf.function(jit_compile=True)  # Enable graph execution to speed things up
@@ -111,7 +112,19 @@ class HardLogLikelihood(Layer):
         intervals = tf.reshape(intervals, (*received_symbols.shape, 4))  # (...,N,1,1,4)
 
         # Note that P(a<X<b) = 1/2 * ( erf((b-μ)/(σ√2)) - erf((a-μ)/(σ√2))) for X ~ 𝒩(μ,σ²)
-
+        # value1 = (tf.math.erf((intervals[..., 1] - tf.math.real(self.candidate_symbols_reshaped)) * (
+        #     tf.sqrt(SNRs))))
+        # value2 = tf.math.erf((intervals[..., 0] - tf.math.real(self.candidate_symbols_reshaped)) * (
+        #                      tf.sqrt(SNRs)))
+        # value3 = tf.math.erf((intervals[..., 3] - tf.math.imag(self.candidate_symbols_reshaped)) * (
+        #             tf.sqrt(SNRs)))
+        # value4 = tf.math.erf((intervals[..., 2] - tf.math.imag(self.candidate_symbols_reshaped)) * (
+        #              tf.sqrt(SNRs)))
+        # print('value1 is of shape',value1.shape,'and is equal to','=\n',value1[...,0])
+        # print('value2 is of shape',value2.shape,'and is equal to','=\n',value2[...,0])
+        # print('value3 is of shape',value3.shape,'and is equal to','=\n',value3[...,0])
+        # print('value4 is of shape',value4.shape,'and is equal to','=\n',value4[...,0])
+        
         prob = (1 / 4 * (tf.math.erf((intervals[..., 1] - tf.math.real(self.candidate_symbols_reshaped)) * (
             tf.sqrt(SNRs))) -  # real part, right of interval
                          tf.math.erf((intervals[..., 0] - tf.math.real(self.candidate_symbols_reshaped)) * (
@@ -132,8 +145,9 @@ class HardLogLikelihood(Layer):
             else:
                 return log_prob  # (...,N,2**k) # N is the number of Rx Nodes and 2**k is the number of candidate symbols.
         else:
-            prob_new = prob + (tf.experimental.numpy.finfo(prob.dtype.as_numpy_dtype).tiny)**(1/prob.shape[-2]) # Add with the smallest positive number to avoid log(0) issues
+            prob_new = prob  # Add with the smallest positive number to avoid log(0) issues
             prob_multiplied = tf.reduce_prod(prob_new, axis=-2)  # (...,2**k)
+            prob_multiplied = tf.maximum(prob_multiplied,self.EPS) # To avoid log(0) issues
             LLR_list = []
             for k in range(self.k_constellation - 1, -1, -1):  # [k_constellation-1, k_constellation-2, ... , 1, 0]
                 # # e.g. [8,9,10,11,12,13,14,15]
@@ -146,7 +160,8 @@ class HardLogLikelihood(Layer):
                 # (...,2**(k-1)) after tf.gather and (...) after tf.reduce_sum
                 # sum_prob_bit0 = tf.reduce_sum(tf.gather(prob_multiplied, syms_indices_that_have_bit0, axis=-1), axis=-1)
                 sum_prob_bit0 = tf.reduce_sum(tf.boolean_mask(prob_multiplied,mask=((tf.range(2 ** self.k_constellation) // (2 ** k)) % 2 == 0), axis=prob_multiplied.ndim-1),axis=-1)
-                LLR_list.append(tf.math.log(sum_prob_bit1) - tf.math.log(sum_prob_bit0))
+                LLR_list.append((tf.math.log(sum_prob_bit1) - tf.math.log(sum_prob_bit0))/(tf.math.log(2.0)))
+                # LLR_list.append((tf.math.log(sum_prob_bit1) - tf.math.log(sum_prob_bit0)))
                 pass
             LLR = tf.stack(LLR_list, axis=-1)  # (...,k_constellation)
             return LLR

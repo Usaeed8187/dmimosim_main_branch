@@ -749,7 +749,7 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         start_time = time.time()
         bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config)
         end_time = time.time()
-        # print("Cycle time: ", end_time - start_time, " seconds\n")
+        print("Cycle time: ", end_time - start_time, " seconds\n")
         
         uncoded_ber += bers[0]
         ldpc_ber += bers[1]

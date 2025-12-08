@@ -7,16 +7,16 @@ import sys
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import tensorflow as tf
+
+from dmimo.config import SimConfig, Ns3Config, RCConfig
+from dmimo.mu_mimo_integration import sim_mu_mimo_all
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
 
-import tensorflow as tf
-
-dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
-sys.path.append(dmimo_root)
 # Configure to use only a single GPU and allocate only as much memory as needed
 gpus = tf.config.list_physical_devices('GPU')
 if gpus and gpu_num != "":
@@ -26,17 +26,13 @@ if gpus and gpu_num != "":
         print(e)
 tf.get_logger().setLevel('ERROR')
 
-from dmimo.config import SimConfig, Ns3Config, RCConfig
-from dmimo.mu_mimo_integration import sim_mu_mimo_all
-
-
 # Add system path for the dmimo library
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
 # Set symlinks to channel data files
 sys.path.append(os.path.join('..'))
-source_dir = '/home/data/ns3_channels_q4/'
+source_dir = '/home/wireless/dMIMO/minor_revision_channels'
 destination_dir = 'ns3/'
 if not os.path.exists(destination_dir):
     os.makedirs(destination_dir)
@@ -69,12 +65,13 @@ print(f"Script Name: {script_name}")
 print(f"Arguments: {arguments}")
 
 if len(arguments) > 0:
-    mobility = arguments[0]
+    speed_tx = arguments[0]
+    speed_rx = arguments[0]
     drop_idx = arguments[1]
     rx_ues_arr = arguments[2:]
     rx_ues_arr = np.array(rx_ues_arr, dtype=int)
     
-    print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
+    print("Current speed: {} \n Current drop: {} \n".format(speed_tx, drop_idx))
     print("rx_ues_arr: ", rx_ues_arr)
     print("rx_ues_arr[0]: ", rx_ues_arr[0])
 
@@ -83,37 +80,37 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.rb_size = 12          # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
-    cfg.total_slots = 50        # total number of slots in ns-3 channels
+    cfg.total_slots = 100        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 35     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = False
     cfg.rank_adapt = False      # enable/disable rank adaptation
-    cfg.link_adapt = False      # enable/disable link adaptation
-    cfg.csi_prediction = False
+    cfg.link_adapt = True      # enable/disable link adaptation
+    cfg.csi_prediction = True
     cfg.use_perfect_csi_history_for_prediction = False
-    cfg.channel_prediction_method = "two_mode" # "old", "two_mode"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
-    modulation_order = 4
+    cfg.modulation_order = 4
     cfg.code_rate = 2/3
+    starting_seed=3007
     if arguments == []:
-        mobility = 'low_mobility'
-        drop_idx = '4'
-    cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
-    # cfg.ns3_folder = "ns3/channels/LowMobility/"
+        speed_tx='20.0'
+        speed_rx='20.0'
+        drop_idx='1'
+    if float(speed_tx) > 0 or float(speed_rx) > 0:
+        cfg.csi_prediction = True
+    seed = str(starting_seed + int(drop_idx) - 1)  # Different seed for different drops
+    cfg.ns3_folder = "ns3/channels_" + speed_tx + "_" + speed_rx + "_seed_" + seed + "_drop_" + drop_idx + '/'
+    cfg.estimated_channels_dir = "ns3/channel_estimates_" + speed_tx + "_" + speed_rx + "_seed_" + seed + "_drop_" + drop_idx
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
-    cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
-    cfg.enable_rxsquad = False
 
     # Select Number of TxSquad and RxSquad UEs to use.
     ns3cfg.num_txue_sel = 10
     if arguments == []:
-        rx_ues_arr = [2]
+        rx_ues_arr = [1]
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
-    os.makedirs(os.path.join("results", folder_name), exist_ok=True)
-    print("Using channels in {}".format(folder_name))    
+    print("Using channels in {}".format(folder_name))
 
     rc_config = RCConfig()
     rc_config.enable_window = True
@@ -144,7 +141,7 @@ if __name__ == "__main__":
         ns3cfg.num_rxue_sel = rx_ues_arr[ue_arr_idx]
 
         assert cfg.rank_adapt == False, "Current MU-MIMO code assumes fixed rank transmission (single stream per RX UE)."
-
+            
         num_rx_antennas = rx_ues_arr[ue_arr_idx] * 2 + 4
 
         # Test case 1:  rank 2 transmission, assuming 2 antennas per UE and treating BS as two UEs
@@ -155,9 +152,6 @@ if __name__ == "__main__":
         cfg.num_tx_streams = num_rx_antennas // 2
         cfg.ue_ranks = [1]  # same rank for all UEs
 
-        # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
-        cfg.modulation_order = modulation_order
-        
         # if not cfg.scheduling:
         #     tx_ue_mask = np.zeros(10)
         #     tx_ue_mask[:ns3cfg.num_txue_sel] = np.ones(ns3cfg.num_txue_sel)
@@ -168,8 +162,6 @@ if __name__ == "__main__":
         cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
         cfg.precoding_method = "ZF"
-        cfg.precoding_method = "ZF_QUANTIZED_CSI" # Uncomment to enable quantized CSI feedback
-        # cfg.precoding_method = "DIRECT_QUANTIZED_CSI" # Does not work well for MU-MIMO
         rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config)
         ber[ue_arr_idx] = rst_zf[0]
         ldpc_ber[ue_arr_idx] = rst_zf[1]
@@ -186,7 +178,7 @@ if __name__ == "__main__":
         if rst_zf[11] is not None:
             sinr_dB.append(np.concatenate(rst_zf[11]))
 
-        folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
+        folder_path = "results/channels_multiple_mu_mimo_minor_revision/{}".format(folder_name)
         os.makedirs(folder_path, exist_ok=True)
 
         if cfg.csi_prediction:

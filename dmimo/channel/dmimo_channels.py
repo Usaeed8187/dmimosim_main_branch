@@ -6,6 +6,7 @@ including TxSquad, dMIMO, and RxSquad models
 import tensorflow as tf
 import numpy as np
 from tensorflow.python.keras.layers import Layer
+import matplotlib.pyplot as plt
 
 from sionna.channel import ApplyOFDMChannel, AWGN
 from sionna.ofdm import ResourceGrid
@@ -57,7 +58,7 @@ class dMIMOChannels(Layer):
         return self._load_channel(self._channel_type, forward=forward, slot_idx=slot_idx, batch_size=batch_size,
                                   ue_selection=ue_selection)
 
-    def call(self, inputs):
+    def call(self, inputs, h_freq_csi_debug=None):
 
         # x: channel input samples, sidx: current slot index
         if len(inputs) == 2:
@@ -76,7 +77,8 @@ class dMIMOChannels(Layer):
         # h_freq shape: [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_sym, fft_size]
         # rx_snr_db shape: [batch_size, 1, num_rx_ant, num_ofdm_sym]
         h_freq, rx_snr_db, rx_pwr_dbm = self._load_channel(self._channel_type, slot_idx=sidx, batch_size=batch_size)
-
+        h_freq_outdated_true_debug, _, _ = self._load_channel(self._channel_type, slot_idx=sidx-4, batch_size=batch_size)
+        
         # Prune data and channel subcarriers according to the resource grid
         if self._rg and x.shape[-1] != h_freq.shape[-1]:
             assert self._rg.num_effective_subcarriers <= x.shape[-1]

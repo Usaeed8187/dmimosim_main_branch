@@ -90,15 +90,16 @@ class SC_NCJT(Model):
 
         # Phase 2 transmission from all gNB/UEs
         tx_signals_list = []
-        for ue_idx in range(0, self.ns3cfg.num_txue_sel + 1):
+        for ue_idx in range(0, self.ns3cfg.num_txue + 1): # Here we don't use self.ns3cfg.num_txue_sel, instead we use self.ns3cfg.num_txue to be consistent with the channel assignment in dmimo_chans
             ue_tx_signal = self.ncjt_tx(tx_bit_stream, is_txbs=(ue_idx == 0))
-            tx_signals_list.append(ue_tx_signal)
-        tx_signals = tf.concat(tx_signals_list, axis=-1)
-        # new shape [batch_size, num_tx_ant, num_ofdm_sym, fft_size)
+            if ue_idx in range(0, self.ns3cfg.num_txue_sel + 1): tx_signals_list.append(ue_tx_signal)
+            else: tx_signals_list.append(tf.zeros_like(ue_tx_signal)) # Pad with zeros for unselected Tx UEs
+        tx_signals = tf.concat(tx_signals_list, axis=-1) # Concatenate along the transmit antenna axis to later be fed to dmimo_chans
+        # new shape [batch_size, num_tx_ant, num_ofdm_sym, fft_size]
         tx_signals = tf.transpose(tx_signals, [0, 3, 2, 1])
         tx_signals = tf.expand_dims(tx_signals, axis=1)
 
-        # apply dMIMO channels to the resource grid in the frequency domain
+        # apply dMIMO channels to the resource grid in the frequency domain 
         ry, _ = dmimo_chans([tx_signals, self.cfg.first_slot_idx])
         ry = tf.transpose(ry, [0, 4, 3, 2, 1])
 
@@ -155,8 +156,8 @@ def sim_sc_ncjt(cfg: SimConfig, ns3cfg: Ns3Config, phase='phase2'):
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True)
 
     # Update UE selection
-    ns3cfg.reset_ue_selection()
     if cfg.enable_ue_selection is True:
+        ns3cfg.reset_ue_selection() # set ns3cfg.num_txue_sel and ns3cfg.num_rxue_sel to ns3cfg.num_txue and ns3cfg.num_rxue respectively
         tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
         ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
 

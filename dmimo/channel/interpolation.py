@@ -7,8 +7,154 @@ import numpy as np
 import itertools
 
 from sionna.utils import flatten_last_dims, expand_to_rank
-from sionna.ofdm import BaseChannelInterpolator
+from sionna.ofdm import BaseChannelInterpolator, LinearInterpolator, PilotPattern
 
+
+class RBwiseLinearInterp(LinearInterpolator):
+    r"""RBwiseLinearInterpolator(pilot_pattern, rb_size)
+
+    Linear interpolation of channel estimates on a resource grid
+    resource block by resource block.
+
+    Parameters
+    ----------
+    pilot_pattern : PilotPattern
+        An instance of :class:`~sionna.ofdm.PilotPattern`
+
+    rb_size : int
+        The size of a resource block in subcarriers
+
+    Input
+    -----
+    h_hat : [batch_size, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_pilot_symbols], tf.complex
+        Channel estimates for the pilot-carrying resource elements
+
+    err_var : [batch_size, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_pilot_symbols], tf.complex
+        Channel estimation error variances for the pilot-carrying resource elements
+
+    Output
+    ------
+    h_hat : [batch_size, num_rx, num_rx_ant, num_tx, num_streams_per_tx, num_ofdm_symbols, fft_size], tf.complex
+        Channel estimates across the entire resource grid for all
+        transmitters and streams
+
+    err_var : Same shape as ``h_hat``, tf.float
+        Channel estimation error variances across the entire resource grid
+        for all transmitters and streams
+    """
+    def __init__(self, pilot_pattern: PilotPattern, rb_size: int):
+        super().__init__(pilot_pattern)
+
+        assert rb_size > 0, "`rb_size` must be a positive integer"
+
+        self._rb_size = rb_size
+        # Sionna's documentation states that:
+        # # # # # Linear interpolation works as follows:
+        # # # # # We compute for each resource element (RE)
+        # # # # # x_0 : The x-value (i.e., sub-carrier index or OFDM symbol) at which
+        # # # # #       the first channel measurement was taken
+        # # # # # x_1 : The x-value (i.e., sub-carrier index or OFDM symbol) at which
+        # # # # #       the second channel measurement was taken
+        # # # # # y_0 : The first channel estimate
+        # # # # # y_1 : The second channel estimate
+        # # # # # x   : The x-value (i.e., sub-carrier index or OFDM symbol)
+        # # # # #
+        # # # # # The linearly interpolated value y is then given as:
+        # # # # # y = (x-x_0) * (y_1-y_0) / (x_1-x_0) + y_0
+        # To dive deeper, here is some info about the various quantities computed by Sionna:
+        # self._x_freq is of shape [B=1, M=1, Mt=1, N=1, Nt=1, nS=1, num_eff_subcarriers]
+        # self._x_freq is simply tf.range(0, num_eff_subcarriers)
+        # self._x_freq is used "x" in the above formula
+        # self._x_0_freq and self._x_1_freq are of shape [B=1, M=1, Mt=1, N, Nt, nS, num_eff_subcarriers]
+        # where N is num_tx, Nt is num_streams_per_tx and nS is num_ofdm_symbols (usually 14)
+        # self._x_0_freq and self._x_1_freq are used as "x_0" and "x_1" in the above formula
+        # self._x_0_freq and self._x_1_freq contain, for each resource element, the subcarrier 
+        # index of the closest pilots to them from left and right in the frequency domain
+        # respectively. If the resource element does not have any pilot to its left, for example,
+        # the index of the closest pilot to its right would be used for self._x_0_freq and
+        # the index of the second closest pilot to its right would be used for self._x_1_freq for that RE.
+        # If there were no pilot to the right, the closest pilot index to the left would be used
+        # as self.x_1_freq and the second closest pilot index to the left would be used as self.x_0_freq.
+        # This is done to ensure that all resource elements have two pilots to interpolate from.
+        # # Note: on the REs that do not contain pilots (or nulls),
+        # # self._x_0_freq and self._x_1_freq are set to -1 
+        # # #
+        # We now look into self._y_0_freq_ind and self._y_1_freq_ind which are of shape [N, Nt, nS, num_eff_subcarriers]
+        # Essentially, self._y_0_freq_ind and self._y_1_freq_ind are the self._x_0_freq + 1 and self._x_1_freq + 1 and
+        # of dtype int. They are used to gather the channel estimates at the pilot locations (y_0 and y_1 in the formula above)
+        # # # # # # # 
+        # What we need to do to make this RB-wise is to modify self._x_0_freq and self._x_1_freq as well 
+        # as self._y_0_freq_ind and self._y_1_freq_ind such that the pilots from other RBs are not considered
+        x_0_freq = np.asarray(self._x_0_freq).real.astype(np.int32) # shape: [1,1,1,N,Nt,nS,num_eff_subcarriers]
+        x_1_freq = np.asarray(self._x_1_freq).real.astype(np.int32) # shape: [1,1,1,N,Nt,nS,num_eff_subcarriers]
+        y_0_freq_ind = (self._y_0_freq_ind).copy() # shape: [N,Nt,nS,num_eff_subcarriers]
+        y_1_freq_ind = (self._y_1_freq_ind).copy() # shape: [N,Nt,nS,num_eff_subcarriers]
+        num_eff_subcarriers = x_0_freq.shape[-1]
+        # num_ofdm_symbols = x_0_freq.shape[-2]
+        # num_tx_streams = x_0_freq.shape[-3]
+        # num_tx = x_0_freq.shape[-4]
+        x_0_freq_flat  = np.reshape(x_0_freq, (-1, num_eff_subcarriers))
+        x_1_freq_flat  = np.reshape(x_1_freq, (-1, num_eff_subcarriers))
+        y_0_freq_ind_flat  = np.reshape(y_0_freq_ind, (-1, num_eff_subcarriers))
+        y_1_freq_ind_flat  = np.reshape(y_1_freq_ind, (-1, num_eff_subcarriers))
+
+        B = x_0_freq_flat.shape[0]
+        num_rbs = num_eff_subcarriers // self._rb_size
+        for i_b in range(B):
+            for rb_idx in range(num_rbs):
+                rb_starting_sc = rb_idx * rb_size
+                rb_ending_sc = rb_starting_sc + rb_size
+                if rb_idx == num_rbs - 1:
+                    rb_ending_sc = num_eff_subcarriers
+                if np.all(x_0_freq_flat[i_b, rb_starting_sc:rb_ending_sc] == -1):
+                    pass  # No pilots in this RB, skip
+                else:
+                    if np.any(x_0_freq_flat[i_b, rb_starting_sc:rb_ending_sc] == -1):
+                        raise NotImplementedError("RB-wise linear interpolation not implemented for RBs with partial pilots")
+                    unique_pilot_indices_in_this_rb = \
+                        np.unique(np.concatenate([x_0_freq_flat[i_b, rb_starting_sc:rb_ending_sc] , 
+                                                x_1_freq_flat[i_b, rb_starting_sc:rb_ending_sc]]))
+                    valid_pilot_indices_in_this_rb = [idx for idx in unique_pilot_indices_in_this_rb if (rb_starting_sc <= idx < rb_ending_sc)]
+                    if len(valid_pilot_indices_in_this_rb) == 0:
+                        raise Exception(f"RBwiseLinearInterp: No pilots available in RB {rb_idx} for interpolation. Maybe increase the RB size?")
+                    if not np.all( (rb_starting_sc <= unique_pilot_indices_in_this_rb) & (unique_pilot_indices_in_this_rb < rb_ending_sc) ):
+                        if len(valid_pilot_indices_in_this_rb) == 1:
+                            first_pilot_idx = valid_pilot_indices_in_this_rb[0]
+                            second_pilot_idx = valid_pilot_indices_in_this_rb[0]
+                            last_pilot_idx = valid_pilot_indices_in_this_rb[0]
+                            second_last_pilot_idx = valid_pilot_indices_in_this_rb[0]
+                        else:
+                            first_pilot_idx = valid_pilot_indices_in_this_rb[0]
+                            second_pilot_idx = valid_pilot_indices_in_this_rb[1]
+                            last_pilot_idx = valid_pilot_indices_in_this_rb[-1]
+                            second_last_pilot_idx = valid_pilot_indices_in_this_rb[-2]
+                        
+                        # Some pilots from other RBs are being used for interpolation in this RB
+                        # We need to fix that
+                        for i_sc in range(rb_starting_sc, rb_ending_sc):
+                            if x_0_freq_flat[i_b, i_sc] < rb_starting_sc:
+                                # x_0_freq is from left of the RB
+                                x_0_freq_flat[i_b, i_sc] = first_pilot_idx
+                                x_1_freq_flat[i_b, i_sc] = second_pilot_idx
+                                y_0_freq_ind_flat[i_b, i_sc] = x_0_freq_flat[i_b, i_sc] + 1
+                                y_1_freq_ind_flat[i_b, i_sc] = x_1_freq_flat[i_b, i_sc] + 1
+                            if x_1_freq_flat[i_b, i_sc] >= rb_ending_sc:
+                                # x_1_freq is from right of the RB
+                                x_1_freq_flat[i_b, i_sc] = last_pilot_idx
+                                x_0_freq_flat[i_b, i_sc] = second_last_pilot_idx
+                                y_1_freq_ind_flat[i_b, i_sc] = x_1_freq_flat[i_b, i_sc] + 1
+                                y_0_freq_ind_flat[i_b, i_sc] = x_0_freq_flat[i_b, i_sc] + 1
+        
+        x_0_freq = np.reshape(x_0_freq_flat, x_0_freq.shape).astype(self._x_0_freq.dtype.as_numpy_dtype)
+        x_1_freq = np.reshape(x_1_freq_flat, x_1_freq.shape).astype(self._x_1_freq.dtype.as_numpy_dtype)
+        y_0_freq_ind = np.reshape(y_0_freq_ind_flat, y_0_freq_ind.shape)
+        y_1_freq_ind = np.reshape(y_1_freq_ind_flat, y_1_freq_ind.shape)
+        self._x_0_freq = tf.constant(x_0_freq)
+        self._x_1_freq = tf.constant(x_1_freq)
+        self._y_0_freq_ind = y_0_freq_ind
+        self._y_1_freq_ind = y_1_freq_ind
+                            
+                        
 
 # Adapted from sionna.ofdm.channel_estimation
 class LinearInterp1D(BaseChannelInterpolator):

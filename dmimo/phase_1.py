@@ -345,6 +345,8 @@ def sim_phase_1(cfg: SimConfig, ns3cfg: Ns3Config):
 
     # print ("h_freq_dl", h_freq_csi_dl.shape)
     # print ("h_freq_ul", h_freq_csi_ul.shape)
+    # # TODO: remove this later, this is just for testing 2 Tx PMI feedback
+    # h_freq_csi_dl = h_freq_csi_dl[:,:,:,:,:2,...]
 
     if cfg.CSI_feedback_method =='5G':
         generate_CSI_feedback = quantized_CSI_feedback(method='5G', codebook_selection_method='rate', num_tx_streams=cfg.num_tx_streams, architecture='dMIMO_phase1', 

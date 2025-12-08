@@ -27,7 +27,7 @@ if gpus and gpu_num != "":
 tf.get_logger().setLevel('ERROR')
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
-from dmimo.mu_mimo_integration import sim_mu_mimo_all
+from dmimo.mu_mimo_testing_updates import sim_mu_mimo_all
 
 
 # Add system path for the dmimo library
@@ -90,7 +90,7 @@ if __name__ == "__main__":
     cfg.perfect_csi = False
     cfg.rank_adapt = False      # enable/disable rank adaptation
     cfg.link_adapt = False      # enable/disable link adaptation
-    cfg.csi_prediction = False
+    cfg.csi_prediction = True
     cfg.use_perfect_csi_history_for_prediction = False
     cfg.channel_prediction_method = "two_mode" # "old", "two_mode"
     cfg.enable_ue_selection = False
@@ -99,15 +99,19 @@ if __name__ == "__main__":
     cfg.code_rate = 2/3
     if arguments == []:
         mobility = 'low_mobility'
-        drop_idx = '4'
+        drop_idx = '5'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     # cfg.ns3_folder = "ns3/channels/LowMobility/"
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
     cfg.enable_rxsquad = False
+    cfg.precoding_method = "ZF"
+    # cfg.precoding_method = "ZF_QUANTIZED_CSI" # Uncomment to enable quantized CSI feedback
+    # cfg.precoding_method = "DIRECT_QUANTIZED_CSI" # Does not work well for MU-MIMO
+
 
     # Select Number of TxSquad and RxSquad UEs to use.
-    ns3cfg.num_txue_sel = 10
+    ns3cfg.num_txue_sel = 8
     if arguments == []:
         rx_ues_arr = [2]
 
@@ -167,9 +171,6 @@ if __name__ == "__main__":
 
         cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
-        cfg.precoding_method = "ZF"
-        cfg.precoding_method = "ZF_QUANTIZED_CSI" # Uncomment to enable quantized CSI feedback
-        # cfg.precoding_method = "DIRECT_QUANTIZED_CSI" # Does not work well for MU-MIMO
         rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config)
         ber[ue_arr_idx] = rst_zf[0]
         ldpc_ber[ue_arr_idx] = rst_zf[1]

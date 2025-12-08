@@ -202,7 +202,7 @@ def alamouti_decode_zf_double(r:tf.Tensor, h:tf.Tensor):
     equalized_symbols = tf.stack([tf.reshape(first_cluster_symbol,[*first_cluster_symbol.shape[:-3],-1]),
                                   tf.reshape(second_cluster_symbol,[*second_cluster_symbol.shape[:-3],-1])],
                                   axis=-1) # (..., num_syms, 2)
-    noise_enhancer_cov = _hermitian(zero_forcer) @ zero_forcer # (..., num_syms/2, 2*M_r, 4)
+    noise_enhancer_cov = _hermitian(zero_forcer) @ zero_forcer # (..., num_syms/2, 4, 4)
     cluster1_noise_enhancer_cov = _hermitian(_inv(omega1)) @ noise_enhancer_cov[...,0:2,0:2] @ _inv(omega1)
     cluster1_noise_power = tf.stack([cluster1_noise_enhancer_cov[...,0,0],cluster1_noise_enhancer_cov[...,1,1]],axis=-1) # (..., num_syms/2, 2)
     cluster1_noise_power = tf.reshape(cluster1_noise_power,(*cluster1_noise_power.shape[:-2],-1)) # (..., num_syms)

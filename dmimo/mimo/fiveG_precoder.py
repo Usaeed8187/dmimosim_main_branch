@@ -73,6 +73,8 @@ class fiveGPrecoder(Layer):
         elif self.architecture == 'dMIMO_phase1' and self.precoding_method == '5G_max_min_demo':
             _, s = self.reconstruct_channel(precoding_matrices, cqi_snr, n_var, bs_txpwr_dbm, return_s=True)
             x_precoded = dMIMO_p1_fiveG_max_min_demo_precoder(x_precoded, precoding_matrices, s, codebook, n_var)
+        else:
+                ValueError("unsupported precoding method")
 
         # Transpose output to desired shape:
         # [batch_size, num_tx, num_tx_ant, num_ofdm_symbols, fft_size]

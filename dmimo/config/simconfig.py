@@ -20,6 +20,7 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._ue_ranks = None                                       # UE ranks for MU-MIMO precoding
         self._perfect_csi = False                                   # Use perfect CSI for debugging
         self._csi_prediction = False                                # Use CSI prediction
+        self._use_perfect_csi_history_for_prediction = False        # Use perfect CSI history for prediction (otherwise use imperfect estimated CSI history)
         self._rank_adapt = True                                     # turn on rank adaptation
         self._link_adapt = True                                     # turn on link adaptation
         self._enable_txsquad = False                                # enable simulation of TxSquad transmission
@@ -33,6 +34,7 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._phase_1_precoding_method = "5G_max_min_demo"          # precoding method for phase 1: 'ZF', '5G_max_min_demo'
         self._scheduling = False                                    # Turn scheduling on or off for phase 2 of MU-MIMO architecture
         self._scheduled_rx_ue_indices = None                        # Scheduled UE antennas indices for MU-MIMO precoding
+        self._ncjt_ldpc_decode_and_forward = True                   # Enable LDPC decode-and-forward at the Rx UEs for NCJT simulations
         super().__init__(**kwargs)
 
     @property
@@ -140,6 +142,14 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._csi_prediction = val
 
     @property
+    def use_perfect_csi_history_for_prediction(self):
+        return self._use_perfect_csi_history_for_prediction
+
+    @use_perfect_csi_history_for_prediction.setter
+    def use_perfect_csi_history_for_prediction(self, val):
+        self._use_perfect_csi_history_for_prediction = val
+
+    @property
     def rank_adapt(self):
         return self._rank_adapt
 
@@ -242,3 +252,16 @@ class SimConfig(CarrierConfig, MCSConfig):
     @scheduled_rx_ue_indices.setter
     def scheduled_rx_ue_indices(self, val):
         self._scheduled_rx_ue_indices = val
+
+    @property
+    def ncjt_ldpc_decode_and_forward(self):
+        return self._ncjt_ldpc_decode_and_forward
+    
+    @ncjt_ldpc_decode_and_forward.setter
+    def ncjt_ldpc_decode_and_forward(self, val):
+        assert val in [True, False], "Invalid value for ncjt_ldpc_decode_and_forward"
+        if val is False:
+            if self.enable_rxsquad is True:
+                self.enable_rxsquad = False
+                print("Warning: RxSquad disabled since ncjt_ldpc_decode_and_forward is set to False.")
+        self._ncjt_ldpc_decode_and_forward = val

@@ -111,6 +111,7 @@ class CarrierConfig(Config):
         self._subcarrier_spacing = 15e3     # subcarrier spacing in Hz
         self._slot_duration = 1e-3          # slot duration in seconds
         self._symbols_per_slot = 14         # number of OFDM symbols per slot
+        self._rb_size = 12         # number of subcarriers per resource block
         self._pilot_indices = [2, 11]       # pilot symbol indices in each slot
         super().__init__(**kwargs)
 
@@ -163,6 +164,15 @@ class CarrierConfig(Config):
     @pilot_indices.setter
     def pilot_indices(self, val):
         self._pilot_indices = val
+
+    @property
+    def rb_size(self):
+        return self._rb_size
+
+    @rb_size.setter
+    def rb_size(self, val):
+        assert 0 < val <= 100, "Invalid resource block size"
+        self._rb_size = val
 
 
 class MCSConfig(Config):

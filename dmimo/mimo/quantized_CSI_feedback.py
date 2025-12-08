@@ -50,7 +50,7 @@ class quantized_CSI_feedback(Layer):
             self.codebook=self.codebook /np.linalg.norm(self.codebook, axis=1, keepdims=True)
         
         self.num_tx_streams = num_tx_streams
-        self.architecture = architecture # 'baseline', 'dMIMO_phase1'
+        self.architecture = architecture # 'baseline', 'dMIMO_phase1', 'dMIMO_phase3_SU_MIMO'
         self.wideband = wideband
         
         snr_linear = 10**(snrdb/10)
@@ -90,6 +90,29 @@ class quantized_CSI_feedback(Layer):
             precoding_matrices = np.asarray(precoding_matrices)
             
             CSI_feedback_report = [PMI, rate_for_selected_precoder, precoding_matrices]
+
+        elif self.method == '5G' and self.architecture == 'dMIMO_phase3_SU_MIMO':
+
+            self.nfft = h_est.shape[-1]
+
+            num_ues = int(h_est.shape[4]/self.num_UE_Ant)
+            PMI = []
+            rate_for_selected_precoder = []
+            precoding_matrices = []
+
+            for ue_idx in range(num_ues):
+                ue_ant_idx = np.arange(ue_idx*self.num_UE_Ant, (ue_idx+1)*self.num_UE_Ant)
+                codebook = self.cal_codebook(tf.gather(h_est, ue_ant_idx, axis=4))
+                PMI_temp, rate_for_selected_precoder_temp, precoding_matrices_temp = self.cal_PMI(codebook, tf.gather(h_est, ue_ant_idx, axis=4))
+                PMI.append(PMI_temp)
+                rate_for_selected_precoder.append(rate_for_selected_precoder_temp)
+                precoding_matrices.append(precoding_matrices_temp)
+            
+            PMI = np.asarray(PMI)
+            rate_for_selected_precoder = np.asarray(rate_for_selected_precoder)
+            precoding_matrices = np.asarray(precoding_matrices)
+            
+            CSI_feedback_report = [PMI, rate_for_selected_precoder, precoding_matrices]
         
         elif self.method == 'RVQ':
             CSI_feedback_report  = self.VectorQuantizationLoader(h_est)
@@ -108,7 +131,7 @@ class quantized_CSI_feedback(Layer):
         N_t = h_est.shape[4]
         N_r = h_est.shape[2]
 
-        num_rx_nodes = int((N_r - self.num_BS_Ant)/self.num_UE_Ant) + 1
+        # num_rx_nodes = int((N_r - self.num_BS_Ant)/self.num_UE_Ant) + 1
 
         A_info = 0.83
         B_info = 0.73
@@ -130,7 +153,10 @@ class quantized_CSI_feedback(Layer):
                 snr_linear = np.sum(self.snr_linear)
                 n_var = self.cal_n_var(h_eff, snr_linear)
 
-                mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True)/self.num_tx_streams + n_var
+                mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True)
+                mmse_inv  = mmse_inv + n_var*tf.eye(mmse_inv.shape[-1], dtype=mmse_inv.dtype)
+                mmse_inv = tf.linalg.inv(mmse_inv)
+                mmse_inv = tf.matmul(h_eff, mmse_inv, adjoint_a=True)
 
                 per_stream_sinr = self.compute_sinr(h_eff, mmse_inv, n_var)
 
@@ -166,9 +192,11 @@ class quantized_CSI_feedback(Layer):
                     snr_linear = np.sum(self.snr_linear)
                     n_var = self.cal_n_var(h_eff, snr_linear)
 
-                    mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True) + n_var*tf.eye(N_r, dtype=h_eff.dtype)
+                    mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True)
+                    mmse_inv  = mmse_inv + n_var*tf.eye(mmse_inv.shape[-1], dtype=mmse_inv.dtype)
                     mmse_inv = tf.linalg.inv(mmse_inv)
-
+                    mmse_inv = tf.matmul(h_eff, mmse_inv, adjoint_a=True)
+                    
                     per_stream_sinr = self.compute_sinr(h_eff, mmse_inv, n_var)
 
                     avg_sinr = self.eesm_average(per_stream_sinr, 0.25, 4)
@@ -241,6 +269,54 @@ class quantized_CSI_feedback(Layer):
 
                 precoding_matrices = precoding_matrices[np.newaxis, ...]
                 rate_for_selected_precoder = None
+            
+        elif self.architecture == 'dMIMO_phase3_SU_MIMO':
+
+            num_codebook_elements = np.product(codebook.shape[:-2])
+            codebook = codebook.reshape(-1, codebook.shape[-2], codebook.shape[-1])
+
+            if self.codebook_selection_method == 'rate':
+
+                per_precoder_rate = np.zeros((h_est.shape[-1],num_codebook_elements))
+
+                PMI = np.zeros((h_est.shape[-1]),dtype=int)
+            
+                for codebook_idx in range(num_codebook_elements):
+
+                    h_eff = self.calculate_effective_channel(h_est, codebook[codebook_idx,...])
+
+                    snr_linear = np.sum(self.snr_linear)
+                    n_var = self.cal_n_var(h_eff, snr_linear)
+
+                    mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True)
+                    mmse_inv  = mmse_inv + n_var*tf.eye(mmse_inv.shape[-1], dtype=mmse_inv.dtype)
+                    mmse_inv = tf.linalg.inv(mmse_inv)
+                    mmse_inv = tf.matmul(h_eff, mmse_inv, adjoint_a=True)
+                    
+                    per_stream_sinr = self.compute_sinr(h_eff, mmse_inv, n_var)
+
+                    avg_sinr = self.eesm_average(per_stream_sinr, 0.25, 4)
+
+                    curr_codebook_rate = A_info * np.log2(1 + B_info * avg_sinr)
+                    per_precoder_rate[:, codebook_idx] = curr_codebook_rate
+
+                if self.wideband:
+                    precoding_matrices = np.zeros((1, codebook.shape[1], codebook.shape[2]), dtype=complex)
+                    for n in range(h_est.shape[-1]):
+                        PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
+                    unique, counts = np.unique(PMI, return_counts=True)
+                    PMI = unique[np.argmax(counts)]
+                    rate_for_selected_precoder = np.mean(per_precoder_rate[:, PMI])
+                    precoding_matrices[0, ...] = codebook[PMI]
+                else:
+                    precoding_matrices = np.zeros((h_est.shape[-1], codebook.shape[1], codebook.shape[2]), dtype=complex)
+                    rate_for_selected_precoder = np.zeros((h_est.shape[-1]))
+                    for n in range(h_est.shape[-1]):
+                        PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
+                        rate_for_selected_precoder[n] = per_precoder_rate[n, PMI[n]]
+                        precoding_matrices[n, ...] = codebook[PMI[n]]
+                
+                precoding_matrices = precoding_matrices[np.newaxis, ...]
 
         return [PMI, rate_for_selected_precoder, precoding_matrices]
 
@@ -262,36 +338,40 @@ class quantized_CSI_feedback(Layer):
 
         return n_var
     
-    def compute_sinr(self, h_eff, mmse_inv, n_var):
-        N_s = h_eff.shape[-1]
-        sinr_list = []
+    def compute_sinr(self, h_eff, mmse_inv, n_var, eps=1e-12):
+        """
+        Per-stream SINR after linear MMSE combining.
 
-        for i in range(N_s):
-            h_i = tf.gather(h_eff, i, axis=6)
-            h_i = tf.expand_dims(h_i, -1)
-            
-            # Compute the numerator: |diag(h_i^H * MMSE_R_inv * h_i)|^2
-            numerator = tf.abs(tf.linalg.diag_part(tf.matmul(tf.linalg.adjoint(h_i), tf.matmul(mmse_inv, h_i))))**2
-            
-            # Compute the denominator: n_var * diag(real(h_i^H * MMSE_R_inv * MMSE_R_inv^H * h_i)) + sum(|diag(h_i^H * MMSE_R_inv * h_j)|^2)
-            mmse_inv_h_i = tf.matmul(tf.linalg.adjoint(mmse_inv), h_i)
-            real_part = tf.linalg.diag_part(tf.math.real(tf.matmul(tf.linalg.adjoint(h_i), tf.matmul(mmse_inv, mmse_inv_h_i))))
-            interference_sum = tf.zeros_like(real_part)
+        Inputs:
+        h_eff    : [..., N_rx, N_s]   effective channel (antennas x streams)
+        mmse_inv : [..., N_s, N_rx]   MMSE combiner W = H^H (H H^H + n I)^{-1}
+        n_var    : scalar (or broadcastable) real noise variance
 
-            for j in range(N_s):
-                if j != i:
-                    h_j = tf.gather(h_eff, j, axis=6)
-                    h_j = tf.expand_dims(h_j, -1)
-                    interference_sum += tf.abs(tf.linalg.diag_part(tf.matmul(tf.linalg.adjoint(h_i), tf.matmul(mmse_inv, h_j))))**2
-            
-            denominator = n_var * real_part + interference_sum
-            
-            # Calculate SINR for h_i
-            sinr_i = numerator / denominator
-            sinr_list.append(sinr_i)
+        Returns:
+        sinr     : [..., N_s]         post-combiner SINR per stream
+        """
+        H = tf.convert_to_tensor(h_eff)
+        W = tf.convert_to_tensor(mmse_inv)
 
-        # Stack the SINR values to form the final SINR tensor
-        sinr = tf.stack(sinr_list, axis=-1)
+        # Post-combiner effective channel S = W H  => [..., N_s, N_s]
+        S = tf.matmul(W, H)
+
+        # Desired signal power |S_ii|^2
+        signal = tf.abs(tf.linalg.diag_part(S)) ** 2                      # [..., N_s]
+
+        # Total power on each output stream: sum_j |S_ij|^2
+        total = tf.reduce_sum(tf.abs(S) ** 2, axis=-1)                    # [..., N_s]
+
+        # Multi-stream interference = total - desired
+        interf = total - signal                                           # [..., N_s]
+
+        # Noise term: n_var * ||W_i||^2  (row-wise squared norms of W)
+        W_row_norm2 = tf.reduce_sum(tf.abs(W) ** 2, axis=-1)              # [..., N_s]
+        noise = tf.cast(n_var, W.dtype.real_dtype) * W_row_norm2          # [..., N_s]
+
+        # SINR_i = |S_ii|^2 / (sum_{j≠i} |S_ij|^2 + n_var * ||W_i||^2)
+        sinr = signal / (interf + noise + tf.cast(eps, signal.dtype))
+        
         return sinr
     
     def eesm_average(self, sinr, er, mod):
@@ -310,7 +390,7 @@ class quantized_CSI_feedback(Layer):
         exp_sum = 1 / N * exp_sum
 
         if np.any(exp_sum == 0):
-            eesm_avg_sinr = np.mean(sinr)
+            eesm_avg_sinr = np.mean(sinr, axis=(0,1,2,3,5))
         else:
             eesm_avg_sinr = -beta * np.log(exp_sum)
 
@@ -318,15 +398,72 @@ class quantized_CSI_feedback(Layer):
 
     def cal_codebook(self, h_est):
         """
-        Computes PMI codebook for 4x2 and 4x4 MIMO configuration (format N_t x N_r)
+        Computes PMI codebook for 2/4 tx antennas
         Consult 3GPP TS 38.214 Section 5 for details
         """
 
         N_t = h_est.shape[4]
-        N_r = h_est.shape[2]
         P_CSI_RS = N_t
 
-        if N_t == 4:
+        if N_t == 2:
+            # i_2 ∈ {0,1,2,3} gives the per-antenna relative phase φ_n = exp(jπ n / 2)
+            i_11 = np.arange(0, self.N_1 * self.O_1)
+            i_12 = np.arange(0, self.N_2 * self.O_2)
+            i_2  = np.arange(0, 4)  # phase sweep like your 4-TX code
+
+            l_all = i_11
+            m_all = i_12
+            n_all = i_2
+
+            if self.num_tx_streams == 1:
+                # W: [l, m, n, N_t, 1]
+                W = np.zeros((len(l_all), len(m_all), len(n_all), N_t, 1), dtype=complex)
+
+                for l in l_all:
+                    for m in m_all:
+                        v_lm = self.compute_v_lm(l, m)  # shape (2,1) when N_t=2
+                        for n in n_all:
+                            phi_n = np.exp(1j * np.pi * n / 2)
+                            # Apply per-antenna relative phase [1, φ_n]^T ⊙ v_lm
+                            d = np.array([[1.0], [phi_n]], dtype=complex)   # (2,1)
+                            W[l, m, n, :, 0] = (v_lm * d).ravel()
+
+                W = 1 / np.sqrt(P_CSI_RS) * W
+
+            elif self.num_tx_streams == 2:
+                # Use the same (l, m) and a frequency shift (k1, k2) like your 4-TX 2-stream case
+                i_13 = np.arange(0, 2)
+                k_1 = np.array((0, self.O_1))
+                k_2 = np.array((0, 0))
+
+                # W: [l, m, i13, n, N_t, 2]
+                W = np.zeros((len(l_all), len(m_all), len(i_13), len(n_all), N_t, 2), dtype=complex)
+
+                for l in l_all:
+                    for m in m_all:
+                        v_lm = self.compute_v_lm(l, m)  # (2,1)
+                        for i_13_idx in i_13:
+                            l_ = l + k_1[i_13_idx]
+                            m_ = m + k_2[i_13_idx]
+                            v_lm_shift = self.compute_v_lm(l_, m_)  # (2,1)
+
+                            for n in n_all:
+                                phi_n = np.exp(1j * np.pi * n / 2)
+                                # Columns mirror your 4-TX sign/phase pattern:
+                                # col1 = [1,  +φ_n]^T ⊙ v_lm
+                                # col2 = [1,  -φ_n]^T ⊙ v_lm_shift
+                                d_pos = np.array([[1.0], [phi_n]], dtype=complex)
+                                d_neg = np.array([[1.0], [-phi_n]], dtype=complex)
+
+                                col1 = (v_lm * d_pos).reshape(N_t, 1)         # (2,1)
+                                col2 = (v_lm_shift * d_neg).reshape(N_t, 1)    # (2,1)
+                                W[l, m, i_13_idx, n, :, :] = np.hstack((col1, col2))
+
+                W = 1 / np.sqrt(2 * P_CSI_RS) * W
+
+            else:
+                raise Exception(f"5G standard PMI feedback for {N_t} tx and {self.num_tx_streams} streams not implemented. Supported for 1–2 streams when N_t=2.")
+        elif N_t == 4:
 
             if self.num_tx_streams == 1:
                 
@@ -461,7 +598,7 @@ class quantized_CSI_feedback(Layer):
                 raise Exception(f"5G standard PMI feedback for {self.num_tx_streams} spatial streams has not been implemented. The simulator supports 1-4 spatial streams only.")
 
         else:
-            raise Exception(f"5G standard PMI feedback for {N_t} x {N_r} MIMO order has not been implemented. The simulator supports MIMO orders 4x2 and 4x4 only.")
+            raise Exception(f"5G standard PMI feedback for {N_t} x {self.num_tx_streams} MIMO order has not been implemented. The simulator supports MIMO orders 4 tx antennas and 1-4 spatial streams only.")
         
         return W
 
@@ -657,7 +794,10 @@ class quantized_CSI_feedback(Layer):
         remainder_subcarriers = self.nfft % self.subcarriers_per_RB
 
         # Initialize an array to store the averaged RBs
-        rb_data = np.zeros(H.shape[:-1].concatenate(num_full_rbs + 1), dtype=complex)
+        if remainder_subcarriers > 0:
+            rb_data = np.zeros(H.shape[:-1].concatenate(num_full_rbs + 1), dtype=complex)
+        else:
+            rb_data = np.zeros(H.shape[:-1].concatenate(num_full_rbs), dtype=complex)
 
         # Compute mean across each full RB
         for rb in range(num_full_rbs):
@@ -673,3 +813,116 @@ class quantized_CSI_feedback(Layer):
         demapped_H = demapped_H[..., :self.nfft]
         
         return demapped_H
+    
+
+
+class RandomVectorQuantizer(Layer):
+    def __init__(self, bits_per_codeword, vector_dim, seed=42, **kwargs):
+        super().__init__(trainable=False, **kwargs)
+        self.bits_per_codeword = bits_per_codeword
+        self.vector_dim = vector_dim
+        self.codebook_size = 2 ** bits_per_codeword
+
+        # Generate random codebook
+        self.codebook = self.generate_codebook(seed) # shape: (codebook_size, vector_dim)
+
+    def generate_codebook(self, seed):
+        rng = tf.random.Generator.from_seed(seed)
+        # Create a random codebook with normalized complex vectors
+        codebook = tf.complex(rng.normal(shape=(self.codebook_size, self.vector_dim)),
+                                 rng.normal(shape=(self.codebook_size, self.vector_dim)))
+        codebook /= tf.linalg.norm(codebook, axis=1, keepdims=True)
+        return codebook
+
+    def __call__(self, inputs:tf.Tensor) -> tf.Tensor:
+        """
+        Quantizes each input vector using the random codebook and returns the indices if inputs.dtype==complex.
+        Otherwise if inputs.dtype==int, it reconstructs the vectors from the codebook using the provided indices.
+        Args:
+            inputs (Tensor): Input data to quantize shape= (..., vector_dim) if input dtype=complex or (...,) if input dtype=int.
+        Returns:
+            indices (Tensor): Indices of the quantized vectors of shape (...,) and dtype=int or
+            reconstructed_vectors (Tensor): Reconstructed vectors from the codebook using the provided indices of shape (..., vector_dim) and dtype=complex.
+        """
+        return super().__call__(inputs)
+    
+    def call(self, inputs:tf.Tensor) -> tf.Tensor:
+        if inputs.dtype == tf.complex64 or inputs.dtype == tf.complex128:
+            # Quantization process
+            dot_products = tf.math.abs(tf.tensordot(tf.math.conj(inputs), self.codebook, axes=[[ -1], [1]])) # shape: (..., codebook_size)
+            indices = tf.argmax(dot_products, axis=-1) # shape: (...,)
+            return indices
+        else:
+            # Reconstruction process
+            return tf.gather(self.codebook, inputs, axis=0) # shape: (..., vector_dim)
+        
+
+class RandomVectorQuantizerNumpy:
+    """
+    Numpy equivalent of the TF RandomVectorQuantizer.
+    - If called with complex/float vectors of shape (..., vector_dim) it returns
+      indices of the nearest codebook vectors with shape (...,) (dtype=int64).
+    - If called with integer indices of shape (...,) it returns reconstructed
+      complex vectors with shape (..., vector_dim).
+    """
+    def __init__(self, bits_per_codeword, vector_dim, seed=42):
+        self.bits_per_codeword = int(bits_per_codeword)
+        self.vector_dim = int(vector_dim)
+        self.codebook_size = 2 ** self.bits_per_codeword
+        self.codebook = self._generate_codebook(seed)  # shape: (codebook_size, vector_dim)
+
+    def _generate_codebook(self, seed) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+        real = rng.normal(size=(self.codebook_size, self.vector_dim))
+        imag = rng.normal(size=(self.codebook_size, self.vector_dim))
+        cb = real + 1j * imag
+        norms = np.linalg.norm(cb, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        cb = cb / norms
+        return cb.astype(np.complex64)
+
+    def __call__(self, inputs):
+        return self.quantize_or_reconstruct(inputs)
+
+    def quantize_or_reconstruct(self, inputs):
+        arr = np.asarray(inputs)
+        
+        if np.iscomplexobj(arr) or np.issubdtype(arr.dtype, np.floating):
+            arr = arr.astype(np.complex64)
+            arr_shape = arr.shape
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            elif arr.ndim > 2:
+                arr = arr.reshape(-1, arr_shape[-1])
+            assert arr.shape[-1] == self.vector_dim, f"Expected last dim {self.vector_dim}, got {arr.shape[-1]}"
+            
+            dots = _parallel_dot(arr, self.codebook)  # This is parallel across CPU cores
+            idx = np.argmax(dots, axis=-1).astype(np.int64)
+            idx = np.reshape(idx, arr_shape[:-1])
+            return idx
+        else:
+            idx = arr.astype(np.int64)
+            if np.any((idx < 0) | (idx >= self.codebook_size)):
+                raise IndexError("RandomVectorQuantizerNumpy.quantize_or_reconstruct: Index out of range")
+            return self.codebook[idx]
+        
+
+from numba import njit, prange
+
+@njit(parallel=True)
+def _parallel_dot(arr, codebook):
+    """
+    arr: (batch_size, vector_dim) complex64
+    codebook: (codebook_size, vector_dim) complex64
+    returns: (batch_size, codebook_size) float32 abs inner products
+    """
+    batch_size = arr.shape[0]
+    codebook_size = codebook.shape[0]
+    
+    dots = np.zeros((batch_size, codebook_size), dtype=np.float32)
+    
+    for i in prange(batch_size):
+        # conj(arr[i]) @ codebook[j] for all j
+        dots[i] = np.abs(arr[i].conj() @ codebook.T)
+    
+    return dots
