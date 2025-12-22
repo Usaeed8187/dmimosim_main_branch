@@ -356,6 +356,16 @@ class quantized_CSI_feedback(Layer):
         den = tf.reduce_sum(tf.abs(Y_g)**2,           axis=[-2, -1]) + eps  # [N_sb]
 
         q = num / tf.cast(den, num.dtype)  # [N_sb] complex
+
+        W_g_aligned = W_g * q[:, None, None]
+
+        Y_g_aligned = tf.matmul(H_g_sb, W_g_aligned)
+        phase_err = tf.math.angle(
+            tf.reduce_sum(tf.math.conj(Y_ref) * Y_g_aligned, axis=[-2, -1])
+        )
+
+        assert tf.reduce_max(phase_err) < 1e-3, "Phase alignment failed"
+
         return q
 
         
