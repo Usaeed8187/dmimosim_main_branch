@@ -170,11 +170,11 @@ class MU_MIMO(Model):
         if self.cfg.precoding_method == "ZF":
             # x_precoded, g = self.zf_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
-            # h_freq_csi = tf.transpose(h_freq_csi, perm=[0,3,4,2,1])
-            # h_freq_csi = complex_pinv(h_freq_csi)
-            # h_freq_csi = tf.transpose(h_freq_csi, perm=[0,3,4,1,2])
-            # x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
-            x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+            h_freq_csi = tf.transpose(h_freq_csi, perm=[0,3,4,2,1])
+            h_freq_csi = complex_pinv(h_freq_csi)
+            h_freq_csi = tf.transpose(h_freq_csi, perm=[0,3,4,1,2])
+            x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+            # x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
         elif self.cfg.precoding_method == "BD":
             x_precoded, g = self.bd_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "SLNR":

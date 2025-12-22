@@ -95,7 +95,7 @@ if __name__ == "__main__":
     cfg.channel_prediction_method = "two_mode" # "old", "two_mode", "two_mode_tf"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
-    modulation_order = 2
+    modulation_order = 4
     cfg.code_rate = 2/3
     if arguments == []:
         mobility = 'low_mobility'
