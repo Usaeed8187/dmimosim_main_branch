@@ -95,7 +95,7 @@ if __name__ == "__main__":
     cfg.channel_prediction_method = "two_mode" # "old", "two_mode", "two_mode_tf"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
-    modulation_order = 2
+    modulation_order = 4
     cfg.code_rate = 2/3
     if arguments == []:
         mobility = 'low_mobility'
@@ -112,9 +112,9 @@ if __name__ == "__main__":
 
 
     # Select Number of TxSquad and RxSquad UEs to use.
-    ns3cfg.num_txue_sel = 6
+    ns3cfg.num_txue_sel = 0
     if arguments == []:
-        rx_ues_arr = [3]
+        rx_ues_arr = [0]
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)

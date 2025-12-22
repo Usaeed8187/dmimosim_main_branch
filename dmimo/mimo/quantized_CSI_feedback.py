@@ -648,7 +648,7 @@ class quantized_CSI_feedback(Layer):
                 v_l1_l2 = np.concatenate(beam_blocks, axis=0)
 
                 # Normalize (unit norm, consistent with Type-II usage)
-                # v_l1_l2 /= np.linalg.norm(v_l1_l2)
+                v_l1_l2 /= np.linalg.norm(v_l1_l2)
 
                 V[:, idx] = v_l1_l2
                 idx += 1
