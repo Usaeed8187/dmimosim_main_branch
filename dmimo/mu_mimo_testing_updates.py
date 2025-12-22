@@ -12,7 +12,7 @@ from sionna.fec.ldpc.decoding import LDPC5GDecoder
 from sionna.fec.interleaving import RowColumnInterleaver, Deinterleaver
 
 from sionna.mapping import Mapper, Demapper
-from sionna.utils import BinarySource, flatten_dims
+from sionna.utils import BinarySource, flatten_dims, matrix_inv, matrix_pinv
 from sionna.utils.metrics import compute_ber, compute_bler
 
 from dmimo.config import Ns3Config, SimConfig, RCConfig
@@ -205,11 +205,20 @@ class MU_MIMO(Model):
         h_hat_perfect = tf.gather(h_hat_perfect, self.rg.effective_subcarrier_ind, axis=4)
         h_hat_perfect = tf.transpose(h_hat_perfect, perm=[0, 1, 5, 2, 6, 3, 4])
         h_hat_perfect = tf.reshape(h_hat_perfect, [self.batch_size, self.num_rx_ue, -1, self.rg.num_tx, self.rg.num_streams_per_tx, self.rg.num_ofdm_symbols, len(self.rg.effective_subcarrier_ind)])
+        
+        x_rg_reshaped = tf.transpose(x_rg, perm=[0,3,4,2,1])
+        x_rg_reshaped = tf.gather(x_rg_reshaped, self.rg.effective_subcarrier_ind, axis=2)
+        h_hat_perfect = tf.transpose(h_hat_perfect, perm=[0,1,3,5,6,2,4])
+        y_ref = tf.matmul(h_hat_perfect, x_rg_reshaped[:, tf.newaxis,tf.newaxis,...])
+        y_ref = tf.squeeze(y_ref)
+        y_ref = tf.transpose(y_ref, perm=[0,1,4,2,3])
 
         # make proper shape
         # y = y[:, :, :self.num_rxs_ant, :, :]
         # y = tf.gather(y, tf.reshape(self.cfg.scheduled_rx_ue_indices, [-1]), axis=2)
         y = tf.reshape(y, (self.batch_size, self.num_rx_ue, self.num_ue_ant, 14, -1))
+
+        y_nmse = tf.reduce_mean(tf.abs(y_ref - tf.gather(y, self.rg.effective_subcarrier_ind, axis=-1))**2) / tf.reduce_mean(tf.abs(y_ref)**2)
 
         if self.cfg.precoding_method == "BD":
             y = self.bd_equalizer([y, h_freq_csi, self.cfg.ue_indices, self.cfg.ue_ranks])
@@ -260,7 +269,13 @@ class MU_MIMO(Model):
         # plt.savefig('a')
 
         # LMMSE equalization
-        x_hat, no_eff = self.lmmse_equ([y, h_hat_perfect, err_var, no])
+        x_hat, no_eff = self.lmmse_equ([y, h_hat, err_var, no])
+
+        h_hat_reshaped = tf.transpose(h_hat, perm=[0,1,3,5,6,2,4])
+        g_mmse = tf.matmul(h_hat_reshaped, h_hat_reshaped, adjoint_b=True)
+        g_mmse = tf.matmul(h_hat_reshaped, matrix_inv(g_mmse), adjoint_a = True)
+        gh = tf.matmul(g_mmse, h_hat_reshaped)
+        print("example_post_equalization_matrix: ", tf.abs(gh[0,0,0,0,0,:,:]))
 
         # Soft-output QAM demapper
         llr = self.demapper([x_hat, no_eff])
