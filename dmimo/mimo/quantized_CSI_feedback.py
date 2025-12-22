@@ -147,17 +147,6 @@ class quantized_CSI_feedback(Layer):
             h_est_rb = tf.squeeze(h_est_rb)
             h_est_rb = tf.cast(h_est_rb, self.dtype)
 
-            if self.L is None:
-                self.L = tf.reduce_min([4, h_est_rb.shape[1]//2])
-            else:
-                self.L = tf.reduce_min([self.L, h_est_rb.shape[1]//2])
-
-            if self.N_1 is None:
-                self.N_1 = h_est_rb.shape[1] // 2
-
-            V = self.build_sd_beam_grid()
-            V = tf.convert_to_tensor(V, dtype=self.dtype)
-
             num_rx_ues = int((h_est.shape[2] - self.num_BS_Ant) /self.num_UE_Ant)
 
             num_tx_ues = int((h_est.shape[4] - self.num_BS_Ant) /self.num_UE_Ant)
@@ -165,6 +154,7 @@ class quantized_CSI_feedback(Layer):
             num_streams_per_UE = self.num_tx_streams // (num_rx_ues + 2)
 
             W_rb_all = []
+            ref_tx = 0
 
             for rx_idx in range(num_rx_ues+1):
 
@@ -178,6 +168,8 @@ class quantized_CSI_feedback(Layer):
 
                 assert Ns <= 2, "Type II codebook only defined for rank 1 and rank 2"
 
+                W_rb_all_tx = []                
+
                 for tx_idx in range(num_tx_ues+1):
                     
                     if tx_idx == 0:
@@ -185,14 +177,58 @@ class quantized_CSI_feedback(Layer):
                     else:
                         tx_ant_idx = np.arange((tx_idx-1)*self.num_UE_Ant + self.num_BS_Ant, (tx_idx)*self.num_UE_Ant + self.num_BS_Ant)
 
-                    curr_h_est = tf.gather(tf.gather(h_est_rb, rx_ant_idx, axis=0), tx_ant_idx, axis=1)
+                    curr_h_est = tf.gather(tf.gather(h_est_rb, rx_ant_idx, axis=0), tx_ant_idx, axis=1) # [N_r_k, N_t_g, N_rb]
+
+                    if tx_idx == ref_tx:
+                        curr_h_est_reshaped = tf.transpose(curr_h_est, [2, 0, 1])  # [N_RB, N_rx, N_tx]
+                        sb_ids = tf.range(curr_h_est_reshaped.shape[0], dtype=tf.int32) // int(self.rbs_per_subband)
+                        ref_h_est_sb = tf.math.segment_mean(curr_h_est_reshaped, sb_ids) # [N_rx, N_rx, N_tx]
+
+                    self.N_1 = curr_h_est.shape[1] // 2
+                    if self.L is None:
+                        self.L = tf.reduce_min([4, curr_h_est.shape[1]//2])
+                    else:
+                        self.L = tf.reduce_min([self.L, curr_h_est.shape[1]//2])
+
+                    V = self.build_sd_beam_grid()
+                    V = tf.convert_to_tensor(V, dtype=self.dtype)
 
                     W_rb = self.type_II_precoder(curr_h_est, V, Ns)
 
-                    W_rb_all.append(W_rb)
+                    W_rb_all_tx.append(W_rb)
 
+                for tx_idx in range(num_tx_ues+1):
 
-        
+                    if tx_idx == 0:
+                        tx_ant_idx = np.arange(0, self.num_BS_Ant)
+                    else:
+                        tx_ant_idx = np.arange((tx_idx-1)*self.num_UE_Ant + self.num_BS_Ant, (tx_idx)*self.num_UE_Ant + self.num_BS_Ant)
+
+                    curr_h_est = tf.gather(tf.gather(h_est_rb, rx_ant_idx, axis=0), tx_ant_idx, axis=1) # [N_r_k, N_t_g, N_rb]
+
+                    curr_h_est_reshaped = tf.transpose(curr_h_est, [2, 0, 1])  # [N_RB, N_rx, N_tx]
+                    sb_ids = tf.range(curr_h_est_reshaped.shape[0], dtype=tf.int32) // int(self.rbs_per_subband)
+                    curr_h_est_sb = tf.math.segment_mean(curr_h_est_reshaped, sb_ids) # [N_sb, N_rx, N_tx]
+
+                    if tx_idx != ref_tx:
+                        q = self.compute_q_per_sb(ref_h_est_sb, W_rb_all_tx[ref_tx], curr_h_est_sb, W_rb_all_tx[tx_idx])
+                    
+                        W_rb_all_tx[tx_idx] = q[:,tf.newaxis,tf.newaxis] * W_rb_all_tx[tx_idx]
+
+                W_rb_all_tx = tf.concat(W_rb_all_tx, axis=1)  # [N_RB, N_tx_g, Ns_for_curr_rx]
+
+                W_rb_all.append(W_rb_all_tx)
+
+            h_est_quant = tf.concat(W_rb_all, axis=-1)  # [N_RB, N_tx, total_Ns]
+            h_est_quant = tf.repeat(h_est_quant, repeats=np.ceil(self.nfft/W_rb.shape[0]), axis=0)
+            h_est_quant = h_est_quant[:self.nfft, ...]
+            h_est_quant = h_est_quant[tf.newaxis, ...]  # [1, N_fft, N_tx, total_Ns]
+            h_est_quant = tf.repeat(h_est_quant, repeats=h_est.shape[5], axis=0)  # [N_syms, N_fft, N_tx, total_Ns]
+            h_est_quant = tf.transpose(h_est_quant, perm=[3, 2, 0, 1])
+            h_est_quant  = h_est_quant[tf.newaxis, tf.newaxis, :, tf.newaxis, :, :, :] # [1,1,total_Ns,1,N_tx,N_syms,N_fft]
+
+            CSI_feedback_report = h_est_quant
+
         elif self.method == '5G' and self.architecture == 'dMIMO_phase1':
 
             num_rx_ues = int(h_est.shape[2]/self.num_UE_Ant)
@@ -304,6 +340,24 @@ class quantized_CSI_feedback(Layer):
         # )
 
         return W_rb
+    
+    def compute_q_per_sb(self, H_ref_sb, W_ref, H_g_sb, W_g, eps=1e-9):
+        
+        # H_ref_sb: [N_sb, Nr, Nt_ref]
+        # W_ref:    [N_sb, Nt_ref, Ns]
+        # H_g_sb:   [N_sb, Nr, Nt_g]
+        # W_g:      [N_sb, Nt_g, Ns]
+        # returns q: [N_sb] complex
+
+        Y_ref = tf.matmul(H_ref_sb, W_ref)  # [N_sb, Nr, Ns]
+        Y_g   = tf.matmul(H_g_sb,   W_g)    # [N_sb, Nr, Ns]
+
+        num = tf.reduce_sum(tf.math.conj(Y_g) * Y_ref, axis=[-2, -1])       # [N_sb]
+        den = tf.reduce_sum(tf.abs(Y_g)**2,           axis=[-2, -1]) + eps  # [N_sb]
+
+        q = num / tf.cast(den, num.dtype)  # [N_sb] complex
+        return q
+
         
     def assert_eq_41(self, H_A, G_sb):
 
@@ -825,7 +879,9 @@ class quantized_CSI_feedback(Layer):
         # Eigen-decomposition per subband (Hermitian): returns ascending evals
         evals, evecs = tf.linalg.eigh(G)        # evecs: [N_sb, L, L]
         idx = tf.argsort(tf.abs(evals), axis=-1, direction="DESCENDING")[:, :Ns]
-        G_sb = tf.gather(evecs, idx[0,:], axis=-1)                    # [N_sb, L, Ns] largest Ns eigenvectors
+        G_sb = tf.gather(
+            evecs, idx, batch_dims=1, axis=-1
+        )  # [N_sb, L, Ns] largest Ns eigenvectors per subband
 
         return G_sb
     

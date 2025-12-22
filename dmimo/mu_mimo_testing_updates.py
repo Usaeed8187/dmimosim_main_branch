@@ -170,11 +170,11 @@ class MU_MIMO(Model):
         if self.cfg.precoding_method == "ZF":
             # x_precoded, g = self.zf_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
-            h_freq_csi = tf.transpose(h_freq_csi, perm=[0,3,4,2,1])
-            h_freq_csi = complex_pinv(h_freq_csi)
-            h_freq_csi = tf.transpose(h_freq_csi, perm=[0,3,4,1,2])
-            x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
-            # x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+            # h_freq_csi = tf.transpose(h_freq_csi, perm=[0,3,4,2,1])
+            # h_freq_csi = complex_pinv(h_freq_csi)
+            # h_freq_csi = tf.transpose(h_freq_csi, perm=[0,3,4,1,2])
+            # x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+            x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
         elif self.cfg.precoding_method == "BD":
             x_precoded, g = self.bd_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "SLNR":
@@ -197,8 +197,8 @@ class MU_MIMO(Model):
         y, h_freq_true = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
 
         # TODO: Remove this after debugging
-        dmimo_chans._add_noise = False
-        y, h_freq_true = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
+        # dmimo_chans._add_noise = False
+        # y, h_freq_true = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
 
         h_freq_true_reshaped = tf.transpose(h_freq_true, perm=[0,1,3,5,6,2,4])
         h_hat_perfect = tf.matmul(h_freq_true_reshaped, g)
@@ -227,7 +227,7 @@ class MU_MIMO(Model):
 
         # LS channel estimation with linear interpolation
         no = 5e-2  # initial noise estimation (tunable param)
-        if "DIRECT_QUANTIZED_CSI_RVQ" in self.cfg.precoding_method:
+        if "DIRECT_QUANTIZED_CSI_RVQ" in self.cfg.precoding_method or "phase2" in self.cfg.PMI_feedback_architecture:
             h_hat, err_var = self.ls_estimator_rb_wise([y, no])  # without interpolation
         else:
             h_hat, err_var = self.ls_estimator([y, no])
@@ -276,6 +276,14 @@ class MU_MIMO(Model):
         g_mmse = tf.matmul(h_hat_reshaped, matrix_inv(g_mmse), adjoint_a = True)
         gh = tf.matmul(g_mmse, h_hat_reshaped)
         print("example_post_equalization_matrix: ", tf.abs(gh[0,0,0,0,0,:,:]))
+        
+        off_mask = 1.0 - tf.eye(gh.shape[-1], dtype=gh.dtype)
+        off_vals = gh * off_mask
+        max_off_val = tf.reduce_max(tf.abs(off_vals))
+        print("max_off_val = ", max_off_val)
+
+        h_hat_nmse = tf.reduce_mean(tf.abs(h_hat_reshaped - h_hat_perfect)**2) / tf.reduce_mean(tf.abs(h_hat_reshaped))
+        print("h_hat_nmse: ", h_hat_nmse)
 
         # Soft-output QAM demapper
         llr = self.demapper([x_hat, no_eff])
@@ -283,7 +291,7 @@ class MU_MIMO(Model):
         # Hard-decision bit error rate
         d_hard = tf.cast(llr > 0, tf.float32)
         uncoded_ber = compute_ber(d, d_hard).numpy()
-        print(f"Uncoded BER: {uncoded_ber}")
+        print(f"\nUncoded BER: {uncoded_ber}\n")
 
         # Hard-decision symbol error rate
         x_hard = self.mapper(d_hard)
@@ -757,7 +765,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         # print("BER: {}  BLER: {}".format(txs_ber, txs_bler))
         assert txs_ber <= 1e-3, "TxSquad transmission BER too high"
     
-    if "RVQ" not in cfg.precoding_method:
+    if "RVQ" not in cfg.precoding_method and cfg.perfect_csi == False:
         type_II_PMI_quantizer = quantized_CSI_feedback(method='5G', 
                                                         codebook_selection_method=None,
                                                         num_tx_streams=cfg.num_tx_streams,

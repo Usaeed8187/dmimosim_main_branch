@@ -95,7 +95,7 @@ if __name__ == "__main__":
     cfg.channel_prediction_method = "two_mode" # "old", "two_mode", "two_mode_tf"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
-    modulation_order = 4
+    modulation_order = 2
     cfg.code_rate = 2/3
     if arguments == []:
         mobility = 'low_mobility'
@@ -106,13 +106,13 @@ if __name__ == "__main__":
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
     cfg.enable_rxsquad = False
     cfg.precoding_method = "ZF"
-    cfg.PMI_feedback_architecture = 'dMIMO_phase2_rel_15_type_II' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_CB1'
+    cfg.PMI_feedback_architecture = 'dMIMO_phase2_CB1' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_CB1'
     # cfg.precoding_method = "ZF_QUANTIZED_CSI_RVQ" # Uncomment to enable quantized CSI feedback
     # cfg.precoding_method = "DIRECT_QUANTIZED_CSI_RVQ" # Does not work well for MU-MIMO
 
 
     # Select Number of TxSquad and RxSquad UEs to use.
-    ns3cfg.num_txue_sel = 0
+    ns3cfg.num_txue_sel = 2
     if arguments == []:
         rx_ues_arr = [0]
 
