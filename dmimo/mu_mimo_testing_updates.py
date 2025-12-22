@@ -197,8 +197,14 @@ class MU_MIMO(Model):
         y, h_freq_true = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
 
         # TODO: Remove this after debugging
-        # dmimo_chans._add_noise = False
-        # y, h_freq_true = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
+        dmimo_chans._add_noise = False
+        y, h_freq_true = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
+
+        h_freq_true_reshaped = tf.transpose(h_freq_true, perm=[0,1,3,5,6,2,4])
+        h_hat_perfect = tf.matmul(h_freq_true_reshaped, g)
+        h_hat_perfect = tf.gather(h_hat_perfect, self.rg.effective_subcarrier_ind, axis=4)
+        h_hat_perfect = tf.transpose(h_hat_perfect, perm=[0, 1, 5, 2, 6, 3, 4])
+        h_hat_perfect = tf.reshape(h_hat_perfect, [self.batch_size, self.num_rx_ue, -1, self.rg.num_tx, self.rg.num_streams_per_tx, self.rg.num_ofdm_symbols, len(self.rg.effective_subcarrier_ind)])
 
         # make proper shape
         # y = y[:, :, :self.num_rxs_ant, :, :]
@@ -254,7 +260,7 @@ class MU_MIMO(Model):
         # plt.savefig('a')
 
         # LMMSE equalization
-        x_hat, no_eff = self.lmmse_equ([y, h_hat, err_var, no])
+        x_hat, no_eff = self.lmmse_equ([y, h_hat_perfect, err_var, no])
 
         # Soft-output QAM demapper
         llr = self.demapper([x_hat, no_eff])
