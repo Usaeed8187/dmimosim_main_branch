@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
+import matplotlib.pyplot as plt
 from tensorflow.python.keras.layers import Layer
-import sionna
 
 class quantized_CSI_feedback(Layer):
     """CSI feedback report generation"""
@@ -12,46 +12,63 @@ class quantized_CSI_feedback(Layer):
                 num_tx_streams,
                 architecture,
                 snrdb,
+                L=None,
+                N_1=None,
+                N_2=1,
+                O_1=4,
+                O_2=1,
                 wideband=False,
+                rbs_per_subband=4,
                 total_bits=None,
                 VectorLength=None,
                 dtype=tf.complex64,
                 **kwargs):
         super().__init__(trainable=False, dtype=dtype, **kwargs)
         
+        self.real_dtype = dtype.real_dtype
+
         self.nfft = 512
         self.subcarriers_per_RB = 12
 
-        self.codebook_selection_method = codebook_selection_method # 'rate', 'chordal_dist'
+        self.codebook_selection_method = codebook_selection_method # 'rate', 'chordal_dist' for type I, None for type II
 
         self.method = method
-        if self.method == '5G':
-            self.N_1 = 2 # Number of quantization points in the horizontal dimension
-            self.N_2 = 1 # Number of quantization points in the vertical dimension
-            self.O_1 = 4 # Horizontal oversampling factor
-            self.O_2 = 1 # Vertical oversampling factor
-        elif self.method == 'RVQ':
-            #Initialization for the RVQ quantization
-            # This can be any even division of these but in our case it should always be the full number of bits. 
-            self.codebook_size=int(2**total_bits)
-            self.bits_per_codeword=total_bits
-            self.num_codewords = total_bits // self.bits_per_codeword
-            
-            #VectorLength=data.shape[3]*2 generally its the number of TX times 2 RX antennas since all nodes have 2 RX antennas. 
-            # Generate random codebook (complex numbers), you can use a uniform distribution but I have seen reference that guassian is better for channels. 
-            #self.codebook = np.random.randn(self.codebook_size,VectorLength) + 1j * np.random.randn(self.codebook_size,VectorLength)
-            self.codebook = np.random.normal(loc=0.0, scale=1.0, size=(self.codebook_size,VectorLength,12)) + 1j * np.random.normal(loc=0.0, scale=1.0, size=(self.codebook_size,VectorLength,12))
-            max_abs_values = np.abs(self.codebook).max(axis=1, keepdims=True)
+        if "phase2" not in architecture:
+            if self.method == '5G':
+                self.N_1 = 2 # Number of quantization points in the horizontal dimension
+                self.N_2 = 1 # Number of quantization points in the vertical dimension
+                self.O_1 = 4 # Horizontal oversampling factor
+                self.O_2 = 1 # Vertical oversampling factor
+            elif self.method == 'RVQ':
+                #Initialization for the RVQ quantization
+                # This can be any even division of these but in our case it should always be the full number of bits. 
+                self.codebook_size=int(2**total_bits)
+                self.bits_per_codeword=total_bits
+                self.num_codewords = total_bits // self.bits_per_codeword
+                
+                #VectorLength=data.shape[3]*2 generally its the number of TX times 2 RX antennas since all nodes have 2 RX antennas. 
+                # Generate random codebook (complex numbers), you can use a uniform distribution but I have seen reference that guassian is better for channels. 
+                #self.codebook = np.random.randn(self.codebook_size,VectorLength) + 1j * np.random.randn(self.codebook_size,VectorLength)
+                self.codebook = np.random.normal(loc=0.0, scale=1.0, size=(self.codebook_size,VectorLength,12)) + 1j * np.random.normal(loc=0.0, scale=1.0, size=(self.codebook_size,VectorLength,12))
+                max_abs_values = np.abs(self.codebook).max(axis=1, keepdims=True)
 
-            #The channel gain will in nearly all cases be ranging in magnitude from 0 to 1 so I normalize the maximum magnitude of each codebook vector to mag 1. 
-            #self.codebook = self.codebook / max_abs_values
-            
-            #normalizing the vector magnitudes
-            self.codebook=self.codebook /np.linalg.norm(self.codebook, axis=1, keepdims=True)
+                #The channel gain will in nearly all cases be ranging in magnitude from 0 to 1 so I normalize the maximum magnitude of each codebook vector to mag 1. 
+                #self.codebook = self.codebook / max_abs_values
+                
+                #normalizing the vector magnitudes
+                self.codebook=self.codebook /np.linalg.norm(self.codebook, axis=1, keepdims=True)
+        else:
+            self.L = L # Number of beams to select
+            self.N_1 = N_1 # Number of quantization points in the horizontal dimension
+            self.N_2 = N_2 # Number of quantization points in the vertical dimension
+            self.O_1 = O_1 # Horizontal oversampling factor
+            self.O_2 = O_2 # Vertical oversampling factor
         
         self.num_tx_streams = num_tx_streams
         self.architecture = architecture # 'baseline', 'dMIMO_phase1', 'dMIMO_phase3_SU_MIMO'
         self.wideband = wideband
+
+        self.rbs_per_subband = rbs_per_subband
         
         snr_linear = 10**(snrdb/10)
         self.snr_linear = np.mean(snr_linear)
@@ -63,10 +80,118 @@ class quantized_CSI_feedback(Layer):
         
         if self.method == '5G' and self.architecture == 'baseline':
 
-            codebook = self.cal_codebook(h_est)
-            PMI, rate_for_selected_precoder, precoding_matrices = self.cal_PMI(codebook, h_est)
+            codebook = self.cal_codebook_type_I(h_est)
+            PMI, rate_for_selected_precoder, precoding_matrices = self.cal_PMI_type_I(codebook, h_est)
             
             CSI_feedback_report = [PMI, rate_for_selected_precoder, precoding_matrices]
+
+        elif self.method == '5G' and self.architecture == 'dMIMO_phase2_rel_15_type_II':
+
+            h_est = self.rb_mapper(h_est)
+            h_est_rb = tf.gather(h_est, tf.range(0, self.nfft, self.subcarriers_per_RB), axis=-1)
+            h_est_rb = tf.reduce_mean(h_est_rb, axis=-2, keepdims=False)
+            h_est_rb = tf.squeeze(h_est_rb)
+            h_est_rb = tf.cast(h_est_rb, self.dtype)
+
+            if self.L is None:
+                self.L = tf.reduce_min([4, h_est_rb.shape[1]//2])
+            else:
+                self.L = tf.reduce_min([self.L, h_est_rb.shape[1]//2])
+
+            if self.N_1 is None:
+                self.N_1 = h_est_rb.shape[1] // 2
+
+            V = self.build_sd_beam_grid()
+            V = tf.convert_to_tensor(V, dtype=self.dtype)
+
+            num_rx_ues = int((h_est.shape[2] - self.num_BS_Ant) /self.num_UE_Ant)
+
+            num_streams_per_UE = self.num_tx_streams // (num_rx_ues + 2)
+
+            W_rb_all = []
+
+            for rx_idx in range(num_rx_ues+1):
+
+                if rx_idx == 0:
+                    # BS
+                    rx_ant_idx = np.arange(0, self.num_BS_Ant)
+                    Ns = 2 * num_streams_per_UE 
+                else:
+                    rx_ant_idx = np.arange((rx_idx-1)*self.num_UE_Ant + self.num_BS_Ant, (rx_idx)*self.num_UE_Ant + self.num_BS_Ant)
+                    Ns = num_streams_per_UE
+
+                assert Ns <= 2, "Type II codebook only defined for rank 1 and rank 2"
+
+                curr_h_est = tf.gather(h_est_rb, rx_ant_idx, axis=0)
+
+                W_rb = self.type_II_precoder(curr_h_est, V, Ns)
+
+                W_rb_all.append(W_rb)
+
+            
+            h_est_quant = tf.concat(W_rb_all, axis=-1)  # [N_RB, N_tx, total_Ns]
+            h_est_quant = tf.repeat(h_est_quant, repeats=np.ceil(self.nfft/W_rb.shape[0]), axis=0)
+            h_est_quant = h_est_quant[:self.nfft, ...]
+            h_est_quant = h_est_quant[tf.newaxis, ...]  # [1, N_fft, N_tx, total_Ns]
+            h_est_quant = tf.repeat(h_est_quant, repeats=h_est.shape[5], axis=0)  # [N_syms, N_fft, N_tx, total_Ns]
+            h_est_quant = tf.transpose(h_est_quant, perm=[3, 2, 0, 1])
+            h_est_quant  = h_est_quant[tf.newaxis, tf.newaxis, :, tf.newaxis, :, :, :] # [1,1,total_Ns,1,N_tx,N_syms,N_fft]
+
+            CSI_feedback_report = h_est_quant
+
+        elif self.method == '5G' and self.architecture == 'dMIMO_phase2_CB1':
+
+            h_est = self.rb_mapper(h_est)
+            h_est_rb = tf.gather(h_est, tf.range(0, self.nfft, self.subcarriers_per_RB), axis=-1)
+            h_est_rb = tf.reduce_mean(h_est_rb, axis=-2, keepdims=False)
+            h_est_rb = tf.squeeze(h_est_rb)
+            h_est_rb = tf.cast(h_est_rb, self.dtype)
+
+            if self.L is None:
+                self.L = tf.reduce_min([4, h_est_rb.shape[1]//2])
+            else:
+                self.L = tf.reduce_min([self.L, h_est_rb.shape[1]//2])
+
+            if self.N_1 is None:
+                self.N_1 = h_est_rb.shape[1] // 2
+
+            V = self.build_sd_beam_grid()
+            V = tf.convert_to_tensor(V, dtype=self.dtype)
+
+            num_rx_ues = int((h_est.shape[2] - self.num_BS_Ant) /self.num_UE_Ant)
+
+            num_tx_ues = int((h_est.shape[4] - self.num_BS_Ant) /self.num_UE_Ant)
+
+            num_streams_per_UE = self.num_tx_streams // (num_rx_ues + 2)
+
+            W_rb_all = []
+
+            for rx_idx in range(num_rx_ues+1):
+
+                if rx_idx == 0:
+                    # BS
+                    rx_ant_idx = np.arange(0, self.num_BS_Ant)
+                    Ns = 2 * num_streams_per_UE 
+                else:
+                    rx_ant_idx = np.arange((rx_idx-1)*self.num_UE_Ant + self.num_BS_Ant, (rx_idx)*self.num_UE_Ant + self.num_BS_Ant)
+                    Ns = num_streams_per_UE
+
+                assert Ns <= 2, "Type II codebook only defined for rank 1 and rank 2"
+
+                for tx_idx in range(num_tx_ues+1):
+                    
+                    if tx_idx == 0:
+                        tx_ant_idx = np.arange(0, self.num_BS_Ant)
+                    else:
+                        tx_ant_idx = np.arange((tx_idx-1)*self.num_UE_Ant + self.num_BS_Ant, (tx_idx)*self.num_UE_Ant + self.num_BS_Ant)
+
+                    curr_h_est = tf.gather(tf.gather(h_est_rb, rx_ant_idx, axis=0), tx_ant_idx, axis=1)
+
+                    W_rb = self.type_II_precoder(curr_h_est, V, Ns)
+
+                    W_rb_all.append(W_rb)
+
+
         
         elif self.method == '5G' and self.architecture == 'dMIMO_phase1':
 
@@ -79,8 +204,8 @@ class quantized_CSI_feedback(Layer):
             for rx_ue_idx in range(num_rx_ues):
 
                 rx_ue_ant_idx = np.arange(rx_ue_idx*self.num_UE_Ant, (rx_ue_idx+1)*self.num_UE_Ant)
-                codebook = self.cal_codebook(tf.gather(h_est, rx_ue_ant_idx, axis=2))
-                PMI_temp, rate_for_selected_precoder_temp, precoding_matrices_temp = self.cal_PMI(codebook, tf.gather(h_est, rx_ue_ant_idx, axis=2))
+                codebook = self.cal_codebook_type_I(tf.gather(h_est, rx_ue_ant_idx, axis=2))
+                PMI_temp, rate_for_selected_precoder_temp, precoding_matrices_temp = self.cal_PMI_type_I(codebook, tf.gather(h_est, rx_ue_ant_idx, axis=2))
                 PMI.append(PMI_temp)
                 rate_for_selected_precoder.append(rate_for_selected_precoder_temp)
                 precoding_matrices.append(precoding_matrices_temp)
@@ -102,8 +227,8 @@ class quantized_CSI_feedback(Layer):
 
             for ue_idx in range(num_ues):
                 ue_ant_idx = np.arange(ue_idx*self.num_UE_Ant, (ue_idx+1)*self.num_UE_Ant)
-                codebook = self.cal_codebook(tf.gather(h_est, ue_ant_idx, axis=4))
-                PMI_temp, rate_for_selected_precoder_temp, precoding_matrices_temp = self.cal_PMI(codebook, tf.gather(h_est, ue_ant_idx, axis=4))
+                codebook = self.cal_codebook_type_I(tf.gather(h_est, ue_ant_idx, axis=4))
+                PMI_temp, rate_for_selected_precoder_temp, precoding_matrices_temp = self.cal_PMI_type_I(codebook, tf.gather(h_est, ue_ant_idx, axis=4))
                 PMI.append(PMI_temp)
                 rate_for_selected_precoder.append(rate_for_selected_precoder_temp)
                 precoding_matrices.append(precoding_matrices_temp)
@@ -123,8 +248,87 @@ class quantized_CSI_feedback(Layer):
             return CSI_feedback_report, codebook
         else:
             return CSI_feedback_report
+        
+    def type_II_precoder(self, curr_h_est, V, Ns):
+
+        curr_R = self.compute_tx_covariance(curr_h_est)
+        tx_ants = curr_h_est.shape[1]
+        curr_R = curr_R[:tx_ants//2,:tx_ants//2] + curr_R[tx_ants//2:,tx_ants//2:]
+
+        m1_list, m2_list, col_idx_list = self.select_L_beams(curr_R, V, return_column_indices=True)
+
+        W_1_tmp = tf.gather(V, col_idx_list, axis=1) # [N_tx, L]
+        zeros = tf.zeros_like(W_1_tmp)
+        top = tf.concat([W_1_tmp, zeros], axis=1)
+        bottom = tf.concat([zeros, W_1_tmp], axis=1)
+        W_1 = tf.concat([top, bottom], axis=0) # [2*N1*N2, 2L]
+            
+        # H_A[k] = H[k] @ W_1  => [N_rx, L, N_SB]
+        curr_h_est_reshaped = tf.transpose(curr_h_est, [2, 0, 1])  # [N_RB, N_rx, N_tx]
+        sb_ids = tf.range(curr_h_est_reshaped.shape[0], dtype=tf.int32) // int(self.rbs_per_subband)
+        curr_h_est_sb = tf.math.segment_mean(curr_h_est_reshaped, sb_ids) # [N_rx, N_rx, N_tx]
+        H_A = tf.matmul(curr_h_est_sb , W_1[tf.newaxis, ...])
+        H_A = tf.transpose(H_A, [1, 2, 0])  # [N_rx, L, N_SB]
+
+        G_sb = self.compute_unquantized_bcc_per_subband(H_A, Ns) # [N_sb, L, Ns]
+        G_sb_normalized = self.normalize_bcc(G_sb)
+
+        # Debugging assert to check stream orthogonality (before quantization)
+        normalized_max_off = self.assert_eq_41(H_A, G_sb)
+
+        # WB amplitude quantization
+        P_wb, k_wb = self.wb_coeff_quantize(G_sb_normalized) # TODO: check why it's mostly just giving me 1s
+        W_C1 = tf.linalg.diag(tf.transpose(P_wb, perm=[1, 0]))
+
+        # SB amplitude quantization
+        W_C2, p_l_i_t_2_all = self.sb_coeff_quantize(G_sb_normalized, P_wb, N_PSK=8) # [N_sb, L, Ns]
+        W_C2 = tf.transpose(W_C2, perm=[2,1,0])  # [Ns, L, N_sb]
+
+        # Assemble W2(t)
+        W_rb = self.assemble_W(W_1, W_C1, W_C2)  # [Ns, N_tx, N_sb]
+        W_rb = tf.transpose(W_rb, perm=[2,0,1])  # [N_sb, Ns, N_tx]
+
+        # Normalize
+        norm_factor = 1 / tf.math.sqrt(self.N_1 * self.N_2 * tf.reduce_sum((P_wb[tf.newaxis, ...] * p_l_i_t_2_all)**2, axis=1))
+        norm_factor = tf.cast(norm_factor, self.dtype)
+        W_rb = norm_factor[..., tf.newaxis] * W_rb
+        W_rb = tf.transpose(W_rb, perm=[0,2,1]) # [N_sb, N_tx, Ns]
+
+        # Validate normalization TODO: some bug here
+        # col_norm2 = tf.reduce_sum(tf.abs(W_rb)**2, axis=1)  # [N_sb, Ns]
+        # tf.debugging.assert_near(
+        #     col_norm2,
+        #     tf.ones_like(col_norm2),
+        #     atol=1e-3,
+        #     message="Codeword normalization failed"
+        # )
+
+        return W_rb
+        
+    def assert_eq_41(self, H_A, G_sb):
+
+        Ns = tf.shape(G_sb)[-1]
+
+        H_A = tf.transpose(H_A, perm=[2,0,1]) # [N_sb, N_rx, L]
+        gram_H_A = tf.matmul(H_A, H_A, adjoint_a=True) # [N_sb, L, L]
+        metric = tf.matmul(G_sb, gram_H_A, adjoint_a=True) # [N_sb, Ns, L]
+        metric = tf.matmul(metric, G_sb) # [N_sb, Ns, Ns]
+        metric_abs = tf.abs(metric)
+        off_mask = 1.0 - tf.eye(Ns, dtype=metric_abs.dtype)
+        off_vals = metric_abs * off_mask
+
+        max_off = tf.reduce_max(off_vals, axis=[-2, -1])
+
+        diag_vals = tf.linalg.diag_part(metric_abs)
+        diag_scale = tf.squeeze(tf.reduce_min(diag_vals, axis=-1, keepdims=True))
+
+        normalized_max_off = tf.reduce_max(max_off / diag_scale)
+
+        assert(normalized_max_off  < 1e-3), f"Orthogonality check failed, max off-diagonal value: {normalized_max_off.numpy()}" # Refer to eq. 41 of Fu et. al., "A Tutorial on Downlink Precoder Selection Strategies for 3GPP MIMO Codebooks", IEEE Access, 2023
+
+        return normalized_max_off
     
-    def cal_PMI(self, codebook, h_est):
+    def cal_PMI_type_I(self, codebook, h_est):
         
         h_est = self.rb_mapper(h_est)
 
@@ -396,9 +600,441 @@ class quantized_CSI_feedback(Layer):
 
         return eesm_avg_sinr
 
-    def cal_codebook(self, h_est):
+    def build_sd_beam_grid(self):
         """
-        Computes PMI codebook for 2/4 tx antennas
+        Reference: Lee et al., "CSI Feedback for Distributed MIMO", IEEE WCNC, 2022.
+
+        Build the candidate spatial-domain (SD) oversampled DFT beam grid exactly
+        as written in the paper (no Kronecker product).
+
+        Returns
+        -------
+        V : np.ndarray, shape (N1*N2, O1*N1*O2*N2)
+            Each column is a candidate SD beam v_{l1,l2}.
+            Columns are ordered with l2 major, l1 minor.
+        """
+
+        N1, N2 = self.N_1, self.N_2
+        O1, O2 = self.O_1, self.O_2
+
+        L1 = O1 * N1
+        L2 = O2 * N2
+
+        num_beams = L1 * L2
+        V = np.zeros((N1 * N2, num_beams), dtype=complex)
+
+        idx = 0
+
+        for l2 in range(L2):
+
+            # u_{l2} = [1, e^{j2πl2/(O2N2)}, ..., e^{j2πl2(N2-1)/(O2N2)}]^T
+            u_l2 = np.exp(
+                1j * 2 * np.pi * l2 * np.arange(N2) / (O2 * N2)
+            )
+
+            for l1 in range(L1):
+
+                # v_{l1,l2} =
+                # [ u_l2,
+                #   e^{j2πl1/(O1N1)} u_l2,
+                #   ...
+                #   e^{j2πl1(N1-1)/(O1N1)} u_l2 ]^T
+
+                beam_blocks = []
+                for n1 in range(N1):
+                    phase = np.exp(1j * 2 * np.pi * l1 * n1 / (O1 * N1))
+                    beam_blocks.append(phase * u_l2)
+
+                v_l1_l2 = np.concatenate(beam_blocks, axis=0)
+
+                # Normalize (unit norm, consistent with Type-II usage)
+                # v_l1_l2 /= np.linalg.norm(v_l1_l2)
+
+                V[:, idx] = v_l1_l2
+                idx += 1
+
+        return V
+    
+    def compute_tx_covariance(self, h_est):
+        """
+        h_est: [N_rx, N_tx, N_RB]
+        returns: [N_tx, N_tx]
+        """
+
+        H = tf.cast(h_est, self.dtype)   # <-- THIS fixes complex128 -> complex64
+
+        if H.shape.rank != 3:
+            raise ValueError(f"h_est must be rank-3 [N_rx,N_tx,N_RB], got {H.shape}")
+
+        # [N_RB, N_rx, N_tx]
+        Hk = tf.transpose(H, perm=[2, 0, 1])
+
+        # Rk = Hk^H Hk : [N_RB, N_tx, N_tx]
+        Rk = tf.matmul(Hk, Hk, adjoint_a=True)
+
+        # average over RBs
+        R = tf.reduce_mean(Rk, axis=0)
+
+        return R
+
+    def select_L_beams(self, R, V, L=None, return_column_indices=True):
+        """
+        Reference: Fu et. al., "A Tutorial on Downlink Precoder Selection Strategies for 3GPP MIMO Codebooks", IEEE Access, 2023, Algorithm 1 beam selection.
+        Modified to correctly handle N2 = 1 (1D array): only exclude n1 per iteration.
+
+        Inputs
+        ------
+        R : np.ndarray, shape (P, P) where P = N1*N2
+            TX-side covariance.
+        V : np.ndarray, shape (P, L1*L2)
+            Beam grid from build_sd_beam_grid().
+        L : int or None
+            Number of beams to select. If None, uses self.L.
+        """
+
+        N1, N2 = int(self.N_1), int(self.N_2)
+        O1, O2 = int(self.O_1), int(self.O_2)
+        L = int(self.L if L is None else L)
+
+        L1 = O1 * N1
+        L2 = O2 * N2
+        P  = N1 * N2
+
+        if V.shape != (P, L1 * L2):
+            raise ValueError(f"V has shape {V.shape}, expected ({P}, {L1*L2}).")
+
+        if R.shape != (P, P):
+            raise ValueError(f"R must be ({P},{P}); got {R.shape}.")
+
+        # --- feasibility checks ---
+        if N2 == 1:
+            # only N1 distinct orthogonal beams available (for a fixed q1)
+            if L > N1:
+                raise ValueError(f"For N2=1, must have L <= N1. Got L={L}, N1={N1}.")
+        else:
+            # Fu Algorithm 1 removes one n1 and one n2 per iteration => L <= min(N1,N2)
+            if L > min(N1, N2):
+                raise ValueError(f"L={L} too large; must satisfy L <= min(N1,N2)={min(N1,N2)}.")
+
+        # column index mapping: l2-major, l1-minor
+        def col_from_m(m1, m2):
+            return int(m2) * L1 + int(m1)
+
+        def metric_for_col(col_idx):
+            v = V[:, col_idx]
+            v = v[:, np.newaxis]  # make column vector
+            return float(np.real(np.vdot(v, R @ v)))
+
+        # ---- i = 0: search over all (m1,m2) ----
+        best_val = -np.inf
+        best_m1 = 0
+        best_m2 = 0
+        for m2 in range(L2):
+            base = m2 * L1
+            for m1 in range(L1):
+                col = base + m1
+                val = metric_for_col(col)
+                if val > best_val:
+                    best_val = val
+                    best_m1 = m1
+                    best_m2 = m2
+
+        # offsets from first selected beam
+        q1 = best_m1 % O1
+        q2 = best_m2 % O2
+
+        # coarse indices
+        n1_0 = tf.math.ceil(best_m1 / O1)
+        n2_0 = tf.math.ceil(best_m2 / O2)  # will be 0 when N2=1
+
+        # remaining candidate sets
+        N1_set = set(range(N1))
+        N1_set.discard(int(n1_0))
+
+        if N2 > 1:
+            N2_set = set(range(N2))
+            N2_set.discard(n2_0)
+        else:
+            N2_set = {0}  # fixed
+
+        m1_list = [best_m1]
+        m2_list = [best_m2]
+        col_idx_list = [col_from_m(best_m1, best_m2)]
+
+        # ---- i = 1..L-1 ----
+        for _ in range(1, L):
+
+            best_val = -np.inf
+            best_n1 = None
+            best_n2 = None
+
+            # For N2=1 this loops once with n2=0
+            for n2 in N2_set:
+                m2 = O2 * n2 + q2
+                for n1 in N1_set:
+                    m1 = O1 * n1 + q1
+                    col = col_from_m(m1, m2)
+                    val = metric_for_col(col)
+                    if val > best_val:
+                        best_val = val
+                        best_n1 = n1
+                        best_n2 = n2
+
+            # commit selection
+            m1_i = O1 * best_n1 + q1
+            m2_i = O2 * best_n2 + q2
+
+            m1_list.append(int(m1_i))
+            m2_list.append(int(m2_i))
+            col_idx_list.append(col_from_m(m1_i, m2_i))
+
+            # remove used indices
+            N1_set.discard(best_n1)
+            if N2 > 1:
+                N2_set.discard(best_n2)  # only in true 2D case
+
+        if return_column_indices:
+            return m1_list, m2_list, col_idx_list
+        return m1_list, m2_list
+    
+    def compute_unquantized_bcc_per_subband(self, H_A, Ns):
+        """
+        Reference: Fu et. al., "A Tutorial on Downlink Precoder Selection Strategies for 3GPP MIMO Codebooks", IEEE Access, 2023
+        
+        Compute unquantized Type-II BCC coefficients per subband.
+
+        Parameters
+        ----------
+        H_A : tf.Tensor, shape [N_rx, L, N_sb]
+            Projected channel H_A[k] = H[k] B.
+
+        Returns
+        -------
+        G_sb : tf.Tensor, shape [N_sb, L, Ns]
+            Unquantized beam-domain coefficient matrix per subband.
+            Each subband gets its own top-Ns eigenvectors of R_A^(s).
+        """
+        H_A = tf.cast(H_A, self.dtype)
+
+        # [N_sb, N_rx, L]
+        Hk = tf.transpose(H_A, [2, 0, 1])
+
+        # Per-RB beam-domain gram matrix: G = Hk^H Hk  -> [N_sb, L, L]
+        G = tf.matmul(Hk, Hk, adjoint_a=True)
+
+        # Eigen-decomposition per subband (Hermitian): returns ascending evals
+        evals, evecs = tf.linalg.eigh(G)        # evecs: [N_sb, L, L]
+        idx = tf.argsort(tf.abs(evals), axis=-1, direction="DESCENDING")[:, :Ns]
+        G_sb = tf.gather(evecs, idx[0,:], axis=-1)                    # [N_sb, L, Ns] largest Ns eigenvectors
+
+        return G_sb
+    
+    def normalize_bcc(self, G_sb):
+        """
+        Reference: Fu et. al., "A Tutorial on Downlink Precoder Selection Strategies for 3GPP MIMO Codebooks", IEEE Access, 2023
+        BCC normalization (Eq. 42–45).
+
+        G_sb : [N_sb, L, Ns]
+
+        Returns
+        -------
+        G_sb_norm : [N_sb, L, Ns]
+        """
+        
+        G_sb = tf.cast(G_sb, self.dtype)
+
+        # Power summed over subbands
+        power = tf.reduce_sum(tf.abs(G_sb)**2, axis=0)  # [L, Ns]
+
+        # Argmax over beam index
+        i_prime = tf.argmax(power, axis=0)              # [Ns]
+
+        N_sb = tf.shape(G_sb)[0]
+        Ns   = tf.shape(G_sb)[2]
+
+        # Gather reference coefficients w_{2,i',t}^{(l)}
+        ref = tf.stack([
+            G_sb[:, i_prime[l], l] for l in range(Ns)
+        ], axis=-1)                                     # [N_sb, Ns]
+
+        # Normalize column-wise
+        G_sb_norm = G_sb / (ref[:, tf.newaxis, :])
+
+        return G_sb_norm
+    
+    def get_typeII_wb_amplitude_levels_P1(self):
+        """
+        TS 38.214 Type-II WB amplitude levels P1 (k^(1)=0..7).
+        Returns real tensor of shape [8].
+        """
+        P1 = [0.0,
+            1.0/64.0,
+            1.0/32.0,
+            1.0/16.0,
+            1.0/8.0,
+            1.0/4.0,
+            1.0/2.0,
+            1.0]
+        return tf.constant(P1, dtype=self.real_dtype)
+
+
+    def wb_coeff_quantize(self, W2_tilde_sb):
+        """
+        Reference: Fu et. al., "A Tutorial on Downlink Precoder Selection Strategies for 3GPP MIMO Codebooks", IEEE Access, 2023
+        Step 4 (Eq. 46): wideband coefficient calculation and quantization,
+        using TS 38.214 WB amplitude codebook P1.
+
+        Inputs
+        ------
+        W2_tilde_sb : tf.Tetf.abs(tf.abs(D_l) - P2[tf.newaxis, tf.newaxis, :])nsor, shape [N_sb, L, Ns]
+            Normalized BCC matrix (after Fu Eqs. 42-45), per subband.
+        i_prime : tf.Tensor or None, shape [Ns]
+            Strongest-beam index per layer (Fu Eq. 43). If provided, we force
+            the strongest-beam WB amplitude to 1 (k^(1)=7) explicitly.
+
+        Outputs
+        -------
+        P_wb : tf.Tensor, shape [L, Ns]
+            Quantized WB amplitudes p_{l,i}^{(1)}.
+        k_wb : tf.Tensor, shape [L, Ns], dtype int32
+            WB amplitude indices k^{(1)} in {0..7}.
+        """
+        W2_tilde_sb = tf.cast(W2_tilde_sb, self.dtype)          # [N_sb, L, Ns]
+        P1 = self.get_typeII_wb_amplitude_levels_P1()          # [8] real
+
+        # max_t |w_{2,i,t}^{(l)}| over subbands t
+        mag_max = tf.reduce_max(tf.abs(W2_tilde_sb), axis=0)   # [L, Ns], real
+
+        # Nearest-neighbor quantization to P1:
+        # dist: [L, Ns, 8]
+        dist = tf.abs(mag_max[..., tf.newaxis] - P1[tf.newaxis, tf.newaxis, :])
+        k_wb = tf.argmin(dist, axis=-1, output_type=tf.int32)  # [L, Ns]
+        P_wb = tf.gather(P1, k_wb)                             # [L, Ns] real
+
+        return P_wb, k_wb
+
+
+    def get_typeII_sb_amplitude_levels_P2(self):
+        # TS 38.214 Table 5.2.2.2.3-3: {sqrt(1/2), 1}
+        return tf.convert_to_tensor([tf.sqrt(0.5), 1.0], dtype=self.real_dtype)
+
+    def sb_coeff_quantize(self, G_sb_normalized, P_wb, N_PSK=8, eps=1e-12):
+        """
+        Subband amplitude quantization using P2={1/2,1}.
+
+        Inputs
+        ------
+        G_sb_normalized : tf.Tensor [N_sb, L, Ns] complex
+            Normalized BCC coefficients (after Fu Eq. 42-45 style normalization)
+        P_wb : tf.Tensor [L, Ns] real
+            WB amplitudes from Step 4
+
+        Returns
+        -------
+        P_sb : tf.Tensor [N_sb, L, Ns] real
+            Quantized SB amplitudes
+        k_sb : tf.Tensor [N_sb, L, Ns] int32
+            Indices in {0,1} mapping to {1/2,1}
+        """
+        G = tf.cast(G_sb_normalized, self.dtype)  # [N_sb, L, Ns]
+        P_wb = tf.cast(P_wb, self.dtype)
+
+        P2 = self.get_typeII_sb_amplitude_levels_P2()  # [2]
+
+        ph = tf.constant([2*np.pi*c/N_PSK for c in range(N_PSK)],
+                        dtype=self.real_dtype)          # [N_PSK]
+
+        # calculate quantized subband amplitudes and phases
+        W_C2_l = []
+        p_l_i_t_2_all = []
+        for l in range(G_sb_normalized.shape[-1]):
+            W_C1_l = tf.linalg.diag(P_wb[:,l])
+            W_C1_l_inv = tf.linalg.inv(W_C1_l)
+            W_2_l = tf.gather(G_sb_normalized, l, axis=-1)
+            D_l = tf.matmul(W_C1_l_inv[tf.newaxis, ...], W_2_l[..., tf.newaxis])
+
+            abs_dist = tf.abs(tf.abs(D_l) - P2[tf.newaxis, tf.newaxis, :])
+            p_l_i_t_2_idx = tf.argmin(abs_dist, axis=-1, output_type=tf.int32)                             # [N_sb,L]
+            p_l_i_t_2 = tf.gather(P2, p_l_i_t_2_idx)
+            p_l_i_t_2_all.append(p_l_i_t_2[..., tf.newaxis])
+
+            theta_0_2pi = tf.math.mod(tf.math.angle(D_l) + 2*np.pi, 2*np.pi)
+            phi_dist = tf.abs(theta_0_2pi - ph[tf.newaxis, tf.newaxis, :])
+            phi_l_i_t_idx = tf.argmin(phi_dist, axis=-1, output_type=tf.int32)                             # [N_sb,L]
+            phi_l_i_t = tf.gather(ph, phi_l_i_t_idx)
+
+            p_phi = tf.cast(p_l_i_t_2, self.dtype) * tf.exp(
+                1j * tf.cast(phi_l_i_t, self.dtype)
+            )
+
+            W_C2_l.append(p_phi[..., tf.newaxis])
+
+        W_C2_l = tf.concat(W_C2_l, axis=-1)
+        p_l_i_t_2_all = tf.concat(p_l_i_t_2_all, axis=-1)
+
+
+        return W_C2_l, p_l_i_t_2_all 
+    
+    def phase_quantize_psk(self, G_sb_normalized, N_PSK=4):
+        """
+        Phase quantization to N_PSK-PSK (N_PSK typically 4 or 8).
+
+        Returns
+        -------
+        E_phi : tf.Tensor [N_sb, L, Ns] complex
+            exp(j * quantized_phase)
+        c_idx : tf.Tensor [N_sb, L, Ns] int32
+            phase indices in {0,...,N_PSK-1}
+        """
+        if N_PSK not in (4, 8):
+            raise ValueError(f"N_PSK must be 4 or 8; got {N_PSK}")
+
+        G = tf.cast(G_sb_normalized, self.dtype)
+        ang = tf.math.angle(G)                                  # [-pi,pi]
+        ang = tf.where(ang < 0.0, ang + 2*np.pi, ang)          # [0,2pi)
+
+        ph = tf.constant([2*np.pi*c/N_PSK for c in range(N_PSK)],
+                        dtype=self.real_dtype)          # [N_PSK]
+
+        # circular distance to each PSK angle
+        diff = ang[..., tf.newaxis] - ph[tf.newaxis, tf.newaxis, tf.newaxis, tf.newaxis, :]
+        diff = tf.math.floormod(diff + np.pi, 2*np.pi) - np.pi
+        c_idx = tf.argmin(tf.abs(diff), axis=-1, output_type=tf.int32)  # [N_sb,L,Ns]
+        c_idx = tf.squeeze(c_idx, axis=0)
+
+        ph_q = tf.gather(ph, c_idx)                              # [N_sb,L,Ns]
+        E_phi = tf.exp(1j * tf.cast(ph_q, self.dtype)) # [N_sb,L,Ns] complex
+        E_phi = tf.cast(E_phi, self.dtype)
+
+        return E_phi, c_idx
+
+    def assemble_W(self, W_1, W_C1, W_C2):
+        """
+        Assemble quantized W2 per subband.
+
+        W_1 : [L, Ns] real
+        W_C1 : [L, Ns] real
+        W_C2 : [Ns, L, N_sb] complex
+        E_phi: [N_sb, L, Ns] complex
+
+        Returns
+        -------
+        W2_q : [N_sb, L, Ns] complex
+        """
+        W_1 = tf.cast(W_1, self.dtype)
+        W_1 = W_1[tf.newaxis, :, :]                     # [1,L,L]
+        W_C1 = tf.cast(W_C1, self.dtype)           # [Ns, L, L]
+        W_C2 = tf.cast(W_C2, self.dtype)                # [Ns,L,N_sb]
+
+        W = tf.matmul(W_1, W_C1)        # [1,L,L] @ [Ns, L, L] -> [Ns, L, L]
+        W = tf.matmul(W, W_C2)        # [Ns,L,L] @ [Ns,L,N_sb] -> [Ns,L,N_sb]
+
+        return W
+
+
+    def cal_codebook_type_I(self, h_est):
+        """
+        Computes Type I PMI codebook for 2/4 tx antennas
         Consult 3GPP TS 38.214 Section 5 for details
         """
 
@@ -406,63 +1042,44 @@ class quantized_CSI_feedback(Layer):
         P_CSI_RS = N_t
 
         if N_t == 2:
-            # i_2 ∈ {0,1,2,3} gives the per-antenna relative phase φ_n = exp(jπ n / 2)
-            i_11 = np.arange(0, self.N_1 * self.O_1)
-            i_12 = np.arange(0, self.N_2 * self.O_2)
-            i_2  = np.arange(0, 4)  # phase sweep like your 4-TX code
-
-            l_all = i_11
-            m_all = i_12
-            n_all = i_2
 
             if self.num_tx_streams == 1:
-                # W: [l, m, n, N_t, 1]
-                W = np.zeros((len(l_all), len(m_all), len(n_all), N_t, 1), dtype=complex)
+                # Table 5.2.2.2.1-1, v=1, codebook indices 0..3
+                # W = (1/sqrt(2)) * [1; exp(j*pi*n/2)], n=0..3
+                n_all = np.arange(0, 4)
 
-                for l in l_all:
-                    for m in m_all:
-                        v_lm = self.compute_v_lm(l, m)  # shape (2,1) when N_t=2
-                        for n in n_all:
-                            phi_n = np.exp(1j * np.pi * n / 2)
-                            # Apply per-antenna relative phase [1, φ_n]^T ⊙ v_lm
-                            d = np.array([[1.0], [phi_n]], dtype=complex)   # (2,1)
-                            W[l, m, n, :, 0] = (v_lm * d).ravel()
+                W = np.zeros((len(n_all), N_t, self.num_tx_streams), dtype=complex)
 
-                W = 1 / np.sqrt(P_CSI_RS) * W
+                for n in n_all:
+                    phi_n = np.exp(1j * np.pi * n / 2)  # 1, j, -1, -j
+                    W[n, :, 0] = np.array([1.0, phi_n], dtype=complex)
+
+                # normalize
+                W = 1 / np.sqrt(2) * W
 
             elif self.num_tx_streams == 2:
-                # Use the same (l, m) and a frequency shift (k1, k2) like your 4-TX 2-stream case
-                i_13 = np.arange(0, 2)
-                k_1 = np.array((0, self.O_1))
-                k_2 = np.array((0, 0))
+                # Table 5.2.2.2.1-1, v=2, codebook indices 0..1
+                # index 0: (1/2) * [[1,  1],
+                #                  [1, -1]]
+                # index 1: (1/2) * [[1,  1],
+                #                  [j, -j]]
+                i_cb = np.arange(0, 2)
 
-                # W: [l, m, i13, n, N_t, 2]
-                W = np.zeros((len(l_all), len(m_all), len(i_13), len(n_all), N_t, 2), dtype=complex)
+                W = np.zeros((len(i_cb), N_t, self.num_tx_streams), dtype=complex)
 
-                for l in l_all:
-                    for m in m_all:
-                        v_lm = self.compute_v_lm(l, m)  # (2,1)
-                        for i_13_idx in i_13:
-                            l_ = l + k_1[i_13_idx]
-                            m_ = m + k_2[i_13_idx]
-                            v_lm_shift = self.compute_v_lm(l_, m_)  # (2,1)
+                W[0, :, :] = np.array([[1,  1],
+                                    [1, -1]], dtype=complex)
 
-                            for n in n_all:
-                                phi_n = np.exp(1j * np.pi * n / 2)
-                                # Columns mirror your 4-TX sign/phase pattern:
-                                # col1 = [1,  +φ_n]^T ⊙ v_lm
-                                # col2 = [1,  -φ_n]^T ⊙ v_lm_shift
-                                d_pos = np.array([[1.0], [phi_n]], dtype=complex)
-                                d_neg = np.array([[1.0], [-phi_n]], dtype=complex)
+                W[1, :, :] = np.array([[1,   1],
+                                    [1j, -1j]], dtype=complex)
 
-                                col1 = (v_lm * d_pos).reshape(N_t, 1)         # (2,1)
-                                col2 = (v_lm_shift * d_neg).reshape(N_t, 1)    # (2,1)
-                                W[l, m, i_13_idx, n, :, :] = np.hstack((col1, col2))
-
-                W = 1 / np.sqrt(2 * P_CSI_RS) * W
+                # normalize
+                W = 1 / 2 * W
 
             else:
-                raise Exception(f"5G standard PMI feedback for {N_t} tx and {self.num_tx_streams} streams not implemented. Supported for 1–2 streams when N_t=2.")
+                raise Exception(
+                    f"2-port Type I Single-Panel codebook supports 1 or 2 layers only; got {self.num_tx_streams}."
+                )
         elif N_t == 4:
 
             if self.num_tx_streams == 1:

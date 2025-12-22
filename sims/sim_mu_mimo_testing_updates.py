@@ -90,15 +90,15 @@ if __name__ == "__main__":
     cfg.perfect_csi = False
     cfg.rank_adapt = False      # enable/disable rank adaptation
     cfg.link_adapt = False      # enable/disable link adaptation
-    cfg.csi_prediction = True
+    cfg.csi_prediction = False
     cfg.use_perfect_csi_history_for_prediction = False
     cfg.channel_prediction_method = "two_mode" # "old", "two_mode", "two_mode_tf"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
-    modulation_order = 4
+    modulation_order = 2
     cfg.code_rate = 2/3
     if arguments == []:
-        mobility = 'high_mobility'
+        mobility = 'low_mobility'
         drop_idx = '5'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     # cfg.ns3_folder = "ns3/channels/LowMobility/"
@@ -106,14 +106,15 @@ if __name__ == "__main__":
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
     cfg.enable_rxsquad = False
     cfg.precoding_method = "ZF"
-    # cfg.precoding_method = "ZF_QUANTIZED_CSI" # Uncomment to enable quantized CSI feedback
-    # cfg.precoding_method = "DIRECT_QUANTIZED_CSI" # Does not work well for MU-MIMO
+    cfg.PMI_feedback_architecture = 'dMIMO_phase2_rel_15_type_II' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_CB1'
+    # cfg.precoding_method = "ZF_QUANTIZED_CSI_RVQ" # Uncomment to enable quantized CSI feedback
+    # cfg.precoding_method = "DIRECT_QUANTIZED_CSI_RVQ" # Does not work well for MU-MIMO
 
 
     # Select Number of TxSquad and RxSquad UEs to use.
-    ns3cfg.num_txue_sel = 8
+    ns3cfg.num_txue_sel = 6
     if arguments == []:
-        rx_ues_arr = [2]
+        rx_ues_arr = [3]
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)
