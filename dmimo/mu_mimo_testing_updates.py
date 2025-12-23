@@ -268,19 +268,19 @@ class MU_MIMO(Model):
         # LMMSE equalization
         x_hat, no_eff = self.lmmse_equ([y, h_hat, err_var, no])
 
-        h_hat_reshaped = tf.transpose(h_hat, perm=[0,1,3,5,6,2,4])
-        g_mmse = tf.matmul(h_hat_reshaped, h_hat_reshaped, adjoint_b=True)
-        g_mmse = tf.matmul(h_hat_reshaped, matrix_inv(g_mmse), adjoint_a = True)
-        gh = tf.matmul(g_mmse, h_hat_reshaped)
-        print("example_post_equalization_matrix: ", tf.abs(gh[0,0,0,0,0,:,:]))
+        # h_hat_reshaped = tf.transpose(h_hat, perm=[0,1,3,5,6,2,4])
+        # g_mmse = tf.matmul(h_hat_reshaped, h_hat_reshaped, adjoint_b=True)
+        # g_mmse = tf.matmul(h_hat_reshaped, matrix_inv(g_mmse), adjoint_a = True)
+        # gh = tf.matmul(g_mmse, h_hat_reshaped)
+        # print("example_post_equalization_matrix: ", tf.abs(gh[0,0,0,0,0,:,:]))
         
-        off_mask = 1.0 - tf.eye(gh.shape[-1], dtype=gh.dtype)
-        off_vals = gh * off_mask
-        max_off_val = tf.reduce_max(tf.abs(off_vals))
-        print("max_off_val = ", max_off_val)
+        # off_mask = 1.0 - tf.eye(gh.shape[-1], dtype=gh.dtype)
+        # off_vals = gh * off_mask
+        # max_off_val = tf.reduce_max(tf.abs(off_vals))
+        # print("max_off_val = ", max_off_val)
 
-        h_hat_nmse = tf.reduce_mean(tf.abs(h_hat_reshaped - h_hat_perfect)**2) / tf.reduce_mean(tf.abs(h_hat_reshaped))
-        print("h_hat_nmse: ", h_hat_nmse)
+        # h_hat_nmse = tf.reduce_mean(tf.abs(h_hat_reshaped - h_hat_perfect)**2) / tf.reduce_mean(tf.abs(h_hat_reshaped))
+        # print("h_hat_nmse: ", h_hat_nmse)
 
         # Soft-output QAM demapper
         llr = self.demapper([x_hat, no_eff])
@@ -778,6 +778,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
+    print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
 

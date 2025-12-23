@@ -359,25 +359,7 @@ def mumimo_zf_precoder_quantized_new(x, h_quantized, ue_indices, ue_ranks, retur
     num_user_ant = np.sum(len(val) for val in ue_indices)
     assert num_user_streams == num_streams_per_tx, "total number of streams must match"
 
-    arr_indices = tf.reshape(tf.range(num_user_ant), (-1, 2))
-
     h_zf = tf.transpose(h_quantized, perm=[0,3,4,2,1])  # [B, num_ofdm_symbols, num_subcarriers, num_tx_ants, num_streams]
-
-    # if num_streams_per_tx == 2:
-    #     w0 = h_zf[..., 0:1]
-    #     w1 = h_zf[..., 1:2]
-
-    #     w0 = w0 / tf.cast((tf.sqrt(tf.reduce_sum(tf.abs(w0)**2, axis=-2, keepdims=True)) + 1e-12), w0.dtype)
-
-    #     # gram–Schmidt
-    #     proj = tf.reduce_sum(tf.math.conj(w0) * w1, axis=-2, keepdims=True)
-    #     w1 = w1 - w0 * proj
-    #     w1 = w1 / tf.cast((tf.sqrt(tf.reduce_sum(tf.abs(w1)**2, axis=-2, keepdims=True)) + 1e-12), w1.dtype)
-
-    #     g = tf.concat([w0, w1], axis=-1)  # [B,Nsym,Nsc,num_tx_ants, num_streams]
-    #     g = g[tf.newaxis, ...]
-    # else:
-    #     raise Exception("Have not implemented this part yet")
 
     reg = 0.0
     gram = tf.matmul(h_zf, h_zf, adjoint_a=True)  # W^H W: [B,Nsym,Nsc,Ns,Ns]
@@ -385,13 +367,6 @@ def mumimo_zf_precoder_quantized_new(x, h_quantized, ue_indices, ue_ranks, retur
     gram_inv = tf.linalg.inv(gram + tf.cast(reg, gram.dtype) * I)
     g = tf.matmul(h_zf, gram_inv)  # [B,Nsym,Nsc,Nt,Ns]
     g = g[tf.newaxis, ...]
-
-    # Compute pseudo inverse for precoding
-    # The following lines are commented out to handle singular matrix cases
-    # g = tf.matmul(h_zf, h_zf, adjoint_b=True) # [B, num_ofdm_symbols, num_subcarriers, num_streams, num_streams]
-    # g = tf.matmul(h_zf, matrix_inv(g), adjoint_a=True) # [B, num_ofdm_symbols, num_subcarriers, num_tx_ants, num_streams]
-    # Handle cases that are even singular
-    # g = complex_pinv(h_zf)  # [B, num_ofdm_symbols, num_subcarriers, num_tx_ants, num_streams]
 
     # Normalize each column to unit power
     norm = tf.sqrt(tf.reduce_sum(tf.abs(g)**2, axis=-2, keepdims=True))
