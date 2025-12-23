@@ -268,27 +268,13 @@ class MU_MIMO(Model):
         # LMMSE equalization
         x_hat, no_eff = self.lmmse_equ([y, h_hat, err_var, no])
 
-        # h_hat_reshaped = tf.transpose(h_hat, perm=[0,1,3,5,6,2,4])
-        # g_mmse = tf.matmul(h_hat_reshaped, h_hat_reshaped, adjoint_b=True)
-        # g_mmse = tf.matmul(h_hat_reshaped, matrix_inv(g_mmse), adjoint_a = True)
-        # gh = tf.matmul(g_mmse, h_hat_reshaped)
-        # print("example_post_equalization_matrix: ", tf.abs(gh[0,0,0,0,0,:,:]))
-        
-        # off_mask = 1.0 - tf.eye(gh.shape[-1], dtype=gh.dtype)
-        # off_vals = gh * off_mask
-        # max_off_val = tf.reduce_max(tf.abs(off_vals))
-        # print("max_off_val = ", max_off_val)
-
-        # h_hat_nmse = tf.reduce_mean(tf.abs(h_hat_reshaped - h_hat_perfect)**2) / tf.reduce_mean(tf.abs(h_hat_reshaped))
-        # print("h_hat_nmse: ", h_hat_nmse)
-
         # Soft-output QAM demapper
         llr = self.demapper([x_hat, no_eff])
 
         # Hard-decision bit error rate
         d_hard = tf.cast(llr > 0, tf.float32)
         uncoded_ber = compute_ber(d, d_hard).numpy()
-        print(f"\nUncoded BER: {uncoded_ber}\n")
+        # print(f"\nUncoded BER: {uncoded_ber}\n")
 
         # Hard-decision symbol error rate
         x_hard = self.mapper(d_hard)
@@ -355,8 +341,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
 
     # Reset UE selection. Start with all TX and RX UEs selected.
-    # TODO: verify with Donald if this implementation is good
-    # TODO: check if tx UEs are being handled properly downstream
     tmp_num_rxue_sel = ns3cfg.num_rxue_sel
     tmp_num_txue_sel = ns3cfg.num_txue_sel
     ns3cfg.reset_ue_selection()
@@ -388,6 +372,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
             ue_indices.append(list(np.arange(start, end)))
         cfg.scheduled_tx_ue_indices = np.array(ue_indices)
+    else:
+        raise Exception ("Scheduling not supported in this version.")
 
     # dMIMO channels from ns-3 simulator
     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
@@ -420,9 +406,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     elif cfg.csi_prediction is True:
         rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, ns3cfg)
         # Get CSI history
-        # TODO: optimize channel estimation and optimization procedures (currently very slow)
-        # TODO: Add graph ESN implementation here as an option
-        
+        # TODO: optimize channel estimation and optimization procedures (currently very slow)        
 
         start_time = time.time()
         if cfg.use_perfect_csi_history_for_prediction:
@@ -541,73 +525,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                            sto_vals=cfg.random_sto_vals)
     _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                 batch_size=cfg.num_slots_p2)
-
-    ###############################################################################################################################################
-    # Testing scheduler without explicit CSI calculation for now. Using right singular vectors and singular values as a surrogate for CSI.
-    ###############################################################################################################################################
-
-    if cfg.scheduling: # Different from UE selection. Now, you treat the number of RX Squad UEs from UE selection as the maximum number to schedule. You schedule somewhere between 1 to ns3cfg.num_rxue_sel UEs in the RX Squad
-        # TODO: Currently only exhaustive search is implemented fully
-        # TODO: Currently, we use only 1 (outdated) CSI feedback to do RX UE selection. Should base it on some long-term statistics to reduce the impact of feedback delay
-
-        # Get right singular vectors and singular values of effective channels 
-        num_rx_nodes = ns3cfg.num_rxue_sel+1
-        h_reconstructed = np.zeros((h_freq_csi.shape), dtype=complex)
-        h_reconstructed = h_reconstructed[:, :, :(num_rx_nodes+1)*cfg.ue_ranks[0], ...]
-        for rx_node_idx in range(num_rx_nodes):
-
-            if rx_node_idx == 0:
-                ant_idx = np.arange(4)
-                num_streams = 2
-                stream_idx = np.arange(2)
-            else:
-                ant_idx = np.arange((rx_node_idx-1) * 2 + 4, rx_node_idx * 2 + 4)
-                num_streams = 1
-                stream_idx = np.arange((rx_node_idx-1) * cfg.ue_ranks[0] + cfg.ue_ranks[0]*2, rx_node_idx * cfg.ue_ranks[0] + cfg.ue_ranks[0]*2)
-
-            curr_h = tf.gather(h_freq_csi, ant_idx, axis=2)
-
-            s, _, Vh = tf.linalg.svd(curr_h, full_matrices=False)
-            s = tf.cast(s, Vh.dtype)
-            s = tf.expand_dims(s, axis=-2)
-
-            curr_h_reconstructed = Vh * s
-            curr_h_reconstructed = curr_h_reconstructed[:,:, :num_streams, ...]
-            # curr_h_reconstructed = curr_h_reconstructed[:,:,:,tf.newaxis,...]
-
-            h_reconstructed[:, :, stream_idx, ...] = tf.transpose(curr_h_reconstructed, [0, 1, 2, 3, 4, 6, 5])
-        
-        h_reconstructed = tf.convert_to_tensor(h_reconstructed)
-
-        # Scheduling
-        mu_mimo_scheduler = MUMIMOScheduler(rx_snr_db, max_rx_UEs_scheduled=tmp_num_rxue_sel)
-        scheduled_rx_nodes = mu_mimo_scheduler(h_reconstructed)
-        scheduled_rx_UEs = scheduled_rx_nodes[1:] - 1 # Assuming gNB was scheduled
-        
-        # Updating system parameters based on scheduling    
-        rx_ue_mask = np.zeros(10)
-        tx_ue_mask = np.zeros(10)
-        rx_ue_mask[scheduled_rx_UEs] = 1
-        tx_ue_mask[:tmp_num_txue_sel] = 1
-        ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
-
-        ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
-        for node in scheduled_rx_nodes[1:]:
-            start = (node - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
-            end = node * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
-            ue_indices.append(list(np.arange(start, end)))
-        cfg.scheduled_rx_ue_indices = np.array(ue_indices)
-        cfg.num_scheduled_ues = scheduled_rx_UEs.size
-        cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
-
-        # TODO: Currently, TX UEs not selected intelligently (just select the first tmp_num_txue_sel UEs)
-        ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
-        scheduled_tx_UEs = np.arange(1, tmp_num_txue_sel+1)
-        for ue_idx in scheduled_tx_UEs:
-            start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
-            end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
-            ue_indices.append(list(np.arange(start, end)))
-        cfg.scheduled_tx_ue_indices = np.array(ue_indices)
     
     # Pick the selected UE's channels
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)
@@ -617,108 +534,117 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     rank_feedback_report, n_var, mcs_feedback_report = \
         do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
 
-    if "QUANTIZED_CSI_RVQ" in cfg.precoding_method:
-        num_tx_ant = h_freq_csi.shape[4]
-        donald_hack = True
-        quantization_debug = False
-        rvq = RandomVectorQuantizer(bits_per_codeword=15, vector_dim=num_tx_ant, seed=42)
-        # rvq = RandomVectorQuantizerNumpy(bits_per_codeword=15, vector_dim=h_freq_csi.shape[4], seed=42)
-        h_freq_per_rx = []
-        # Adjust guard subcarriers for different number of streams
-        csi_effective_subcarriers = rg_csi.num_effective_subcarriers
-        csi_guard_carriers_1 = rg_csi.num_guard_carriers[0]
-        csi_guard_carriers_2 = rg_csi.num_guard_carriers[1]
-        effective_subcarriers = (csi_effective_subcarriers // cfg.num_tx_streams) * cfg.num_tx_streams
-        guard_carriers_1 = (csi_effective_subcarriers - effective_subcarriers) // 2
-        guard_carriers_2 = (csi_effective_subcarriers - effective_subcarriers) - guard_carriers_1
-        guard_carriers_1 += csi_guard_carriers_1
-        guard_carriers_2 += csi_guard_carriers_2
-        num_tx_ant = h_freq_csi.shape[4]
-        for i_rxnode in range(cfg.num_tx_streams):
-            if guard_carriers_2 == 0:
-                h_freq_rx = h_freq_csi[:, :, i_rxnode*2:(i_rxnode+1)*2, : , :, :, guard_carriers_1:]
-            else:
-                h_freq_rx = h_freq_csi[:, :, i_rxnode*2:(i_rxnode+1)*2, : , :, :, guard_carriers_1:-guard_carriers_2] 
-            # h_freq_rx shape: [batch_size, num_rx=1, num_rx_ants=2, num_tx=1, num_tx_ants, num_syms, num_effective_subcarriers]
-            # transpose to [batch_size, num_rx=1, num_tx=1, num_syms, num_subcarriers, num_rx_ants=2, num_tx_ants]
-            H = tf.transpose(h_freq_rx, perm=[0, 1, 3, 5, 6, 2, 4])
-            
-            num_syms = H.shape[3]
-            H = tf.reduce_mean(H, axis=3, keepdims=True) # average over num_syms dimension # [B, num_rx=1, num_tx=1, 1, num_subcarriers, num_rx_ants=2, num_tx_ants]
-            n_sc = H.shape[4]; B = H.shape[0]
-            num_rbs = n_sc // cfg.rb_size
-            # if n_sc % cfg.rb_size != 0:
-            #     raise ValueError(f"Number of subcarriers for CSI feedback ({n_sc}) is not a multiple of rb_size ({cfg.rb_size})")
-            # Reshape and average over RBs
-            # Here we have a problem where n_sc may not be multiple of rb_size due to guard bands
-            # We will fix that by including the last residual subcarriers into the last RB
-            if n_sc % cfg.rb_size == 0:
-                H = tf.reshape(H, [B , 1, 1, 1, n_sc//cfg.rb_size, cfg.rb_size, 2, num_tx_ant]) # Reshape to RBGs # [B, num_rx=1, num_tx=1, 1, num_rb, cfg.rb_size, 2, num_tx_ants]
-                num_residual_subcarriers = 0
-                H = tf.reduce_mean(H, axis=5, keepdims=True) # Average over each RBG # [B, num_rx=1, num_tx=1, 1, num_rb, 1, 2, num_tx_ants]
-                n_sc_less_residual = n_sc
-            else:
-                num_residual_subcarriers = n_sc % cfg.rb_size
-                n_sc_less_residual = n_sc - (num_residual_subcarriers)
-                H_less_last_rb = H[:, :, :, :, :-(cfg.rb_size + num_residual_subcarriers)] # [B, num_rx=1, num_tx=1, 1, n_sc - (cfg.rb_size + num_residual_subcarriers), num_rx_ants=2, num_tx_ants]
-                H_last_rb = H[:, :, :, :, -(cfg.rb_size + num_residual_subcarriers):] # [B, num_rx=1, num_tx=1, 1, cfg.rb_size + num_residual_subcarriers, num_rx_ants=2, num_tx_ants]
-                # Reshape to RBGs # [B, num_rx=1, num_tx=1, 1, num_rbs - 1, cfg.rb_size, 2, num_tx_ants]
-                H_less_last_rb = tf.reshape(H_less_last_rb, [B , 1, 1, 1, num_rbs - 1, cfg.rb_size, 2, num_tx_ant]) 
-                # Reshape last RB # [B, num_rx=1, num_tx=1, 1, 1, cfg.rb_size + num_residual_subcarriers, 2, num_tx_ants]
-                H_last_rb = tf.reshape(H_last_rb, [B , 1, 1, 1, 1, cfg.rb_size + num_residual_subcarriers, 2, num_tx_ant])
-                H_less_last_rb = tf.reduce_mean(H_less_last_rb, axis=5, keepdims=True) # Average over each RB # [B, num_rx=1, num_tx=1, 1, num_rbs - 1, 1, 2, num_tx_ants]
-                H_last_rb = tf.reduce_mean(H_last_rb, axis=5, keepdims=True) # Average over last RB # [B, num_rx=1, num_tx=1, 1, 1, 1, 2, num_tx_ants]
-                H = tf.concat([H_less_last_rb, H_last_rb], axis=4) # concatenate back # [B, num_rx=1, num_tx=1, 1, num_rb, 1, 2, num_tx_ants]
-            # Now H is of shape [B, num_rx=1, num_tx=1, 1, num_rbs, 1, 2, num_tx_ants]
-            if donald_hack and ("DIRECT" not in cfg.precoding_method):
-                H_avg = tf.reduce_mean(H, axis=-2) # Average over num_rx_ants dimension (the Donald hack) # [B, num_rx=1, num_tx=1, 1, num_rb, 1, num_tx_ants]
-                H_avg_norm = (tf.linalg.norm(H_avg, axis=-1, keepdims=True) + 1e-12) # [B, num_rx=1, num_tx=1, 1, num_rb, 1, 1]
-                H_avg_normalized = H_avg / H_avg_norm  # Normalize over num_tx_ants dimension (each vector is norm 1 now) # [B, num_rx=1, num_tx=1, 1, num_rb, 1, num_tx_ants]
-                H_avg_normalized_quantized = rvq(H_avg_normalized) # shape : [B, num_rx=1, num_tx=1, 1, num_rb, 1] dtype=int
-                H_avg_normalized_reconstructed = rvq(H_avg_normalized_quantized) # shape : [B, num_rx=1, num_tx=1, 1, num_rb, 1, num_tx_ants]
-                H_avg_reconstructed = (H_avg_normalized_reconstructed)# * H_avg_norm) # Scale back to original norm
-                # H_avg_reconstructed = H_avg_normalized * H_avg_norm # Debugging: skip quantization
-                H_avg_reconstructed = tf.tile(H_avg_reconstructed, [1, 1, 1, num_syms, 1, cfg.rb_size, 1]) # [B, num_rx=1, num_tx=1, num_syms, num_rb, cfg.rb_size, num_tx_ant]
-                H_avg_reconstructed = tf.reshape(H_avg_reconstructed, [B, num_syms, n_sc_less_residual, 1, num_tx_ant])  # [B, num_syms, num_effective_subarriers, 1, num_tx_ants]
-                # here we have a problem where n_sc may not be multiple of rb_size due to guard bands
-                # We will fix that by repeating the last residual subcarriers into the H_avg_reconstructed
-                if num_residual_subcarriers != 0:
-                    H_avg_reconstructed = tf.concat([
-                        H_avg_reconstructed,
-                        H_avg_reconstructed[:, :, -(num_residual_subcarriers):, :, :],
-                    ], axis=2)
-                if quantization_debug:
-                    # print the distortion introduced by quantization
-                    H_avg1 = tf.tile(H_avg, [1, 1, 1, num_syms, 1, cfg.rb_size, 1]) # [B, num_rx=1, num_tx=1, num_syms, num_rb, cfg.rb_size, num_tx_ant]
-                    H_avg1 = tf.reshape(H_avg1, [B, num_syms, n_sc_less_residual, 1, num_tx_ant])  # [B, num_syms, num_effective_subarriers, 1, num_tx_ants]
-                    print(f"For RX node {i_rxnode}, quantization distortion (Frobenius norm) norm(actual - reconstructed) / norm(actual):" + 
-                        f" {tf.linalg.norm(H_avg1 - H_avg_reconstructed) / tf.linalg.norm(H_avg1)}")
-                h_freq_per_rx.append(tf.transpose(H_avg_reconstructed, perm=[0, 3, 4, 1, 2])) # transpose to [batch_size, num_streams=1, num_tx_ants , num_ofdm_symbols, num_effective_subarriers]
-            else:
-                s, u , v = tf.linalg.svd(H)
-                v_largest = v[..., 0]                     # [B, num_rx=1, num_tx=1, 1, num_rb, 1, 2]
-                # repeat to original num_syms and subcarrier dimension
-                v_largest = tf.tile(v_largest, [1, 1, 1, num_syms, 1, cfg.rb_size, 1])  # [B, num_rx=1, num_tx=1, num_syms, num_rb, cfg.rb_size, num_tx_ant]
-                v_largest = tf.reshape(v_largest, [B, num_syms, n_sc_less_residual, 1, num_tx_ant])  # [B, num_syms, num_effective_subarriers, 1, num_tx_ants]
-                # here we have a problem where n_sc may not be multiple of rb_size due to guard bands
-                # We will fix that by repeating the last residual subcarriers into the v_largest
-                if num_residual_subcarriers != 0:
-                    v_largest = tf.concat([
-                        v_largest,
-                        v_largest[:, :, -(num_residual_subcarriers):, :, :],
-                    ], axis=2)
-                v_largest_quantized = rvq(v_largest) # shape : [B, num_syms, num_effective_subarriers, 1] dtype=int
-                v_largest_reconstructed = rvq(v_largest_quantized) # shape : [B, num_syms, num_effective_subarriers, 1, num_tx_ants]
-                vh = tf.linalg.adjoint(v_largest_reconstructed)  # [B, num_syms, num_effective_subarriers, num_tx_ants, num_streams=1]
-                h_freq_per_rx.append(tf.transpose(vh, perm=[0, 4, 3, 1, 2])) # transpose to [batch_size, num_streams=1, num_tx_ants , num_ofdm_symbols, num_effective_subarriers]
-        h_freq_quantized = tf.concat(h_freq_per_rx, axis=1) # concatenate along the num_streams dimension
-        # final h_freq_quantized shape: [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, num_effective_subarriers]
-        # we need to change the shape to [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, fftsize]
-        # by repeating the first and last element of final_h_freq_quantized along the last dimension as
-        # much as the number of guard carriers 
-        first_subcarrier = tf.repeat(h_freq_quantized[..., 0:1], repeats=guard_carriers_1, axis=-1)
-        last_subcarrier = tf.repeat(h_freq_quantized[..., -1:], repeats=guard_carriers_2, axis=-1)
-        h_freq_csi = tf.concat([first_subcarrier, h_freq_quantized, last_subcarrier], axis=-1)
+    if cfg.perfect_csi == False:
+        if "QUANTIZED_CSI_RVQ" in cfg.precoding_method:
+            num_tx_ant = h_freq_csi.shape[4]
+            donald_hack = True
+            quantization_debug = False
+            rvq = RandomVectorQuantizer(bits_per_codeword=15, vector_dim=num_tx_ant, seed=42)
+            # rvq = RandomVectorQuantizerNumpy(bits_per_codeword=15, vector_dim=h_freq_csi.shape[4], seed=42)
+            h_freq_per_rx = []
+            # Adjust guard subcarriers for different number of streams
+            csi_effective_subcarriers = rg_csi.num_effective_subcarriers
+            csi_guard_carriers_1 = rg_csi.num_guard_carriers[0]
+            csi_guard_carriers_2 = rg_csi.num_guard_carriers[1]
+            effective_subcarriers = (csi_effective_subcarriers // cfg.num_tx_streams) * cfg.num_tx_streams
+            guard_carriers_1 = (csi_effective_subcarriers - effective_subcarriers) // 2
+            guard_carriers_2 = (csi_effective_subcarriers - effective_subcarriers) - guard_carriers_1
+            guard_carriers_1 += csi_guard_carriers_1
+            guard_carriers_2 += csi_guard_carriers_2
+            num_tx_ant = h_freq_csi.shape[4]
+            for i_rxnode in range(cfg.num_tx_streams):
+                if guard_carriers_2 == 0:
+                    h_freq_rx = h_freq_csi[:, :, i_rxnode*2:(i_rxnode+1)*2, : , :, :, guard_carriers_1:]
+                else:
+                    h_freq_rx = h_freq_csi[:, :, i_rxnode*2:(i_rxnode+1)*2, : , :, :, guard_carriers_1:-guard_carriers_2] 
+                # h_freq_rx shape: [batch_size, num_rx=1, num_rx_ants=2, num_tx=1, num_tx_ants, num_syms, num_effective_subcarriers]
+                # transpose to [batch_size, num_rx=1, num_tx=1, num_syms, num_subcarriers, num_rx_ants=2, num_tx_ants]
+                H = tf.transpose(h_freq_rx, perm=[0, 1, 3, 5, 6, 2, 4])
+                
+                num_syms = H.shape[3]
+                H = tf.reduce_mean(H, axis=3, keepdims=True) # average over num_syms dimension # [B, num_rx=1, num_tx=1, 1, num_subcarriers, num_rx_ants=2, num_tx_ants]
+                n_sc = H.shape[4]; B = H.shape[0]
+                num_rbs = n_sc // cfg.rb_size
+                # if n_sc % cfg.rb_size != 0:
+                #     raise ValueError(f"Number of subcarriers for CSI feedback ({n_sc}) is not a multiple of rb_size ({cfg.rb_size})")
+                # Reshape and average over RBs
+                # Here we have a problem where n_sc may not be multiple of rb_size due to guard bands
+                # We will fix that by including the last residual subcarriers into the last RB
+                if n_sc % cfg.rb_size == 0:
+                    H = tf.reshape(H, [B , 1, 1, 1, n_sc//cfg.rb_size, cfg.rb_size, 2, num_tx_ant]) # Reshape to RBGs # [B, num_rx=1, num_tx=1, 1, num_rb, cfg.rb_size, 2, num_tx_ants]
+                    num_residual_subcarriers = 0
+                    H = tf.reduce_mean(H, axis=5, keepdims=True) # Average over each RBG # [B, num_rx=1, num_tx=1, 1, num_rb, 1, 2, num_tx_ants]
+                    n_sc_less_residual = n_sc
+                else:
+                    num_residual_subcarriers = n_sc % cfg.rb_size
+                    n_sc_less_residual = n_sc - (num_residual_subcarriers)
+                    H_less_last_rb = H[:, :, :, :, :-(cfg.rb_size + num_residual_subcarriers)] # [B, num_rx=1, num_tx=1, 1, n_sc - (cfg.rb_size + num_residual_subcarriers), num_rx_ants=2, num_tx_ants]
+                    H_last_rb = H[:, :, :, :, -(cfg.rb_size + num_residual_subcarriers):] # [B, num_rx=1, num_tx=1, 1, cfg.rb_size + num_residual_subcarriers, num_rx_ants=2, num_tx_ants]
+                    # Reshape to RBGs # [B, num_rx=1, num_tx=1, 1, num_rbs - 1, cfg.rb_size, 2, num_tx_ants]
+                    H_less_last_rb = tf.reshape(H_less_last_rb, [B , 1, 1, 1, num_rbs - 1, cfg.rb_size, 2, num_tx_ant]) 
+                    # Reshape last RB # [B, num_rx=1, num_tx=1, 1, 1, cfg.rb_size + num_residual_subcarriers, 2, num_tx_ants]
+                    H_last_rb = tf.reshape(H_last_rb, [B , 1, 1, 1, 1, cfg.rb_size + num_residual_subcarriers, 2, num_tx_ant])
+                    H_less_last_rb = tf.reduce_mean(H_less_last_rb, axis=5, keepdims=True) # Average over each RB # [B, num_rx=1, num_tx=1, 1, num_rbs - 1, 1, 2, num_tx_ants]
+                    H_last_rb = tf.reduce_mean(H_last_rb, axis=5, keepdims=True) # Average over last RB # [B, num_rx=1, num_tx=1, 1, 1, 1, 2, num_tx_ants]
+                    H = tf.concat([H_less_last_rb, H_last_rb], axis=4) # concatenate back # [B, num_rx=1, num_tx=1, 1, num_rb, 1, 2, num_tx_ants]
+                # Now H is of shape [B, num_rx=1, num_tx=1, 1, num_rbs, 1, 2, num_tx_ants]
+                if donald_hack and ("DIRECT" not in cfg.precoding_method):
+                    H_avg = tf.reduce_mean(H, axis=-2) # Average over num_rx_ants dimension (the Donald hack) # [B, num_rx=1, num_tx=1, 1, num_rb, 1, num_tx_ants]
+                    H_avg_norm = (tf.linalg.norm(H_avg, axis=-1, keepdims=True) + 1e-12) # [B, num_rx=1, num_tx=1, 1, num_rb, 1, 1]
+                    H_avg_normalized = H_avg / H_avg_norm  # Normalize over num_tx_ants dimension (each vector is norm 1 now) # [B, num_rx=1, num_tx=1, 1, num_rb, 1, num_tx_ants]
+                    H_avg_normalized_quantized = rvq(H_avg_normalized) # shape : [B, num_rx=1, num_tx=1, 1, num_rb, 1] dtype=int
+                    H_avg_normalized_reconstructed = rvq(H_avg_normalized_quantized) # shape : [B, num_rx=1, num_tx=1, 1, num_rb, 1, num_tx_ants]
+                    H_avg_reconstructed = (H_avg_normalized_reconstructed)# * H_avg_norm) # Scale back to original norm
+                    # H_avg_reconstructed = H_avg_normalized * H_avg_norm # Debugging: skip quantization
+                    H_avg_reconstructed = tf.tile(H_avg_reconstructed, [1, 1, 1, num_syms, 1, cfg.rb_size, 1]) # [B, num_rx=1, num_tx=1, num_syms, num_rb, cfg.rb_size, num_tx_ant]
+                    H_avg_reconstructed = tf.reshape(H_avg_reconstructed, [B, num_syms, n_sc_less_residual, 1, num_tx_ant])  # [B, num_syms, num_effective_subarriers, 1, num_tx_ants]
+                    # here we have a problem where n_sc may not be multiple of rb_size due to guard bands
+                    # We will fix that by repeating the last residual subcarriers into the H_avg_reconstructed
+                    if num_residual_subcarriers != 0:
+                        H_avg_reconstructed = tf.concat([
+                            H_avg_reconstructed,
+                            H_avg_reconstructed[:, :, -(num_residual_subcarriers):, :, :],
+                        ], axis=2)
+                    if quantization_debug:
+                        # print the distortion introduced by quantization
+                        H_avg1 = tf.tile(H_avg, [1, 1, 1, num_syms, 1, cfg.rb_size, 1]) # [B, num_rx=1, num_tx=1, num_syms, num_rb, cfg.rb_size, num_tx_ant]
+                        H_avg1 = tf.reshape(H_avg1, [B, num_syms, n_sc_less_residual, 1, num_tx_ant])  # [B, num_syms, num_effective_subarriers, 1, num_tx_ants]
+                        print(f"For RX node {i_rxnode}, quantization distortion (Frobenius norm) norm(actual - reconstructed) / norm(actual):" + 
+                            f" {tf.linalg.norm(H_avg1 - H_avg_reconstructed) / tf.linalg.norm(H_avg1)}")
+                    h_freq_per_rx.append(tf.transpose(H_avg_reconstructed, perm=[0, 3, 4, 1, 2])) # transpose to [batch_size, num_streams=1, num_tx_ants , num_ofdm_symbols, num_effective_subarriers]
+                else:
+                    s, u , v = tf.linalg.svd(H)
+                    v_largest = v[..., 0]                     # [B, num_rx=1, num_tx=1, 1, num_rb, 1, 2]
+                    # repeat to original num_syms and subcarrier dimension
+                    v_largest = tf.tile(v_largest, [1, 1, 1, num_syms, 1, cfg.rb_size, 1])  # [B, num_rx=1, num_tx=1, num_syms, num_rb, cfg.rb_size, num_tx_ant]
+                    v_largest = tf.reshape(v_largest, [B, num_syms, n_sc_less_residual, 1, num_tx_ant])  # [B, num_syms, num_effective_subarriers, 1, num_tx_ants]
+                    # here we have a problem where n_sc may not be multiple of rb_size due to guard bands
+                    # We will fix that by repeating the last residual subcarriers into the v_largest
+                    if num_residual_subcarriers != 0:
+                        v_largest = tf.concat([
+                            v_largest,
+                            v_largest[:, :, -(num_residual_subcarriers):, :, :],
+                        ], axis=2)
+                    v_largest_quantized = rvq(v_largest) # shape : [B, num_syms, num_effective_subarriers, 1] dtype=int
+                    v_largest_reconstructed = rvq(v_largest_quantized) # shape : [B, num_syms, num_effective_subarriers, 1, num_tx_ants]
+                    vh = tf.linalg.adjoint(v_largest_reconstructed)  # [B, num_syms, num_effective_subarriers, num_tx_ants, num_streams=1]
+                    h_freq_per_rx.append(tf.transpose(vh, perm=[0, 4, 3, 1, 2])) # transpose to [batch_size, num_streams=1, num_tx_ants , num_ofdm_symbols, num_effective_subarriers]
+            h_freq_quantized = tf.concat(h_freq_per_rx, axis=1) # concatenate along the num_streams dimension
+            # final h_freq_quantized shape: [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, num_effective_subarriers]
+            # we need to change the shape to [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, fftsize]
+            # by repeating the first and last element of final_h_freq_quantized along the last dimension as
+            # much as the number of guard carriers 
+            first_subcarrier = tf.repeat(h_freq_quantized[..., 0:1], repeats=guard_carriers_1, axis=-1)
+            last_subcarrier = tf.repeat(h_freq_quantized[..., -1:], repeats=guard_carriers_2, axis=-1)
+            h_freq_csi = tf.concat([first_subcarrier, h_freq_quantized, last_subcarrier], axis=-1)
+        else:
+            type_II_PMI_quantizer = quantized_CSI_feedback(method='5G', 
+                                                            codebook_selection_method=None,
+                                                            num_tx_streams=cfg.num_tx_streams,
+                                                            architecture=cfg.PMI_feedback_architecture,
+                                                            rbs_per_subband=4,
+                                                            snrdb=rx_snr_db)
+            h_freq_csi = type_II_PMI_quantizer(h_freq_csi)
         
 
     if cfg.rank_adapt:
@@ -761,15 +687,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         info_bits_new, txs_ber, txs_bler = tx_squad(txs_chans, info_bits)
         # print("BER: {}  BLER: {}".format(txs_ber, txs_bler))
         assert txs_ber <= 1e-3, "TxSquad transmission BER too high"
-    
-    if "RVQ" not in cfg.precoding_method and cfg.perfect_csi == False:
-        type_II_PMI_quantizer = quantized_CSI_feedback(method='5G', 
-                                                        codebook_selection_method=None,
-                                                        num_tx_streams=cfg.num_tx_streams,
-                                                        architecture=cfg.PMI_feedback_architecture,
-                                                        rbs_per_subband=4,
-                                                        snrdb=rx_snr_db)
-        h_freq_csi = type_II_PMI_quantizer(h_freq_csi)
 
     # MU-MIMO transmission (P2)
     dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_dB_arr = mu_mimo(dmimo_chans, h_freq_csi, info_bits)
@@ -778,7 +695,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    print("BLER: ", coded_bler)
+    # print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
 
