@@ -111,20 +111,16 @@ class MU_MIMO(Model):
         # The resource grid mapper maps symbols onto an OFDM resource grid
         self.rg_mapper = ResourceGridMapper(self.rg)
 
-        if self.cfg.precoding_method == "ZF":
-            # the zero forcing precoder
+        if "ZF" in self.cfg.precoding_method:
             self.zf_precoder = ZFPrecoder(self.rg, sm, return_effective_channel=True)
             self.zf_quantized_precoder = QuantizedZFPrecoder(self.rg, sm)
-            self.quantized_direct_precoder = QuantizedDirectPrecoder(self.rg, sm)
         elif self.cfg.precoding_method == "BD":
             self.bd_precoder = BDPrecoder(self.rg, sm, return_effective_channel=True)
             self.bd_equalizer = BDEqualizer(self.rg, sm)
         elif self.cfg.precoding_method == "SLNR":
             self.slnr_precoder = SLNRPrecoder(self.rg, sm, return_effective_channel=True)
             self.slnr_equalizer = SLNREqualizer(self.rg, sm)
-        elif self.cfg.precoding_method == "ZF_QUANTIZED_CSI_RVQ":
-            self.zf_quantized_precoder = QuantizedZFPrecoder(self.rg, sm)
-        elif self.cfg.precoding_method == "DIRECT_QUANTIZED_CSI_RVQ":
+        elif "DIRECT" in self.cfg.precoding_method:
             self.quantized_direct_precoder = QuantizedDirectPrecoder(self.rg, sm)
         else:
             ValueError(f"MU_MIMO __init__: unsupported precoding method {self.cfg.precoding_method}")
@@ -168,19 +164,24 @@ class MU_MIMO(Model):
 
         # apply precoding to OFDM grids
         if self.cfg.precoding_method == "ZF":
-            # x_precoded, g = self.zf_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
-            h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
-            x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks, new=True)
-            # x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+            if "RVQ" in self.cfg.PMI_feedback_architecture:
+                x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+            elif "type_II" in self.cfg.PMI_feedback_architecture:
+                h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
+                x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks, new=True)
+            else:
+                x_precoded, g = self.zf_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "BD":
             x_precoded, g = self.bd_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "SLNR":
             nvar = 5e-2  # TODO optimize value
             x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi, nvar, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
-        elif self.cfg.precoding_method == "ZF_QUANTIZED_CSI_RVQ":
-            x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
-        elif self.cfg.precoding_method == "DIRECT_QUANTIZED_CSI_RVQ":
-            x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+        elif self.cfg.precoding_method == "DIRECT":
+            if "TYPE_II" in self.cfg.PMI_feedback_architecture:
+                h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
+                x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+            elif "RVQ" in self.cfg.PMI_feedback_architecture:
+                x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
         else:
             ValueError("unsupported precoding method")
 
@@ -274,7 +275,7 @@ class MU_MIMO(Model):
         # Hard-decision bit error rate
         d_hard = tf.cast(llr > 0, tf.float32)
         uncoded_ber = compute_ber(d, d_hard).numpy()
-        # print(f"\nUncoded BER: {uncoded_ber}\n")
+        print(f"\nUncoded BER: {uncoded_ber}\n")
 
         # Hard-decision symbol error rate
         x_hard = self.mapper(d_hard)
@@ -535,7 +536,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
 
     if cfg.perfect_csi == False:
-        if "QUANTIZED_CSI_RVQ" in cfg.precoding_method:
+        if cfg.PMI_feedback_architecture == "RVQ":
             num_tx_ant = h_freq_csi.shape[4]
             donald_hack = True
             quantization_debug = False
@@ -695,7 +696,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    # print("BLER: ", coded_bler)
+    print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
 

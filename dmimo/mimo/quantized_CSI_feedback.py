@@ -139,7 +139,7 @@ class quantized_CSI_feedback(Layer):
 
             CSI_feedback_report = h_est_quant
 
-        elif self.method == '5G' and self.architecture == 'dMIMO_phase2_CB1':
+        elif self.method == '5G' and self.architecture == 'dMIMO_phase2_type_II_CB1':
 
             h_est = self.rb_mapper(h_est)
             h_est_rb = tf.gather(h_est, tf.range(0, self.nfft, self.subcarriers_per_RB), axis=-1)
@@ -227,7 +227,7 @@ class quantized_CSI_feedback(Layer):
 
             CSI_feedback_report = h_est_quant
 
-        elif self.method == '5G' and self.architecture == 'dMIMO_phase2_CB2':
+        elif self.method == '5G' and self.architecture == 'dMIMO_phase2_type_II_CB2':
 
             h_est = self.rb_mapper(h_est)
             h_est_rb = tf.gather(h_est, tf.range(0, self.nfft, self.subcarriers_per_RB), axis=-1)
@@ -1674,7 +1674,7 @@ class RandomVectorQuantizer(Layer):
         else:
             # Reconstruction process
             return tf.gather(self.codebook, inputs, axis=0) # shape: (..., vector_dim)
-        
+
 
 class RandomVectorQuantizerNumpy:
     """

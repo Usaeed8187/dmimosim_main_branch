@@ -16,6 +16,7 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._total_slots = 50                                      # total slots of ns-3 channels
         self._ns3_folder = "../ns3/channels"                        # data folder for ns-3 channels
         self._precoding_method = "ZF"                               # precoding method for phase 2 and baseline: 'ZF', 'SVD', '5G_ZF_no_channel_reconstruction', '5G_ZF', '5G_max_min_demo'
+        self._PMI_feedback_architecture = "dMIMO_phase2_CB2"        # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2'
         self._ue_indices = None                                     # UE antennas indices for MU-MIMO precoding
         self._ue_ranks = None                                       # UE ranks for MU-MIMO precoding
         self._perfect_csi = False                                   # Use perfect CSI for debugging
@@ -265,3 +266,11 @@ class SimConfig(CarrierConfig, MCSConfig):
                 self.enable_rxsquad = False
                 print("Warning: RxSquad disabled since ncjt_ldpc_decode_and_forward is set to False.")
         self._ncjt_ldpc_decode_and_forward = val
+
+    @property
+    def PMI_feedback_architecture(self):
+        return self._PMI_feedback_architecture
+
+    @PMI_feedback_architecture.setter
+    def PMI_feedback_architecture(self, val):
+        self._PMI_feedback_architecture = val
