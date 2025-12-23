@@ -94,12 +94,12 @@ class quantized_CSI_feedback(Layer):
             h_est_rb = tf.cast(h_est_rb, self.dtype)
 
             if self.L is None:
-                self.L = tf.reduce_min([4, h_est_rb.shape[1]//2])
+                self.L = tf.reduce_min([4, h_est_rb.shape[1]])
             else:
-                self.L = tf.reduce_min([self.L, h_est_rb.shape[1]//2])
+                self.L = tf.reduce_min([self.L, h_est_rb.shape[1]])
 
             if self.N_1 is None:
-                self.N_1 = h_est_rb.shape[1] // 2
+                self.N_1 = h_est_rb.shape[1]
 
             V = self.build_sd_beam_grid()
             V = tf.convert_to_tensor(V, dtype=self.dtype)
@@ -184,16 +184,14 @@ class quantized_CSI_feedback(Layer):
                         sb_ids = tf.range(curr_h_est_reshaped.shape[0], dtype=tf.int32) // int(self.rbs_per_subband)
                         ref_h_est_sb = tf.math.segment_mean(curr_h_est_reshaped, sb_ids) # [N_rx, N_rx, N_tx]
 
-                    self.N_1 = curr_h_est.shape[1] // 2
-                    if self.L is None:
-                        self.L = tf.reduce_min([4, curr_h_est.shape[1]//2])
-                    else:
-                        self.L = tf.reduce_min([self.L, curr_h_est.shape[1]//2])
+                    # self.N_1 = curr_h_est.shape[1] // 2
+                    N_1_g = curr_h_est.shape[1]
+                    L_g = min(4, curr_h_est.shape[1])
 
-                    V = self.build_sd_beam_grid()
+                    V = self.build_sd_beam_grid(N1=N_1_g)
                     V = tf.convert_to_tensor(V, dtype=self.dtype)
 
-                    W_rb = self.type_II_precoder(curr_h_est, V, Ns)
+                    W_rb = self.type_II_precoder(curr_h_est, V, Ns, L=L_g, N1=N_1_g)
 
                     W_rb_all_tx.append(W_rb)
 
@@ -285,24 +283,29 @@ class quantized_CSI_feedback(Layer):
         else:
             return CSI_feedback_report
         
-    def type_II_precoder(self, curr_h_est, V, Ns):
+    def type_II_precoder(self, curr_h_est, V, Ns, L=None, N1=None):
 
         curr_R = self.compute_tx_covariance(curr_h_est)
-        tx_ants = curr_h_est.shape[1]
-        curr_R = curr_R[:tx_ants//2,:tx_ants//2] + curr_R[tx_ants//2:,tx_ants//2:]
+        # tx_ants = curr_h_est.shape[1]
+        # curr_R = curr_R[:tx_ants//2,:tx_ants//2] + curr_R[tx_ants//2:,tx_ants//2:]
+        
+        N1 = int(self.N_1 if N1 is None else N1)
+        L = int(self.L if L is None else L)
 
-        m1_list, m2_list, col_idx_list = self.select_L_beams(curr_R, V, return_column_indices=True)
+        m1_list, m2_list, col_idx_list = self.select_L_beams(curr_R, V, return_column_indices=True, L=L, N1=N1)
 
-        W_1_tmp = tf.gather(V, col_idx_list, axis=1) # [N_tx, L]
-        zeros = tf.zeros_like(W_1_tmp)
-        top = tf.concat([W_1_tmp, zeros], axis=1)
-        bottom = tf.concat([zeros, W_1_tmp], axis=1)
-        W_1 = tf.concat([top, bottom], axis=0) # [2*N1*N2, 2L]
+        # W_1_tmp = tf.gather(V, col_idx_list, axis=1) # [N_tx, L]
+        # zeros = tf.zeros_like(W_1_tmp)
+        # top = tf.concat([W_1_tmp, zeros], axis=1)
+        # bottom = tf.concat([zeros, W_1_tmp], axis=1)
+        # W_1 = tf.concat([top, bottom], axis=0) # [2*N1*N2, 2L]
+
+        W_1 = tf.gather(V, col_idx_list, axis=1)  # [Nt, L]
             
         # H_A[k] = H[k] @ W_1  => [N_rx, L, N_SB]
         curr_h_est_reshaped = tf.transpose(curr_h_est, [2, 0, 1])  # [N_RB, N_rx, N_tx]
         sb_ids = tf.range(curr_h_est_reshaped.shape[0], dtype=tf.int32) // int(self.rbs_per_subband)
-        curr_h_est_sb = tf.math.segment_mean(curr_h_est_reshaped, sb_ids) # [N_rx, N_rx, N_tx]
+        curr_h_est_sb = tf.math.segment_mean(curr_h_est_reshaped, sb_ids) # [N_sb, N_rx, N_tx]
         H_A = tf.matmul(curr_h_est_sb , W_1[tf.newaxis, ...])
         H_A = tf.transpose(H_A, [1, 2, 0])  # [N_rx, L, N_SB]
 
@@ -325,7 +328,7 @@ class quantized_CSI_feedback(Layer):
         W_rb = tf.transpose(W_rb, perm=[2,0,1])  # [N_sb, Ns, N_tx]
 
         # Normalize
-        norm_factor = 1 / tf.math.sqrt(self.N_1 * self.N_2 * tf.reduce_sum((P_wb[tf.newaxis, ...] * p_l_i_t_2_all)**2, axis=1))
+        norm_factor = 1 / tf.math.sqrt(N1 * self.N_2 * tf.reduce_sum((P_wb[tf.newaxis, ...] * p_l_i_t_2_all)**2, axis=1))
         norm_factor = tf.cast(norm_factor, self.dtype)
         W_rb = norm_factor[..., tf.newaxis] * W_rb
         W_rb = tf.transpose(W_rb, perm=[0,2,1]) # [N_sb, N_tx, Ns]
@@ -356,6 +359,7 @@ class quantized_CSI_feedback(Layer):
         den = tf.reduce_sum(tf.abs(Y_g)**2,           axis=[-2, -1]) + eps  # [N_sb]
 
         q = num / tf.cast(den, num.dtype)  # [N_sb] complex
+        # q = tf.exp(1j * tf.cast(tf.math.angle(q), q.dtype))
 
         W_g_aligned = W_g * q[:, None, None]
 
@@ -364,7 +368,7 @@ class quantized_CSI_feedback(Layer):
             tf.reduce_sum(tf.math.conj(Y_ref) * Y_g_aligned, axis=[-2, -1])
         )
 
-        assert tf.reduce_max(phase_err) < 1e-3, "Phase alignment failed"
+        assert tf.reduce_max(tf.abs(phase_err)) < 1e-3, "Phase alignment failed"
 
         return q
 
@@ -664,7 +668,7 @@ class quantized_CSI_feedback(Layer):
 
         return eesm_avg_sinr
 
-    def build_sd_beam_grid(self):
+    def build_sd_beam_grid(self, N1=None, N2=None):
         """
         Reference: Lee et al., "CSI Feedback for Distributed MIMO", IEEE WCNC, 2022.
 
@@ -678,7 +682,11 @@ class quantized_CSI_feedback(Layer):
             Columns are ordered with l2 major, l1 minor.
         """
 
-        N1, N2 = self.N_1, self.N_2
+        if N1 == None:
+            N1 = self.N_1
+        if N2 == None:
+            N2 = self.N_2
+        
         O1, O2 = self.O_1, self.O_2
 
         L1 = O1 * N1
@@ -741,7 +749,7 @@ class quantized_CSI_feedback(Layer):
 
         return R
 
-    def select_L_beams(self, R, V, L=None, return_column_indices=True):
+    def select_L_beams(self, R, V, L=None, N1=None, N2=None, return_column_indices=True):
         """
         Reference: Fu et. al., "A Tutorial on Downlink Precoder Selection Strategies for 3GPP MIMO Codebooks", IEEE Access, 2023, Algorithm 1 beam selection.
         Modified to correctly handle N2 = 1 (1D array): only exclude n1 per iteration.
@@ -755,9 +763,12 @@ class quantized_CSI_feedback(Layer):
         L : int or None
             Number of beams to select. If None, uses self.L.
         """
-
-        N1, N2 = int(self.N_1), int(self.N_2)
+        
+        N1 = int(self.N_1 if N1 is None else N1)
+        N2 = int(self.N_2 if N2 is None else N2)
+        
         O1, O2 = int(self.O_1), int(self.O_2)
+        
         L = int(self.L if L is None else L)
 
         L1 = O1 * N1
@@ -808,8 +819,8 @@ class quantized_CSI_feedback(Layer):
         q2 = best_m2 % O2
 
         # coarse indices
-        n1_0 = tf.math.ceil(best_m1 / O1)
-        n2_0 = tf.math.ceil(best_m2 / O2)  # will be 0 when N2=1
+        n1_0 = best_m1 // O1
+        n2_0 = best_m2 // O2  # will be 0 when N2=1
 
         # remaining candidate sets
         N1_set = set(range(N1))

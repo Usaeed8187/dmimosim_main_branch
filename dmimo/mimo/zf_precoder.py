@@ -5,7 +5,7 @@ import sionna
 from sionna.utils import flatten_dims
 from sionna.ofdm import RemoveNulledSubcarriers
 
-from .zf_precoding import sumimo_zf_precoder, sumimo_zf_precoder_modified, mumimo_zf_precoder, mumimo_zf_precoder_quantized
+from .zf_precoding import sumimo_zf_precoder, sumimo_zf_precoder_modified, mumimo_zf_precoder, mumimo_zf_precoder_quantized, mumimo_zf_precoder_quantized_new
 
 
 class ZFPrecoder(Layer):
@@ -164,7 +164,7 @@ class QuantizedZFPrecoder(Layer):
         self._stream_management = stream_management
         self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
 
-    def call(self, x_rg, h_freq_quantized, scheduled_rx_ue_indices, ue_ranks):
+    def call(self, x_rg, h_freq_quantized, scheduled_rx_ue_indices, ue_ranks, new=False):
         """
         Returns precoded data symbols using ZF precoding with quantized CSI
 
@@ -194,11 +194,18 @@ class QuantizedZFPrecoder(Layer):
         # [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx]
         x_precoded = tf.transpose(x_rg, [0, 1, 3, 4, 2])
 
-        x_precoded, g = mumimo_zf_precoder_quantized(x_precoded,
-                                        h_freq_quantized,
-                                        scheduled_rx_ue_indices,
-                                        ue_ranks,
-                                        return_precoding_matrix=True)
+        if new:
+            x_precoded, g = mumimo_zf_precoder_quantized_new(x_precoded,
+                                            h_freq_quantized,
+                                            scheduled_rx_ue_indices,
+                                            ue_ranks,
+                                            return_precoding_matrix=True)
+        else:
+            x_precoded, g = mumimo_zf_precoder_quantized(x_precoded,
+                                            h_freq_quantized,
+                                            scheduled_rx_ue_indices,
+                                            ue_ranks,
+                                            return_precoding_matrix=True)
 
         x_precoded = tf.transpose(x_precoded, [0, 1, 4, 2, 3])
         return x_precoded, g  # to be implemented

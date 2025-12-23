@@ -185,16 +185,16 @@ def mumimo_zf_precoder_new_testing(x, h, ue_indices, ue_ranks, return_precoding_
         U = x.shape[-1]
         Heff = h_zf # [B,1,S,K,U,Nt]
         HeffH = tf.linalg.adjoint(Heff) # [B,1,S,K,Nt,U]
-        Gram = tf.matmul(Heff, HeffH) # [B,1,S,K,U,U]
-        Iu = tf.eye(U, dtype=Gram.dtype)[None,None,None,None,:,:]
+        gram = tf.matmul(Heff, HeffH) # [B,1,S,K,U,U]
+        Iu = tf.eye(U, dtype=gram.dtype)[None,None,None,None,:,:]
 
         noise_var_scalar = 1e-3
-        sigma2 = tf.cast(noise_var_scalar, Gram.dtype) # or estimate
-        lam = tf.cast(U/total_tx_ant, Gram.dtype)
+        sigma2 = tf.cast(noise_var_scalar, gram.dtype) # or estimate
+        lam = tf.cast(U/total_tx_ant, gram.dtype)
         alpha = lam * sigma2
 
         # pick alpha (see next point)
-        A = Gram + alpha * Iu # [B,1,S,K,U,U]
+        A = gram + alpha * Iu # [B,1,S,K,U,U]
         L = tf.linalg.cholesky(A) # batched Cholesky
         # Solve A X = Heff (note: shapes must align on last two dims)
         g = tf.linalg.cholesky_solve(L, Heff) # [B,1,S,K,U,Nt]
@@ -326,6 +326,85 @@ def mumimo_zf_precoder_quantized(x, h_quantized, ue_indices, ue_ranks, return_pr
     norm = tf.sqrt(tf.reduce_sum(tf.abs(g)**2, axis=-2, keepdims=True))
     g = g/tf.cast(norm, g.dtype)
     g = tf.cast(g, x.dtype)
+    # Expand last dim of `x` for precoding
+    x_precoded = tf.expand_dims(x, -1)
+
+    # Precode
+    x_precoded = tf.squeeze(tf.matmul(g, x_precoded), -1)
+
+    if return_precoding_matrix:
+        return x_precoded, g
+    else:
+        return x_precoded
+    
+
+def mumimo_zf_precoder_quantized_new(x, h_quantized, ue_indices, ue_ranks, return_precoding_matrix=False):
+    """
+    MU-MIMO zero-forcing precoding supporting rank adaptation.
+
+    :param x: data stream symbols of shape [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx]
+    :param h_quantized: quantized channel coefficients of shape [batch_size, num_tx_ants, num_streams, num_ofdm_symbols, num_subcarriers]
+    :param ue_indices: receiver antenna indices for all users of shape [num_users, list of antenna indices]
+    :param ue_ranks: number of streams (ranks) for all users of shape [num_users]
+    :param return_precoding_matrix: return precoding matrix
+    :return: precoded data symbols
+    """
+
+    # Input dimensions:
+    # x: [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx]
+    # h: [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, num_subcarriers]
+    num_streams_per_tx = x.shape[-1]
+    num_user = len(ue_indices)
+    num_user_streams = np.sum(ue_ranks)
+    num_user_ant = np.sum(len(val) for val in ue_indices)
+    assert num_user_streams == num_streams_per_tx, "total number of streams must match"
+
+    arr_indices = tf.reshape(tf.range(num_user_ant), (-1, 2))
+
+    h_zf = tf.transpose(h_quantized, perm=[0,3,4,2,1])  # [B, num_ofdm_symbols, num_subcarriers, num_tx_ants, num_streams]
+
+    # if num_streams_per_tx == 2:
+    #     w0 = h_zf[..., 0:1]
+    #     w1 = h_zf[..., 1:2]
+
+    #     w0 = w0 / tf.cast((tf.sqrt(tf.reduce_sum(tf.abs(w0)**2, axis=-2, keepdims=True)) + 1e-12), w0.dtype)
+
+    #     # gram–Schmidt
+    #     proj = tf.reduce_sum(tf.math.conj(w0) * w1, axis=-2, keepdims=True)
+    #     w1 = w1 - w0 * proj
+    #     w1 = w1 / tf.cast((tf.sqrt(tf.reduce_sum(tf.abs(w1)**2, axis=-2, keepdims=True)) + 1e-12), w1.dtype)
+
+    #     g = tf.concat([w0, w1], axis=-1)  # [B,Nsym,Nsc,num_tx_ants, num_streams]
+    #     g = g[tf.newaxis, ...]
+    # else:
+    #     raise Exception("Have not implemented this part yet")
+
+    reg = 0.0
+    gram = tf.matmul(h_zf, h_zf, adjoint_a=True)  # W^H W: [B,Nsym,Nsc,Ns,Ns]
+    I = tf.eye(h_zf.shape[-1], batch_shape=tf.shape(gram)[:-2], dtype=gram.dtype)
+    gram_inv = tf.linalg.inv(gram + tf.cast(reg, gram.dtype) * I)
+    g = tf.matmul(h_zf, gram_inv)  # [B,Nsym,Nsc,Nt,Ns]
+    g = g[tf.newaxis, ...]
+
+    # Compute pseudo inverse for precoding
+    # The following lines are commented out to handle singular matrix cases
+    # g = tf.matmul(h_zf, h_zf, adjoint_b=True) # [B, num_ofdm_symbols, num_subcarriers, num_streams, num_streams]
+    # g = tf.matmul(h_zf, matrix_inv(g), adjoint_a=True) # [B, num_ofdm_symbols, num_subcarriers, num_tx_ants, num_streams]
+    # Handle cases that are even singular
+    # g = complex_pinv(h_zf)  # [B, num_ofdm_symbols, num_subcarriers, num_tx_ants, num_streams]
+
+    # Normalize each column to unit power
+    norm = tf.sqrt(tf.reduce_sum(tf.abs(g)**2, axis=-2, keepdims=True))
+    g = g/tf.cast(norm, g.dtype)
+    g = tf.cast(g, x.dtype)
+
+    WG = tf.matmul(h_zf, g, adjoint_a=True)
+    I = tf.eye(WG.shape[-1], dtype=WG.dtype)
+    off_diag_idx = 1 - I
+    off_diag_vals = WG * off_diag_idx
+    max_off_diag = tf.reduce_max(tf.abs(off_diag_vals))
+    assert max_off_diag < 1e-3, "orthogonalization failed"
+
     # Expand last dim of `x` for precoding
     x_precoded = tf.expand_dims(x, -1)
 

@@ -105,14 +105,14 @@ if __name__ == "__main__":
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
     cfg.enable_rxsquad = False
-    cfg.precoding_method = "ZF"
-    cfg.PMI_feedback_architecture = 'dMIMO_phase2_CB1' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_CB1'
+    cfg.precoding_method = "ZF_QUANTIZED_CSI_RVQ"
+    cfg.PMI_feedback_architecture = 'dMIMO_phase2_rel_15_type_II' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_CB1'
     # cfg.precoding_method = "ZF_QUANTIZED_CSI_RVQ" # Uncomment to enable quantized CSI feedback
     # cfg.precoding_method = "DIRECT_QUANTIZED_CSI_RVQ" # Does not work well for MU-MIMO
 
 
     # Select Number of TxSquad and RxSquad UEs to use.
-    ns3cfg.num_txue_sel = 2
+    ns3cfg.num_txue_sel = 1
     if arguments == []:
         rx_ues_arr = [0]
 
