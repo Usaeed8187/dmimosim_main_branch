@@ -1675,6 +1675,90 @@ class RandomVectorQuantizer(Layer):
             # Reconstruction process
             return tf.gather(self.codebook, inputs, axis=0) # shape: (..., vector_dim)
 
+    def quantize_feedback(self, h_freq_csi, cfg, rg_csi, *, donald_hack=True, quantization_debug=False):
+        """Quantize CSI feedback using the internal random vector codebook."""
+
+        num_tx_ant = h_freq_csi.shape[4]
+        h_freq_per_rx = []
+
+        csi_effective_subcarriers = rg_csi.num_effective_subcarriers
+        csi_guard_carriers_1 = rg_csi.num_guard_carriers[0]
+        csi_guard_carriers_2 = rg_csi.num_guard_carriers[1]
+        effective_subcarriers = (csi_effective_subcarriers // cfg.num_tx_streams) * cfg.num_tx_streams
+        guard_carriers_1 = (csi_effective_subcarriers - effective_subcarriers) // 2
+        guard_carriers_2 = (csi_effective_subcarriers - effective_subcarriers) - guard_carriers_1
+        guard_carriers_1 += csi_guard_carriers_1
+        guard_carriers_2 += csi_guard_carriers_2
+        num_tx_ant = h_freq_csi.shape[4]
+        for i_rxnode in range(cfg.num_tx_streams):
+            if guard_carriers_2 == 0:
+                h_freq_rx = h_freq_csi[:, :, i_rxnode*2:(i_rxnode+1)*2, : , :, :, guard_carriers_1:]
+            else:
+                h_freq_rx = h_freq_csi[:, :, i_rxnode*2:(i_rxnode+1)*2, : , :, :, guard_carriers_1:-guard_carriers_2]
+
+            H = tf.transpose(h_freq_rx, perm=[0, 1, 3, 5, 6, 2, 4])
+
+            num_syms = H.shape[3]
+            H = tf.reduce_mean(H, axis=3, keepdims=True)
+            n_sc = H.shape[4]; B = H.shape[0]
+            num_rbs = n_sc // cfg.rb_size
+
+            if n_sc % cfg.rb_size == 0:
+                H = tf.reshape(H, [B , 1, 1, 1, n_sc//cfg.rb_size, cfg.rb_size, 2, num_tx_ant])
+                num_residual_subcarriers = 0
+                H = tf.reduce_mean(H, axis=5, keepdims=True)
+                n_sc_less_residual = n_sc
+            else:
+                num_residual_subcarriers = n_sc % cfg.rb_size
+                n_sc_less_residual = n_sc - (num_residual_subcarriers)
+                H_less_last_rb = H[:, :, :, :, :-(cfg.rb_size + num_residual_subcarriers)]
+                H_last_rb = H[:, :, :, :, -(cfg.rb_size + num_residual_subcarriers):]
+                H_less_last_rb = tf.reshape(H_less_last_rb, [B , 1, 1, 1, num_rbs - 1, cfg.rb_size, 2, num_tx_ant])
+                H_last_rb = tf.reshape(H_last_rb, [B , 1, 1, 1, 1, cfg.rb_size + num_residual_subcarriers, 2, num_tx_ant])
+                H_less_last_rb = tf.reduce_mean(H_less_last_rb, axis=5, keepdims=True)
+                H_last_rb = tf.reduce_mean(H_last_rb, axis=5, keepdims=True)
+                H = tf.concat([H_less_last_rb, H_last_rb], axis=4)
+
+            if donald_hack and ("DIRECT" not in cfg.precoding_method):
+                H_avg = tf.reduce_mean(H, axis=-2)
+                H_avg_norm = (tf.linalg.norm(H_avg, axis=-1, keepdims=True) + 1e-12)
+                H_avg_normalized = H_avg / H_avg_norm
+                H_avg_normalized_quantized = self(H_avg_normalized)
+                H_avg_normalized_reconstructed = self(H_avg_normalized_quantized)
+                H_avg_reconstructed = (H_avg_normalized_reconstructed)
+                H_avg_reconstructed = tf.tile(H_avg_reconstructed, [1, 1, 1, num_syms, 1, cfg.rb_size, 1])
+                H_avg_reconstructed = tf.reshape(H_avg_reconstructed, [B, num_syms, n_sc_less_residual, 1, num_tx_ant])
+                if num_residual_subcarriers != 0:
+                    H_avg_reconstructed = tf.concat([
+                        H_avg_reconstructed,
+                        H_avg_reconstructed[:, :, -(num_residual_subcarriers):, :, :],
+                    ], axis=2)
+                if quantization_debug:
+                    H_avg1 = tf.tile(H_avg, [1, 1, 1, num_syms, 1, cfg.rb_size, 1])
+                    H_avg1 = tf.reshape(H_avg1, [B, num_syms, n_sc_less_residual, 1, num_tx_ant])
+                    print(f"For RX node {i_rxnode}, quantization distortion (Frobenius norm) norm(actual - reconstructed) /norm(actual):" +
+                        f" {tf.linalg.norm(H_avg1 - H_avg_reconstructed) / tf.linalg.norm(H_avg1)}")
+                h_freq_per_rx.append(tf.transpose(H_avg_reconstructed, perm=[0, 3, 4, 1, 2]))
+            else:
+                s, u , v = tf.linalg.svd(H)
+                v_largest = v[..., 0]
+                v_largest = tf.tile(v_largest, [1, 1, 1, num_syms, 1, cfg.rb_size, 1])
+                v_largest = tf.reshape(v_largest, [B, num_syms, n_sc_less_residual, 1, num_tx_ant])
+                if num_residual_subcarriers != 0:
+                    v_largest = tf.concat([
+                        v_largest,
+                        v_largest[:, :, -(num_residual_subcarriers):, :, :],
+                    ], axis=2)
+                v_largest_quantized = self(v_largest)
+                v_largest_reconstructed = self(v_largest_quantized)
+                vh = tf.linalg.adjoint(v_largest_reconstructed)
+                h_freq_per_rx.append(tf.transpose(vh, perm=[0, 4, 3, 1, 2]))
+
+        h_freq_quantized = tf.concat(h_freq_per_rx, axis=1)
+        first_subcarrier = tf.repeat(h_freq_quantized[..., 0:1], repeats=guard_carriers_1, axis=-1)
+        last_subcarrier = tf.repeat(h_freq_quantized[..., -1:], repeats=guard_carriers_2, axis=-1)
+        return tf.concat([first_subcarrier, h_freq_quantized, last_subcarrier], axis=-1)
+
 
 class RandomVectorQuantizerNumpy:
     """
