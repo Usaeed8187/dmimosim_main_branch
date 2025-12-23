@@ -99,22 +99,22 @@ if __name__ == "__main__":
     cfg.code_rate = 2/3
     if arguments == []:
         mobility = 'low_mobility'
-        drop_idx = '5'
+        drop_idx = '3'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     # cfg.ns3_folder = "ns3/channels/LowMobility/"
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
     cfg.enable_rxsquad = False
-    cfg.precoding_method = "ZF_QUANTIZED_CSI_RVQ"
-    cfg.PMI_feedback_architecture = 'dMIMO_phase2_rel_15_type_II' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_CB1'
+    cfg.precoding_method = "ZF"
+    cfg.PMI_feedback_architecture = 'dMIMO_phase2_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_CB1', 'dMIMO_phase2_CB2'
     # cfg.precoding_method = "ZF_QUANTIZED_CSI_RVQ" # Uncomment to enable quantized CSI feedback
     # cfg.precoding_method = "DIRECT_QUANTIZED_CSI_RVQ" # Does not work well for MU-MIMO
 
 
     # Select Number of TxSquad and RxSquad UEs to use.
-    ns3cfg.num_txue_sel = 1
+    ns3cfg.num_txue_sel = 10
     if arguments == []:
-        rx_ues_arr = [0]
+        rx_ues_arr = [3]
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)

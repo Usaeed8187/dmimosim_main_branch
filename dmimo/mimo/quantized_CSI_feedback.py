@@ -227,6 +227,79 @@ class quantized_CSI_feedback(Layer):
 
             CSI_feedback_report = h_est_quant
 
+        elif self.method == '5G' and self.architecture == 'dMIMO_phase2_CB2':
+
+            h_est = self.rb_mapper(h_est)
+            h_est_rb = tf.gather(h_est, tf.range(0, self.nfft, self.subcarriers_per_RB), axis=-1)
+            h_est_rb = tf.reduce_mean(h_est_rb, axis=-2, keepdims=False)
+            h_est_rb = tf.squeeze(h_est_rb)
+            h_est_rb = tf.cast(h_est_rb, self.dtype)
+
+            num_rx_ues = int((h_est.shape[2] - self.num_BS_Ant) /self.num_UE_Ant)
+
+            num_tx_ues = int((h_est.shape[4] - self.num_BS_Ant) /self.num_UE_Ant)
+
+            num_streams_per_UE = self.num_tx_streams // (num_rx_ues + 2)
+
+            W_rb_all = []
+            ref_tx = 0
+
+            for rx_idx in range(num_rx_ues+1):
+
+                if rx_idx == 0:
+                    # BS
+                    rx_ant_idx = np.arange(0, self.num_BS_Ant)
+                    Ns = 2 * num_streams_per_UE 
+                else:
+                    rx_ant_idx = np.arange((rx_idx-1)*self.num_UE_Ant + self.num_BS_Ant, (rx_idx)*self.num_UE_Ant + self.num_BS_Ant)
+                    Ns = num_streams_per_UE
+
+                assert Ns <= 2, "Type II codebook only defined for rank 1 and rank 2"
+
+                curr_h_est_big = tf.gather(h_est_rb, rx_ant_idx, axis=0)
+
+                W1_rb_all_tx = []                
+
+                for tx_idx in range(num_tx_ues+1):
+                    
+                    if tx_idx == 0:
+                        tx_ant_idx = np.arange(0, self.num_BS_Ant)
+                    else:
+                        tx_ant_idx = np.arange((tx_idx-1)*self.num_UE_Ant + self.num_BS_Ant, (tx_idx)*self.num_UE_Ant + self.num_BS_Ant)
+
+                    curr_h_est = tf.gather(tf.gather(h_est_rb, rx_ant_idx, axis=0), tx_ant_idx, axis=1) # [N_r_k, N_t_g, N_rb]
+
+                    curr_R = self.compute_tx_covariance(curr_h_est)
+
+                    N_1_g = curr_h_est.shape[1]
+                    L_g = min(4, curr_h_est.shape[1])
+
+                    V = self.build_sd_beam_grid(N1=N_1_g)
+                    V = tf.convert_to_tensor(V, dtype=self.dtype)
+
+                    m1_list, m2_list, col_idx_list = self.select_L_beams(curr_R, V, return_column_indices=True, L=L_g, N1=N_1_g)
+
+                    W_1 = tf.gather(V, col_idx_list, axis=1)  # [Nt, L]
+
+                    W1_rb_all_tx.append(W_1)
+
+                W1_rb_all_tx = self.block_diag(W1_rb_all_tx)
+
+                W_rb = self.type_II_precoder_CB2(W1_rb_all_tx, curr_h_est_big, Ns, N1=W1_rb_all_tx.shape[0])
+
+                W_rb_all.append(W_rb)
+
+            h_est_quant = tf.concat(W_rb_all, axis=-1)  # [N_RB, N_tx, total_Ns]
+            h_est_quant = tf.repeat(h_est_quant, repeats=np.ceil(self.nfft/W_rb.shape[0]), axis=0)
+            h_est_quant = h_est_quant[:self.nfft, ...]
+            h_est_quant = h_est_quant[tf.newaxis, ...]  # [1, N_fft, N_tx, total_Ns]
+            h_est_quant = tf.repeat(h_est_quant, repeats=h_est.shape[5], axis=0)  # [N_syms, N_fft, N_tx, total_Ns]
+            h_est_quant = tf.transpose(h_est_quant, perm=[3, 2, 0, 1])
+            h_est_quant  = h_est_quant[tf.newaxis, tf.newaxis, :, tf.newaxis, :, :, :] # [1,1,total_Ns,1,N_tx,N_syms,N_fft]
+
+            CSI_feedback_report = h_est_quant
+            
+
         elif self.method == '5G' and self.architecture == 'dMIMO_phase1':
 
             num_rx_ues = int(h_est.shape[2]/self.num_UE_Ant)
@@ -343,6 +416,58 @@ class quantized_CSI_feedback(Layer):
         # )
 
         return W_rb
+    
+    def type_II_precoder_CB2(self, W_1, curr_h_est, Ns, L=None, N1=None):
+
+            
+        # H_A[k] = H[k] @ W_1  => [N_rx, L, N_SB]
+        curr_h_est_reshaped = tf.transpose(curr_h_est, [2, 0, 1])  # [N_RB, N_rx, N_tx]
+        sb_ids = tf.range(curr_h_est_reshaped.shape[0], dtype=tf.int32) // int(self.rbs_per_subband)
+        curr_h_est_sb = tf.math.segment_mean(curr_h_est_reshaped, sb_ids) # [N_sb, N_rx, N_tx]
+        H_A = tf.matmul(curr_h_est_sb , W_1[tf.newaxis, ...])
+        H_A = tf.transpose(H_A, [1, 2, 0])  # [N_rx, L, N_SB]
+
+        G_sb = self.compute_unquantized_bcc_per_subband(H_A, Ns) # [N_sb, L, Ns]
+        G_sb_normalized = self.normalize_bcc(G_sb)
+
+        # Debugging assert to check stream orthogonality (before quantization)
+        normalized_max_off = self.assert_eq_41(H_A, G_sb)
+
+        # WB amplitude quantization
+        P_wb, k_wb = self.wb_coeff_quantize(G_sb_normalized) # TODO: check why it's mostly just giving me 1s
+        W_C1 = tf.linalg.diag(tf.transpose(P_wb, perm=[1, 0]))
+
+        # SB amplitude quantization
+        W_C2, p_l_i_t_2_all = self.sb_coeff_quantize(G_sb_normalized, P_wb, N_PSK=8) # [N_sb, L, Ns]
+        W_C2 = tf.transpose(W_C2, perm=[2,1,0])  # [Ns, L, N_sb]
+
+        # Assemble W2(t)
+        W_rb = self.assemble_W(W_1, W_C1, W_C2)  # [Ns, N_tx, N_sb]
+        W_rb = tf.transpose(W_rb, perm=[2,0,1])  # [N_sb, Ns, N_tx]
+
+        # Normalize
+        norm_factor = 1 / tf.math.sqrt(N1 * self.N_2 * tf.reduce_sum((P_wb[tf.newaxis, ...] * p_l_i_t_2_all)**2, axis=1))
+        norm_factor = tf.cast(norm_factor, self.dtype)
+        W_rb = norm_factor[..., tf.newaxis] * W_rb
+        W_rb = tf.transpose(W_rb, perm=[0,2,1]) # [N_sb, N_tx, Ns]
+
+        return W_rb
+    
+    def block_diag(self, mats):
+        # mats: list of [n_i, m_i]
+        r = sum([int(M.shape[0]) for M in mats])
+        c = sum([int(M.shape[1]) for M in mats])
+        out = tf.zeros([r, c], dtype=mats[0].dtype)
+        r0 = 0
+        c0 = 0
+        for M in mats:
+            ri = int(M.shape[0]); ci = int(M.shape[1])
+            paddings = [[r0, r - (r0 + ri)], [c0, c - (c0 + ci)]]
+            out += tf.pad(M, paddings)
+            r0 += ri
+            c0 += ci
+        return out
+
     
     def compute_q_per_sb(self, H_ref_sb, W_ref, H_g_sb, W_g, eps=1e-9):
         
