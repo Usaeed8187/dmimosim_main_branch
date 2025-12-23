@@ -90,7 +90,7 @@ if __name__ == "__main__":
     cfg.perfect_csi = False
     cfg.rank_adapt = False      # enable/disable rank adaptation
     cfg.link_adapt = False      # enable/disable link adaptation
-    cfg.csi_prediction = False
+    cfg.csi_prediction = True
     cfg.use_perfect_csi_history_for_prediction = False
     cfg.channel_prediction_method = "two_mode" # "old", "two_mode", "two_mode_tf"
     cfg.enable_ue_selection = False
@@ -98,7 +98,7 @@ if __name__ == "__main__":
     modulation_order = 2
     cfg.code_rate = 2/3
     if arguments == []:
-        mobility = 'low_mobility'
+        mobility = 'high_mobility'
         drop_idx = '3'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     # cfg.ns3_folder = "ns3/channels/LowMobility/"

@@ -36,6 +36,7 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._scheduling = False                                    # Turn scheduling on or off for phase 2 of MU-MIMO architecture
         self._scheduled_rx_ue_indices = None                        # Scheduled UE antennas indices for MU-MIMO precoding
         self._ncjt_ldpc_decode_and_forward = True                   # Enable LDPC decode-and-forward at the Rx UEs for NCJT simulations
+        self._channel_prediction_method = "two_mode_wesn"           # Channel prediction method: "old", "two_mode", "two_mode_tf"
         super().__init__(**kwargs)
 
     @property
@@ -274,3 +275,11 @@ class SimConfig(CarrierConfig, MCSConfig):
     @PMI_feedback_architecture.setter
     def PMI_feedback_architecture(self, val):
         self._PMI_feedback_architecture = val
+
+    @property
+    def channel_prediction_method(self):
+        return self._channel_prediction_method
+    
+    @channel_prediction_method.setter
+    def channel_prediction_method(self, val):
+        self._channel_prediction_method = val

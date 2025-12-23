@@ -377,3 +377,45 @@ class twomode_wesn_pred:
 
     def complex_tanh(self, Y):
         return np.tanh(np.real(Y)) + 1j * np.tanh(np.imag(Y))
+    
+def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2):
+
+    T, _, _, RxAnt, _, TxAnt, num_syms, RB = h_freq_csi_history.shape
+    h_freq_csi = np.zeros(h_freq_csi_history[0, ...].shape, dtype=h_freq_csi_history.dtype)
+
+    for tx_node_idx in range(ns3cfg.num_txue_sel + 1):
+        for rx_node_idx in range(ns3cfg.num_rxue_sel + 1):
+            if tx_node_idx == 0:
+                tx_ant_idx = np.arange(0, num_bs_ant)
+            else:
+                tx_ant_idx = np.arange(
+                    num_bs_ant + (tx_node_idx - 1) * num_ue_ant,
+                    num_bs_ant + (tx_node_idx) * num_ue_ant,
+                )
+            TxAnt = len(tx_ant_idx)
+
+            if rx_node_idx == 0:
+                rx_ant_idx = np.arange(0, num_bs_ant)
+            else:
+                rx_ant_idx = np.arange(
+                    num_bs_ant + (rx_node_idx - 1) * num_ue_ant,
+                    num_bs_ant + (rx_node_idx) * num_ue_ant,
+                )
+            RxAnt = len(rx_ant_idx)
+
+            curr_h_freq_csi_history = h_freq_csi_history[:, :, :, rx_ant_idx, :, ...]
+            curr_h_freq_csi_history = curr_h_freq_csi_history[:, :, :, :, :, tx_ant_idx, ...]
+
+            curr_h_freq_csi_history = tf.convert_to_tensor(curr_h_freq_csi_history)
+
+            twomode_predictor = twomode_wesn_pred(
+                rc_config=rc_config,
+                num_freq_re=RB,
+                num_rx_ant=RxAnt,
+                num_tx_ant=TxAnt,
+            )
+            rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
+            tmp = np.asarray(twomode_predictor.predict(curr_h_freq_csi_history))
+            h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
+
+    return h_freq_csi

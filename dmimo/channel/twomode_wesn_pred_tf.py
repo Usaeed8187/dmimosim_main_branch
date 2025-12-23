@@ -365,3 +365,49 @@ class twomode_wesn_pred_tf:
 
     def complex_tanh(self, Y):
         return tf.complex(tf.math.tanh(tf.math.real(Y)), tf.math.tanh(tf.math.imag(Y)))
+    
+def predict_all_links_tf(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2):
+
+    _, _, _, _, _, _, _, RB = h_freq_csi_history.shape
+
+    # Convert once to TensorFlow tensor to avoid repeated host/device transfers
+    tf_h_freq_csi_history = tf.convert_to_tensor(h_freq_csi_history)
+    h_freq_csi = tf.Variable(
+        tf.zeros(tf_h_freq_csi_history[0, ...].shape, dtype=tf_h_freq_csi_history.dtype)
+    )
+
+    # Pre-compute antenna index ranges for all TX/RX nodes
+    tx_ant_ranges = [tf.range(0, num_bs_ant)] + [
+        tf.range(num_bs_ant + (idx - 1) * num_ue_ant, num_bs_ant + idx * num_ue_ant)
+        for idx in range(1, ns3cfg.num_txue_sel + 1)
+    ]
+    rx_ant_ranges = [tf.range(0, num_bs_ant)] + [
+        tf.range(num_bs_ant + (idx - 1) * num_ue_ant, num_bs_ant + idx * num_ue_ant)
+        for idx in range(1, ns3cfg.num_rxue_sel + 1)
+    ]
+
+    predictor_cache = {}
+
+    for tx_ant_idx in tx_ant_ranges:
+        for rx_ant_idx in rx_ant_ranges:
+            rx_start, rx_len = int(rx_ant_idx[0]), int(rx_ant_idx.shape[0])
+            tx_start, tx_len = int(tx_ant_idx[0]), int(tx_ant_idx.shape[0])
+
+            curr_h_freq_csi_history = tf.gather(tf_h_freq_csi_history, rx_ant_idx, axis=3)
+            curr_h_freq_csi_history = tf.gather(curr_h_freq_csi_history, tx_ant_idx, axis=5)
+
+            key = (rx_len, tx_len)
+            if key not in predictor_cache:
+                predictor_cache[key] = twomode_wesn_pred_tf(
+                    rc_config=rc_config,
+                    num_freq_re=RB,
+                    num_rx_ant=rx_len,
+                    num_tx_ant=tx_len,
+                )
+
+            tmp = tf.convert_to_tensor(predictor_cache[key].predict(curr_h_freq_csi_history))
+
+            h_freq_csi[:, :, rx_start : rx_start + rx_len, :, tx_start : tx_start + tx_len, :, :].assign(tmp)
+
+
+    return h_freq_csi
