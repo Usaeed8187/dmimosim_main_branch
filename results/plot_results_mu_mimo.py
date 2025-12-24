@@ -1,465 +1,457 @@
-import sys
+"""Plot MU-MIMO KPI sweeps aggregated over multiple drops.
+
+The plotting logic is tailored for the artifacts produced by
+``sims/run_sim_mu_mimo_kpi_multiple_drops.sh``.  The script loads the
+per-drop ``npz`` files, averages metrics across drops, and produces four
+figures:
+
+* Uncoded BER vs. number of Tx UEs (fixed Rx UEs, fixed MCS)
+* Uncoded BER vs. number of Rx UEs (fixed Tx UEs, fixed MCS)
+* Throughput vs. number of Tx UEs (fixed Rx UEs, best MCS per point)
+* Throughput vs. number of Rx UEs (fixed Tx UEs, best MCS per point)
+
+For BER plots, the modulation order and code rate are fixed by the
+command-line arguments.  For throughput plots, the script selects, for
+each data point, the MCS that maximizes the *average* throughput across
+all requested drops and prints the maximizing MCS choices.
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+
 import os
-sys.path.append(os.path.join('..'))
+
+from dataclasses import dataclass
+from fractions import Fraction
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 
+################################################################################
+# Argument parsing
+################################################################################
 
 
-#############################################
-# Settings
-#############################################
+def _float_or_fraction(value: str) -> float:
+    """Parse a float or fraction string (e.g., ``"2/3"``).
 
-rx_ues_arr = [1,2,4,6]
+    Args:
+        value: String to parse.
 
-# Define positions for the box plots
-positions_all_scenarios = []
-positions_scenario_1 = np.arange(1,np.size(rx_ues_arr)+1)
-positions_all_scenarios.append(positions_scenario_1)
-positions_all_scenarios.append(positions_scenario_1 + 5) # Shifted right for the second scenario
-positions_all_scenarios.append(positions_scenario_1 + 10) # Shifted further right for the third scenario
+    Returns:
+        The parsed floating point value.
+    """
 
-mobilities = ['low_mobility', 'medium_mobility', 'high_mobility']
-
-
-
-#############################################
-# KPI Handling
-#############################################
-
-# Prediction off
-
-prediction_results = False
-ber = []
-ldpc_ber = []
-goodput = []
-throughput = []
-bitrate = []
-nodewise_goodput = []
-nodewise_throughput = []
-nodewise_bitrate = []
-ranks = []
-uncoded_ber_list = []
-ldpc_ber_list = []
-sinr_dB = []
-
-baseline_ber = []
-baseline_ldpc_ber = []
-baseline_goodput = []
-baseline_throughput = []
-baseline_bitrate = []
-baseline_ranks = []
-baseline_uncoded_ber_list = []
-baseline_ldpc_ber_list = []
-
-for mobility_idx in range(np.size(mobilities)):
-
-    curr_mobility = mobilities[mobility_idx]
-
-    temp_nodewise_goodput = []
-    temp_nodewise_throughput = []
-    temp_nodewise_bitrate = []
-    temp_ranks = []
-    temp_uncoded_ber_list = []
-    temp_ldpc_ber_list = []
-    temp_sinr_dB = []
-
-    for ue_arr_idx in range(np.size(rx_ues_arr)):
-        
-        if prediction_results:
-            file_path = "results/channels_{}/mu_mimo_results_UE_{}_pred.npz".format(curr_mobility, rx_ues_arr[ue_arr_idx])
-        else:
-            file_path = "results/channels_{}/mu_mimo_results_UE_{}.npz".format(curr_mobility, rx_ues_arr[ue_arr_idx])
-        data = np.load(file_path)
-
-        temp_nodewise_goodput.append(data['nodewise_goodput'])
-        temp_nodewise_throughput.append(data['nodewise_throughput'])
-        temp_nodewise_bitrate.append(data['nodewise_bitrate'])
-        temp_ranks.append(data['ranks'])
-        temp_uncoded_ber_list.append(data['uncoded_ber_list'])
-        temp_ldpc_ber_list.append(data['ldpc_ber_list'])
-        temp_sinr_dB.append(np.concatenate(data['sinr_dB']))
-    
-    ber.append(data['ber'])
-    ldpc_ber.append(data['ldpc_ber'])
-    goodput.append(data['goodput'])
-    throughput.append(data['throughput'])
-    bitrate.append(data['bitrate'])
-    nodewise_goodput.append(temp_nodewise_goodput)
-    nodewise_throughput.append(temp_nodewise_throughput)
-    nodewise_bitrate.append(temp_nodewise_bitrate)
-    ranks.append(temp_ranks)
-    uncoded_ber_list.append(temp_uncoded_ber_list)
-    ldpc_ber_list.append(temp_ldpc_ber_list)
-    sinr_dB.append(temp_sinr_dB)
-
-    if prediction_results:
-        baseline_file_path = "results/channels_{}/baseline_results_pred.npz".format(curr_mobility)
-    else:
-        baseline_file_path = "results/channels_{}/baseline_results.npz".format(curr_mobility)
-    baseline_data = np.load(baseline_file_path)
-
-    baseline_ranks.append(baseline_data['ranks'])
-    baseline_uncoded_ber_list.append(baseline_data['uncoded_ber_list'])
-    baseline_ldpc_ber_list.append(baseline_data['ldpc_ber_list'])
-    baseline_ber.append(baseline_data['ber'])
-    baseline_ldpc_ber.append(baseline_data['ldpc_ber'])
-    baseline_goodput.append(baseline_data['goodput'])
-    baseline_throughput.append(baseline_data['throughput'])
-    baseline_bitrate.append(baseline_data['bitrate'])
-
-# Prediction on
-
-prediction_results = True
-ber_pred = []
-ldpc_ber_pred = []
-goodput_pred = []
-throughput_pred = []
-bitrate_pred = []
-nodewise_goodput_pred = []
-nodewise_throughput_pred = []
-nodewise_bitrate_pred = []
-ranks_pred = []
-uncoded_ber_list_pred = []
-ldpc_ber_list_pred = []
-sinr_dB_pred = []
-
-baseline_ber_pred = []
-baseline_ldpc_ber_pred = []
-baseline_goodput_pred = []
-baseline_throughput_pred = []
-baseline_bitrate_pred = []
-baseline_ranks_pred = []
-baseline_uncoded_ber_list_pred = []
-baseline_ldpc_ber_list_pred = []
-
-for mobility_idx in range(np.size(mobilities)):
-
-    curr_mobility = mobilities[mobility_idx]
-
-    temp_nodewise_goodput = []
-    temp_nodewise_throughput = []
-    temp_nodewise_bitrate = []
-    temp_ranks = []
-    temp_uncoded_ber_list = []
-    temp_ldpc_ber_list = []
-    temp_sinr_dB = []
-
-    for ue_arr_idx in range(np.size(rx_ues_arr)):
-        
-        if prediction_results:
-            file_path = "results/channels_{}/mu_mimo_results_UE_{}_pred.npz".format(curr_mobility, rx_ues_arr[ue_arr_idx])
-        else:
-            file_path = "results/channels_{}/mu_mimo_results_UE_{}.npz".format(curr_mobility, rx_ues_arr[ue_arr_idx])
-        data = np.load(file_path)
-
-        temp_nodewise_goodput.append(data['nodewise_goodput'])
-        temp_nodewise_throughput.append(data['nodewise_throughput'])
-        temp_nodewise_bitrate.append(data['nodewise_bitrate'])
-        temp_ranks.append(data['ranks'])
-        temp_uncoded_ber_list.append(data['uncoded_ber_list'])
-        temp_ldpc_ber_list.append(data['ldpc_ber_list'])
-        temp_sinr_dB.append(np.concatenate(data['sinr_dB']))
-    
-    ber_pred.append(data['ber'])
-    ldpc_ber_pred.append(data['ldpc_ber'])
-    goodput_pred.append(data['goodput'])
-    throughput_pred.append(data['throughput'])
-    bitrate_pred.append(data['bitrate'])
-    nodewise_goodput_pred.append(temp_nodewise_goodput)
-    nodewise_throughput_pred.append(temp_nodewise_throughput)
-    nodewise_bitrate_pred.append(temp_nodewise_bitrate)
-    ranks_pred.append(temp_ranks)
-    uncoded_ber_list_pred.append(temp_uncoded_ber_list)
-    ldpc_ber_list_pred.append(temp_ldpc_ber_list)
-    sinr_dB_pred.append(temp_sinr_dB)
-
-    if prediction_results:
-        baseline_file_path = "results/channels_{}/baseline_results_pred.npz".format(curr_mobility)
-    else:
-        baseline_file_path = "results/channels_{}/baseline_results.npz".format(curr_mobility)
-    baseline_data = np.load(baseline_file_path)
-
-    baseline_ranks_pred.append(baseline_data['ranks'])
-    baseline_uncoded_ber_list_pred.append(baseline_data['uncoded_ber_list'])
-    baseline_ldpc_ber_list_pred.append(baseline_data['ldpc_ber_list'])
-    baseline_ber_pred.append(baseline_data['ber'])
-    baseline_ldpc_ber_pred.append(baseline_data['ldpc_ber'])
-    baseline_goodput_pred.append(baseline_data['goodput'])
-    baseline_throughput_pred.append(baseline_data['throughput'])
-    baseline_bitrate_pred.append(baseline_data['bitrate'])
-
-#############################################
-# Plots
-#############################################
+    try:
+        return float(Fraction(value))
+    except (ValueError, ZeroDivisionError):
+        return float(value)
 
 
-
-############################### SINR Distributions (rx nodes in phase 2) ######################################
-
-# Method 1 for SINR Distributions (rx nodes in phase 2) (number of UEs on x-axis)
-plt.figure()
-colors = ['red', 'green', 'purple']
-for mobility_idx in range(np.size(mobilities)):
-    plt.boxplot(sinr_dB[mobility_idx], positions=positions_all_scenarios[mobility_idx], widths=0.6, patch_artist=True, showfliers=False,
-                boxprops=dict(facecolor=colors[mobility_idx], color=colors[mobility_idx]),
-                medianprops=dict(color='black'))
-plt.xticks(np.concatenate(positions_all_scenarios), rx_ues_arr * 3)
-legend_elements = [plt.Line2D([0], [0], color='red', lw=4, label='Scenario 1'),
-                   plt.Line2D([0], [0], color='green', lw=4, label='Scenario 2'),
-                   plt.Line2D([0], [0], color='purple', lw=4, label='Scenario 3')]
-plt.legend(handles=legend_elements, title='Scenarios', loc='upper right')
-plt.grid(True)
-plt.xlabel('Number of UEs')
-plt.ylabel('SINR')
-plt.title('SINR (dB)')
-plt.ylim(-10, 15)
-plt.savefig("results/plots/SINR_MU_MIMO")
+@dataclass
+class PlotConfig:
+    base_dir: str
+    mobility: str
+    drops: Sequence[int]
+    rx_ues: Sequence[int]
+    tx_ues: Sequence[int]
+    modulation_orders: Sequence[int]
+    code_rates: Sequence[float]
+    ber_modulation_order: int
+    ber_code_rate: float
+    fixed_rx_for_tx_sweep: int
+    fixed_tx_for_rx_sweep: int
+    output_dir: str
+    prediction: bool = True
 
 
-# # Method 2 for SINR Distributions (rx nodes in phase 2) (mobility on x-axis and only showing best selection)
-# num_categories = len(mobilities)
-# mean_snr_db_arr = np.zeros(num_categories)
-# UE_ind = 2
-# for i in range(num_categories):
-#     mean_snr_db_arr[i] = np.mean(sinr_dB[i][UE_ind])
-# x = np.arange(num_categories)
-# bar_width = 0.35
-# x_labels = ['Scenario 1', 'Scenario 2', 'Scenario 3']
-# plt.figure()
-# plt.bar(x, np.asarray(mean_snr_db_arr), width=bar_width, label='MU MIMO', color='#4F81BD')
-# plt.xticks(x, x_labels)
-# plt.grid(True)
-# plt.ylabel('SINR')
-# plt.title('SINR (dB)')
-# plt.savefig("results/plots/SINR_MU_MIMO")
-
-############################### End-to-end average BER ######################################
-
-# # Method 1 for end-to-end average BER (mobility on x-axis)
-# plt.figure()
-# x_labels = ['Low mobility', 'Medium mobility', 'High mobility']
-# x_values = np.arange(1,np.size(mobilities)+1)
-# plt.semilogy(x_values, np.asarray(ber)[:,0], marker='o', label='1 UE')
-# plt.semilogy(x_values, np.asarray(ber)[:,1], marker='s', label='2 UEs')
-# plt.semilogy(x_values, np.asarray(ber)[:,2], marker='v', label='4 UEs')
-# plt.semilogy(x_values, np.asarray(ber)[:,3], marker='^', label='6 UEs')
-# plt.semilogy(x_values, np.asarray(baseline_ber), marker='*', label='Baseline')
-# plt.grid(True)
-# plt.xticks(x_values, x_labels)
-# plt.ylabel('BER')
-# plt.title('Uncoded BER')
-# plt.legend()
-# plt.savefig("results/plots/BER_MU_MIMO")
-
-# # Method 2 for end-to-end average BER (number of UEs on x-axis)
-# plt.figure()
-# plt.semilogy(rx_ues_arr, ber[0], marker='o', label='Low Mobility')
-# plt.semilogy(rx_ues_arr, ber[1], marker='s', label='Medium Mobility')
-# plt.semilogy(rx_ues_arr, ber[2], marker='^', label='High Mobility')
-# plt.grid(True)
-# plt.xlabel('Number of UEs')
-# plt.ylabel('BER')
-# plt.title('Uncoded BER')
-# plt.legend()
-# plt.savefig("results/plots/BER")
-
-# # Method 3 for end-to-end average BER (bar plot with mobility on x-axis)
-# num_categories = len(mobilities)
-# x = np.arange(num_categories)
-# bar_width = 0.15
-# x_labels = ['Scenario 1', 'Scenario 2', 'Scenario 3']
-# plt.figure()
-# plt.bar(x - 2 * bar_width, np.asarray(baseline_ber), width=bar_width, label='Baseline', color='#4F81BD')
-# plt.bar(x - bar_width, np.asarray(ber)[:,0], width=bar_width, label='1 UE', color='#C0504D')
-# plt.bar(x, np.asarray(ber)[:,1], width=bar_width, label='2 UEs', color='#9BBB59')
-# plt.bar(x + bar_width, np.asarray(ber)[:,2], width=bar_width, label='4 UEs', color='#8064A2')
-# plt.bar(x + 2 * bar_width, np.asarray(ber)[:,3], width=bar_width, label='6 UEs', color='#4BACC6')
-# plt.yscale('log')
-# plt.xticks(x, x_labels)
-# plt.grid(True)
-# plt.ylabel('BER')
-# plt.title('Uncoded BER')
-# plt.legend()
-# plt.savefig("results/plots/BER_MU_MIMO")
-
-# Method 3 for end-to-end average BER (bar plot with mobility on x-axis), but plotting only the best selection of UEs
-num_categories = len(mobilities)
-x = np.arange(num_categories)
-bar_width = 0.35
-x_labels = ['Scenario 1', 'Scenario 2', 'Scenario 3']
-plt.figure()
-plt.bar(x - bar_width/2, np.asarray(baseline_ber), width=bar_width, label='Baseline', color='#4F81BD')
-plt.bar(x + bar_width/2, np.asarray(ber)[:,0], width=bar_width, label='MU MIMO', color='#C0504D')
-plt.yscale('log')
-plt.xticks(x, x_labels)
-plt.grid(True)
-plt.ylabel('BER')
-plt.title('Uncoded BER')
-plt.legend()
-plt.savefig("results/plots/BER_MU_MIMO")
-
-# # Method 3 for end-to-end average BER (bar plot with mobility on x-axis), but plotting only the best selection of UEs. also plotting the prediction cases
-# num_categories = len(mobilities)
-# x = np.arange(num_categories)
-# bar_width = 0.25
-# x_labels = ['Scenario 1', 'Scenario 2', 'Scenario 3']
-# plt.figure()
-# plt.bar(x - bar_width, np.asarray(baseline_ber), width=bar_width, label='Baseline', color='#4F81BD')
-# plt.bar(x, np.asarray(ber)[:,0], width=bar_width, label='MU MIMO', color='#C0504D')
-# plt.bar(x + bar_width, np.asarray(ber_pred)[:,0], width=bar_width, label='MU MIMO with Channel Prediction', color='#9BBB59')
-# plt.yscale('log')
-# plt.xticks(x, x_labels)
-# plt.grid(True)
-# plt.ylabel('BER')
-# plt.title('Uncoded BER')
-# plt.legend()
-# plt.savefig("results/plots/BER_MU_MIMO")
+################################################################################
+# Data loading helpers
+################################################################################
 
 
-############################### End-to-end average BLER ######################################
-# # Method 1 for end-to-end average BER (mobility on x-axis)
-# plt.figure()
-# x_labels = ['Low mobility', 'Medium mobility', 'High mobility']
-# x_values = np.arange(1,np.size(mobilities)+1)
-# plt.semilogy(x_values, np.asarray(ldpc_ber)[:,0], marker='o', label='1 UE')
-# plt.semilogy(x_values, np.asarray(ldpc_ber)[:,1], marker='s', label='2 UEs')
-# plt.semilogy(x_values, np.asarray(ldpc_ber)[:,2], marker='v', label='4 UEs')
-# plt.semilogy(x_values, np.asarray(ldpc_ber)[:,3], marker='^', label='6 UEs')
-# plt.semilogy(x_values, np.asarray(baseline_ldpc_ber), marker='*', label='Baseline')
-# plt.grid(True)
-# plt.xticks(x_values, x_labels)
-# plt.ylabel('BLER')
-# plt.title('BLER')
-# plt.legend()
-# plt.savefig("results/plots/BLER_MU_MIMO")
+@dataclass
+class DataPoint:
+    uncoded_ber: float
+    throughput: float
 
 
-# # Method 2 for end-to-end average BLER (number of UEs on x-axis)
-# plt.figure()
-# plt.semilogy(rx_ues_arr, ldpc_ber[0], marker='o', label='Low Mobility')
-# plt.semilogy(rx_ues_arr, ldpc_ber[1], marker='s', label='Medium Mobility')
-# plt.semilogy(rx_ues_arr, ldpc_ber[2], marker='^', label='High Mobility')
-# plt.grid(True)
-# plt.xlabel('Number of UEs')
-# plt.ylabel('BLER')
-# plt.title('BLER')
-# plt.legend()
-# plt.savefig("results/plots/BLER")
+class ResultLoader:
+    def __init__(self, cfg: PlotConfig) -> None:
+        self.cfg = cfg
 
-# # Method 3 for end-to-end average BLER (bar plot with mobility on x-axis)
-# num_categories = len(mobilities)
-# x = np.arange(num_categories)
-# bar_width = 0.15
-# x_labels = ['Scenario 1', 'Scenario 2', 'Scenario 3']
-# plt.figure()
-# plt.bar(x - 2 * bar_width, np.asarray(baseline_ldpc_ber), width=bar_width, label='Baseline', color='#4F81BD')
-# plt.bar(x - bar_width, np.asarray(ldpc_ber)[:,0], width=bar_width, label='1 UE', color='#C0504D')
-# plt.bar(x, np.asarray(ldpc_ber)[:,1], width=bar_width, label='2 UEs', color='#9BBB59')
-# plt.bar(x + bar_width, np.asarray(ldpc_ber)[:,2], width=bar_width, label='4 UEs', color='#8064A2')
-# plt.bar(x + 2 * bar_width, np.asarray(ldpc_ber)[:,3], width=bar_width, label='6 UEs', color='#4BACC6')
-# plt.yscale('log')
-# plt.xticks(x, x_labels)
-# plt.grid(True)
-# plt.ylabel('BLER')
-# plt.title('BLER')
-# plt.legend()
-# plt.savefig("results/plots/BLER_MU_MIMO")
+    def _drop_folder(self, drop_id: int) -> str:
+        folder_name = f"channels_{self.cfg.mobility}_{drop_id}"
+        return os.path.join(self.cfg.base_dir, folder_name)
 
-# Method 3 for end-to-end average BLER (bar plot with mobility on x-axis), but plotting only the best selection of UEs
-num_categories = len(mobilities)
-x = np.arange(num_categories)
-bar_width = 0.35
-x_labels = ['Scenario 1', 'Scenario 2', 'Scenario 3']
-plt.figure()
-plt.bar(x - bar_width/2, np.asarray(baseline_ldpc_ber), width=bar_width, label='Baseline', color='#4F81BD')
-plt.bar(x + bar_width/2, np.asarray(ldpc_ber)[:,0], width=bar_width, label='MU MIMO', color='#C0504D')
-plt.yscale('log')
-plt.xticks(x, x_labels)
-plt.grid(True)
-plt.ylabel('BLER')
-plt.title('BLER')
-plt.legend()
-plt.savefig("results/plots/BLER_MU_MIMO")
+    def _suffix(self) -> str:
+        return "_prediction" if self.cfg.prediction else ""
 
-# # Method 3 for end-to-end average BLER (bar plot with mobility on x-axis), but plotting only the best selection of UEs and also plotting with prediction
-# num_categories = len(mobilities)
-# x = np.arange(num_categories)
-# bar_width = 0.35
-# x_labels = ['Scenario 1', 'Scenario 2', 'Scenario 3']
-# plt.figure()
-# plt.bar(x - bar_width, np.asarray(baseline_ldpc_ber_pred), width=bar_width, label='Baseline', color='#4F81BD')
-# plt.bar(x, np.asarray(ldpc_ber)[:,0], width=bar_width, label='MU MIMO', color='#C0504D')
-# plt.bar(x + bar_width, np.asarray(ldpc_ber_pred)[:,0], width=bar_width, label='MU MIMO with Channel Prediction', color='#9BBB59')
-# plt.yscale('log')
-# plt.xticks(x, x_labels)
-# plt.grid(True)
-# plt.ylabel('BLER')
-# plt.title('BLER')
-# plt.legend()
-# plt.savefig("results/plots/BLER_MU_MIMO")
+    @staticmethod
+    def _parse_code_rate_from_path(path: str) -> Optional[float]:
+        basename = os.path.basename(path)
+        try:
+            middle = basename.split("code_rate_")[1]
+            code_rate_str = middle.split("_rx_UE")[0]
+            return float(code_rate_str)
+        except (IndexError, ValueError):
+            return None
+
+    def _find_file(
+        self, drop_id: int, rx_ues: int, tx_ues: int, mod_order: int, code_rate: float
+    ) -> Optional[str]:
+        folder = self._drop_folder(drop_id)
+        suffix = self._suffix()
+        code_rate_str = str(code_rate)
+        candidate = os.path.join(
+            folder,
+            f"mu_mimo_results_mod_order_{mod_order}_code_rate_{code_rate_str}_rx_UE_{rx_ues}_tx_UE_{tx_ues}{suffix}.npz",
+        )
+        if os.path.exists(candidate):
+            return candidate
+
+        pattern = os.path.join(
+            folder,
+            f"mu_mimo_results_mod_order_{mod_order}_code_rate_*_rx_UE_{rx_ues}_tx_UE_{tx_ues}{suffix}.npz",
+        )
+        matches = glob.glob(pattern)
+        if not matches:
+            return None
+
+        target = float(code_rate)
+        matches.sort(
+            key=lambda path: abs(
+                (self._parse_code_rate_from_path(path) or target) - target
+            )
+        )
+        return matches[0]
+
+    @staticmethod
+    def _scalar_from_array(arr: np.ndarray) -> float:
+        arr = np.asarray(arr)
+        if arr.size == 0:
+            return float("nan")
+        return float(np.asarray(arr).reshape(-1)[-1])
+
+    @staticmethod
+    def _uncoded_ber_from_npz(data: np.lib.npyio.NpzFile) -> float:
+        uncoded = data.get("uncoded_ber_list")
+        if uncoded is None:
+            return float("nan")
+        uncoded_array = np.asarray(uncoded, dtype=float)
+        return float(np.nanmean(uncoded_array))
+
+    def load_datapoint(
+        self, drop_id: int, rx_ues: int, tx_ues: int, mod_order: int, code_rate: float
+    ) -> Optional[DataPoint]:
+        file_path = self._find_file(drop_id, rx_ues, tx_ues, mod_order, code_rate)
+        if file_path is None:
+            return None
+
+        with np.load(file_path, allow_pickle=True) as data:
+            uncoded_ber = self._uncoded_ber_from_npz(data)
+            throughput = self._scalar_from_array(np.atleast_1d(data.get("throughput", [])))
+        return DataPoint(uncoded_ber=uncoded_ber, throughput=throughput)
 
 
-############################### Probability of Outage (rx nodes in phase 2) ######################################
-# # Method 1 for phase 2 probability of outage (plotting all mobilities and all UE selections)
-# threshold = 0.15
-# outage_probability = []
-# for mobility_idx in range(np.size(mobilities)):
-#     temp_outage_probability = []
-#     for ue_idx in range(np.size(rx_ues_arr)):
-#         prob = np.sum(uncoded_ber_list[mobility_idx][ue_idx] > threshold) / np.size(uncoded_ber_list[0][0]) * 100
-#         temp_outage_probability.append(prob)
-#     outage_probability.append(temp_outage_probability)
-# plt.figure()
-# plt.plot(rx_ues_arr, outage_probability[0], marker='o', label='Low Mobility')
-# plt.plot(rx_ues_arr, outage_probability[1], marker='s', label='Medium Mobility')
-# plt.plot(rx_ues_arr, outage_probability[2], marker='^', label='High Mobility')
-# plt.grid(True)
-# plt.xlabel('Number of UEs')
-# plt.ylabel('Probability (%)')
-# plt.title('Probability of Outage')
-# plt.legend()
-# plt.savefig("results/plots/prob_outage_MU_MIMO")
+################################################################################
+# Aggregation
+################################################################################
 
-# Method 2 for phase 2 probability of outage (plotting all mobilities and only the UE selection we used for the "best" throughput)
-# threshold = 0.15
-# outage_probability = []
-# for mobility_idx in range(np.size(mobilities)):
-#     temp_outage_probability = []
-#     for ue_idx in range(np.size(rx_ues_arr)):
-#         prob = np.sum(uncoded_ber_list[mobility_idx][ue_idx] > threshold) / np.size(uncoded_ber_list[0][0]) * 100
-#         temp_outage_probability.append(prob)
-#     outage_probability.append(temp_outage_probability)
-# plt.figure()
-# plt.plot(rx_ues_arr, outage_probability[0], marker='o', label='Low Mobility')
-# plt.plot(rx_ues_arr, outage_probability[1], marker='s', label='Medium Mobility')
-# plt.plot(rx_ues_arr, outage_probability[2], marker='^', label='High Mobility')
-# plt.grid(True)
-# plt.xlabel('Number of UEs')
-# plt.ylabel('Probability (%)')
-# plt.title('Probability of Outage')
-# plt.legend()
-# plt.savefig("results/plots/prob_outage_MU_MIMO")
 
-# Method 3 for phase 2 probability of outage (plotting all mobilities and only the UE selection we used for the "best" throughput). Using BLER instead of BER
-threshold = 0.15
-outage_probability = np.zeros(len(mobilities))
-ue_idx = 2
-for mobility_idx in range(np.size(mobilities)):
-    prob = np.sum(ldpc_ber_list[mobility_idx][ue_idx] > threshold) / np.size(uncoded_ber_list[mobility_idx][ue_idx]) * 100
-    outage_probability[mobility_idx] = prob
-num_categories = len(mobilities)
-x = np.arange(num_categories)
-bar_width = 0.35
-x_labels = ['Scenario 1', 'Scenario 2', 'Scenario 3']
-plt.figure()
-plt.bar(x, outage_probability, width=bar_width, color='#4F81BD')
-plt.xticks(x, x_labels)
-plt.ylim(0,100)
-plt.grid(True)
-plt.ylabel('Probability (%)')
-plt.title('Probability of Outage')
-plt.savefig("results/plots/prob_outage_MU_MIMO")
+def aggregate_metrics(
+    loader: ResultLoader,
+    rx_values: Iterable[int],
+    tx_values: Iterable[int],
+    modulation_orders: Iterable[int],
+    code_rates: Iterable[float],
+) -> Dict[Tuple[int, int, int, float], List[DataPoint]]:
+    results: Dict[Tuple[int, int, int, float], List[DataPoint]] = {}
+    for drop_id in loader.cfg.drops:
+        for rx_ues in rx_values:
+            for tx_ues in tx_values:
+                for mod_order in modulation_orders:
+                    for code_rate in code_rates:
+                        datapoint = loader.load_datapoint(
+                            drop_id, rx_ues, tx_ues, mod_order, code_rate
+                        )
+                        if datapoint is None:
+                            continue
+                        results.setdefault(
+                            (rx_ues, tx_ues, mod_order, float(code_rate)), []
+                        ).append(datapoint)
+    return results
 
-hold = 1
+
+def average_datapoints(points: Sequence[DataPoint]) -> DataPoint:
+    return DataPoint(
+        uncoded_ber=float(np.nanmean([p.uncoded_ber for p in points])),
+        throughput=float(np.nanmean([p.throughput for p in points])),
+    )
+
+
+################################################################################
+# Plotting helpers
+################################################################################
+
+
+def plot_metric(
+    x_values: Sequence[int],
+    y_values: Sequence[float],
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    output_path: str,
+) -> None:
+    plt.figure()
+    plt.plot(x_values, y_values, marker="o")
+    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    print(f"Saved: {output_path}")
+
+def semilogy_metric(
+    x_values: Sequence[int],
+    y_values: Sequence[float],
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    output_path: str,
+) -> None:
+    plt.figure()
+    plt.semilogy(x_values, y_values, marker="o")
+    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    print(f"Saved: {output_path}")
+
+
+
+def select_best_mcs(
+    aggregated: Dict[Tuple[int, int, int, float], List[DataPoint]],
+    rx_ues: int,
+    tx_ues: int,
+    modulation_orders: Iterable[int],
+    code_rates: Iterable[float],
+) -> Tuple[Optional[float], Optional[Tuple[int, float]]]:
+    best_throughput = None
+    best_mcs: Optional[Tuple[int, float]] = None
+    for mod_order in modulation_orders:
+        for code_rate in code_rates:
+            key = (rx_ues, tx_ues, mod_order, float(code_rate))
+            if key not in aggregated:
+                continue
+            avg_point = average_datapoints(aggregated[key])
+            if best_throughput is None or avg_point.throughput > best_throughput:
+                best_throughput = avg_point.throughput
+                best_mcs = (mod_order, float(code_rate))
+    return best_throughput, best_mcs
+
+
+################################################################################
+# Main plotting routine
+################################################################################
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--base-dir",
+        default=os.path.join("results", "channels_multiple_mu_mimo"),
+        help="Root directory containing per-drop results.",
+    )
+    parser.add_argument("--mobility", default="high_mobility", help="Mobility string used in the folder names.")
+    parser.add_argument(
+        "--drops",
+        type=int,
+        nargs="+",
+        default=[1, 2, 3],
+        help="Drop indices to average over (e.g., 1 2 3).",
+    )
+    parser.add_argument(
+        "--rx-ues",
+        type=int,
+        nargs="+",
+        default=[0, 2, 4, 6],
+        help="Rx UE counts that were simulated.",
+    )
+    parser.add_argument(
+        "--tx-ues",
+        type=int,
+        nargs="+",
+        default=[2, 4, 6, 8, 10],
+        help="Tx UE counts that were simulated (num_txue_sel).",
+    )
+    parser.add_argument(
+        "--modulation-orders",
+        type=int,
+        nargs="+",
+        default=[2, 4],
+        help="Modulation orders that were simulated (e.g., 2 for QPSK, 4 for 16-QAM).",
+    )
+    parser.add_argument(
+        "--code-rates",
+        type=_float_or_fraction,
+        nargs="+",
+        default=[_float_or_fraction("2/3"), _float_or_fraction("5/6")],
+        help="Code rates that were simulated (accepts fractions like 2/3).",
+    )
+    parser.add_argument(
+        "--ber-modulation-order",
+        type=int,
+        default=2,
+        help="Modulation order to use for BER plots.",
+    )
+    parser.add_argument(
+        "--ber-code-rate",
+        type=_float_or_fraction,
+        default=_float_or_fraction("2/3"),
+        help="Code rate to use for BER plots (accepts fractions like 2/3).",
+    )
+    parser.add_argument(
+        "--fixed-rx",
+        type=int,
+        default=4,
+        help="Rx UE count to hold fixed when sweeping Tx UEs.",
+    )
+    parser.add_argument(
+        "--fixed-tx",
+        type=int,
+        default=8,
+        help="Tx UE count to hold fixed when sweeping Rx UEs.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=os.path.join("results", "plots"),
+        help="Directory to save the generated plots.",
+    )
+    parser.add_argument(
+        "--no-prediction",
+        action="store_true",
+        help="Look for non-prediction result files (omit the _prediction suffix).",
+    )
+
+    args = parser.parse_args()
+
+    cfg = PlotConfig(
+        base_dir=args.base_dir,
+        mobility=args.mobility,
+        drops=args.drops,
+        rx_ues=args.rx_ues,
+        tx_ues=args.tx_ues,
+        modulation_orders=args.modulation_orders,
+        code_rates=args.code_rates,
+        ber_modulation_order=args.ber_modulation_order,
+        ber_code_rate=args.ber_code_rate,
+        fixed_rx_for_tx_sweep=args.fixed_rx,
+        fixed_tx_for_rx_sweep=args.fixed_tx,
+        output_dir=args.output_dir,
+        prediction=not args.no_prediction,
+    )
+
+    os.makedirs(cfg.output_dir, exist_ok=True)
+    loader = ResultLoader(cfg)
+
+    aggregated = aggregate_metrics(
+        loader,
+        cfg.rx_ues,
+        cfg.tx_ues,
+        cfg.modulation_orders,
+        cfg.code_rates,
+    )
+
+    # BER vs Tx UEs (fixed Rx)
+    ber_tx = []
+    for tx in cfg.tx_ues:
+        key = (cfg.fixed_rx_for_tx_sweep, tx, cfg.ber_modulation_order, float(cfg.ber_code_rate))
+        points = aggregated.get(key, [])
+        ber_tx.append(average_datapoints(points).uncoded_ber if points else np.nan)
+    semilogy_metric(
+        cfg.tx_ues,
+        ber_tx,
+        xlabel="Number of Tx UEs",
+        ylabel="Uncoded BER",
+        title=f"Uncoded BER vs Tx UEs (Rx UEs={cfg.fixed_rx_for_tx_sweep}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",
+        output_path=os.path.join(cfg.output_dir, "uncoded_ber_vs_tx_ues.png"),
+    )
+
+    # BER vs Rx UEs (fixed Tx)
+    ber_rx = []
+    for rx in cfg.rx_ues:
+        key = (rx, cfg.fixed_tx_for_rx_sweep, cfg.ber_modulation_order, float(cfg.ber_code_rate))
+        points = aggregated.get(key, [])
+        ber_rx.append(average_datapoints(points).uncoded_ber if points else np.nan)
+    semilogy_metric(
+        cfg.rx_ues,
+        ber_rx,
+        xlabel="Number of Rx UEs",
+        ylabel="Uncoded BER",
+        title=f"Uncoded BER vs Rx UEs (Tx UEs={cfg.fixed_tx_for_rx_sweep}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",
+        output_path=os.path.join(cfg.output_dir, "uncoded_ber_vs_rx_ues.png"),
+    )
+
+    # Throughput vs Tx UEs (fixed Rx, best MCS)
+    thr_tx = []
+    best_mcs_tx = []
+    for tx in cfg.tx_ues:
+        best_throughput, best_mcs = select_best_mcs(
+            aggregated,
+            cfg.fixed_rx_for_tx_sweep,
+            tx,
+            cfg.modulation_orders,
+            cfg.code_rates,
+        )
+        thr_tx.append(best_throughput if best_throughput is not None else np.nan)
+        best_mcs_tx.append(best_mcs)
+    plot_metric(
+        cfg.tx_ues,
+        thr_tx,
+        xlabel="Number of Tx UEs",
+        ylabel="Throughput",
+        title=f"Throughput vs Tx UEs (Rx UEs={cfg.fixed_rx_for_tx_sweep}, best MCS)",
+        output_path=os.path.join(cfg.output_dir, "throughput_vs_tx_ues.png"),
+    )
+
+    # Throughput vs Rx UEs (fixed Tx, best MCS)
+    thr_rx = []
+    best_mcs_rx = []
+    for rx in cfg.rx_ues:
+        best_throughput, best_mcs = select_best_mcs(
+            aggregated,
+            rx,
+            cfg.fixed_tx_for_rx_sweep,
+            cfg.modulation_orders,
+            cfg.code_rates,
+        )
+        thr_rx.append(best_throughput if best_throughput is not None else np.nan)
+        best_mcs_rx.append(best_mcs)
+    plot_metric(
+        cfg.rx_ues,
+        thr_rx,
+        xlabel="Number of Rx UEs",
+        ylabel="Throughput",
+        title=f"Throughput vs Rx UEs (Tx UEs={cfg.fixed_tx_for_rx_sweep}, best MCS)",
+        output_path=os.path.join(cfg.output_dir, "throughput_vs_rx_ues.png"),
+    )
+
+    # Print the maximizing MCS selections for throughput plots
+    print("\nMaximizing MCS for Throughput vs Tx UEs (Rx UEs fixed at {}):".format(cfg.fixed_rx_for_tx_sweep))
+    for tx, mcs in zip(cfg.tx_ues, best_mcs_tx):
+        print(f"  Tx UEs={tx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'})")
+
+    print("\nMaximizing MCS for Throughput vs Rx UEs (Tx UEs fixed at {}):".format(cfg.fixed_tx_for_rx_sweep))
+    for rx, mcs in zip(cfg.rx_ues, best_mcs_rx):
+        print(f"  Rx UEs={rx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'})")
+
+
+if __name__ == "__main__":
+    main()
