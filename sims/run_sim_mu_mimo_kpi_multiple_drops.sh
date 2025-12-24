@@ -5,11 +5,11 @@
 declare -a mobilities=("high_mobility")
 # declare -a drop_idx=("1" "2" "3" "4" "5" "6" "7" "8" "9" "10" "11" "12" "13" "14" "15" "16" "17" "18" "19" "20" "21" "22" "23" "24")
 declare -a drop_idx=("1" "2" "3" "4" "5")
-declare -a rx_ues_arr=("1" "2" "4" "6")
+declare -a rx_ues_arr=("0" "2" "4" "6")
 # declare -a rx_ues_arr=("10")
-declare -a modulation_orders=("2")
-declare -a code_rates=("2/3")
-declare -a num_txue_sel_arr=("10")
+declare -a modulation_orders=("2" "4")
+declare -a code_rates=("2/3" "5/6")
+declare -a num_txue_sel_arr=("2" "4" "6" "8" "10")
 
 # Loop through the arrays
 for i in ${!mobilities[@]}; do
