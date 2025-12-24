@@ -71,7 +71,7 @@ print(f"Arguments: {arguments}")
 
 modulation_order = 2
 code_rate = 2 / 3
-num_txue_sel = 10
+num_txue_sel = 4
 
 def _parse_code_rate(value):
     try:
@@ -110,10 +110,10 @@ if __name__ == "__main__":
     cfg.total_slots = 100       # total number of slots in ns-3 channels
     cfg.start_slot_idx = 35     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
-    cfg.perfect_csi = False
+    cfg.perfect_csi = True
     cfg.rank_adapt = False      # enable/disable rank adaptation
-    cfg.link_adapt = False      # enable/disable link adaptation
-    cfg.csi_prediction = True
+    cfg.link_adapt = False      # enable/disable link adaptation,. .
+    cfg.csi_prediction = False
     cfg.use_perfect_csi_history_for_prediction = False
     cfg.channel_prediction_method = "two_mode" # "old", "two_mode", "two_mode_tf"
     cfg.enable_ue_selection = False
@@ -127,7 +127,16 @@ if __name__ == "__main__":
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
     cfg.enable_rxsquad = False
     cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT" for quantized CSI feedback
+    cfg.csi_quantization_on = False
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
+
+    if cfg.perfect_csi:
+        cfg.csi_prediction = False
+
+    if cfg.link_adapt:
+        MCS_string = "link_adapt"
+    else:
+        MCS_string = "mod_order_{}_code_rate_{}".format(modulation_order, code_rate)
 
     # Select Number of TxSquad and RxSquad UEs to use.
     ns3cfg.num_txue_sel = num_txue_sel
@@ -212,18 +221,18 @@ if __name__ == "__main__":
         if cfg.csi_prediction:
             
             if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_scheduling_prediction_mod_order_{}_code_rate_{}_tx_UE_{}.npz".format(modulation_order, code_rate, num_txue_sel))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_mod_order_{}_code_rate_{}_rx_UE_{}_tx_UE_{}_prediction.npz".format(modulation_order, code_rate, rx_ues_arr[ue_arr_idx], num_txue_sel))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method))
             np.savez(file_path,
                     cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
                     nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
                     ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11])
         else:
             if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_scheduling_mod_order_{}_code_rate_{}_tx_UE_{}.npz".format(modulation_order, code_rate, num_txue_sel))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_mod_order_{}_code_rate_{}_rx_UE_{}_tx_UE_{}.npz".format(modulation_order, code_rate, rx_ues_arr[ue_arr_idx], num_txue_sel))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi))
 
             np.savez(file_path,
                     cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 

@@ -164,11 +164,11 @@ class MU_MIMO(Model):
         x = self.mapper(d)
         x_rg = self.rg_mapper(x)
 
-        # apply precoding to OFDM grids
+        # apply precoding to OFDM grids. We currently assume either perfect CSI or quantized CSI feedback.
         if self.cfg.precoding_method == "ZF":
-            if "RVQ" in self.cfg.PMI_feedback_architecture:
+            if "RVQ" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
                 x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
-            elif "type_II" in self.cfg.PMI_feedback_architecture:
+            elif "type_II" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
                 x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks, new=True)
             else:
                 x_precoded, g = self.zf_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
@@ -190,30 +190,10 @@ class MU_MIMO(Model):
 
         # apply dMIMO channels to the resource grid in the frequency domain.
         y, h_freq_true = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
-
-        # TODO: Remove this after debugging
-        # dmimo_chans._add_noise = False
-        # y, h_freq_true = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
-
-        h_freq_true_reshaped = tf.transpose(h_freq_true, perm=[0,1,3,5,6,2,4])
-        h_hat_perfect = tf.matmul(h_freq_true_reshaped, g)
-        h_hat_perfect = tf.gather(h_hat_perfect, self.rg.effective_subcarrier_ind, axis=4)
-        h_hat_perfect = tf.transpose(h_hat_perfect, perm=[0, 1, 5, 2, 6, 3, 4])
-        h_hat_perfect = tf.reshape(h_hat_perfect, [self.batch_size, self.num_rx_ue, -1, self.rg.num_tx, self.rg.num_streams_per_tx, self.rg.num_ofdm_symbols, len(self.rg.effective_subcarrier_ind)])
-        
-        x_rg_reshaped = tf.transpose(x_rg, perm=[0,3,4,2,1])
-        x_rg_reshaped = tf.gather(x_rg_reshaped, self.rg.effective_subcarrier_ind, axis=2)
-        h_hat_perfect = tf.transpose(h_hat_perfect, perm=[0,1,3,5,6,2,4])
-        y_ref = tf.matmul(h_hat_perfect, x_rg_reshaped[:, tf.newaxis,tf.newaxis,...])
-        y_ref = tf.squeeze(y_ref)
-        y_ref = tf.transpose(y_ref, perm=[0,1,4,2,3])
-
         # make proper shape
         # y = y[:, :, :self.num_rxs_ant, :, :]
         # y = tf.gather(y, tf.reshape(self.cfg.scheduled_rx_ue_indices, [-1]), axis=2)
         y = tf.reshape(y, (self.batch_size, self.num_rx_ue, self.num_ue_ant, 14, -1))
-
-        y_nmse = tf.reduce_mean(tf.abs(y_ref - tf.gather(y, self.rg.effective_subcarrier_ind, axis=-1))**2) / tf.reduce_mean(tf.abs(y_ref)**2)
 
         if self.cfg.precoding_method == "BD":
             y = self.bd_equalizer([y, h_freq_csi, self.cfg.ue_indices, self.cfg.ue_ranks])
@@ -460,11 +440,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_tx_ue_indices, (-1,)), axis=4)
 
-    # Rank and link adaptation
-    rank_feedback_report, n_var, mcs_feedback_report = \
-        do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
-
-    if cfg.perfect_csi == False:
+    if cfg.csi_quantization_on:
+        h_freq_csi = tf.reduce_mean(h_freq_csi, axis=0, keepdims=True)
         if cfg.PMI_feedback_architecture == "RVQ":
             rvq = RandomVectorQuantizer(bits_per_codeword=15, vector_dim=h_freq_csi.shape[4], seed=42)
             h_freq_csi = rvq.quantize_feedback(h_freq_csi, cfg, rg_csi, donald_hack=True, quantization_debug=False)
@@ -477,6 +454,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                             snrdb=rx_snr_db)
             h_freq_csi = type_II_PMI_quantizer(h_freq_csi)
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
+
+    if cfg.rank_adapt or cfg.link_adapt:
+        # Rank and link adaptation
+        # TODO: add support for quantized CSI feedback
+        rank_feedback_report, n_var, mcs_feedback_report = \
+            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
         
     if cfg.rank_adapt:
         # Update rank and total number of streams
@@ -526,7 +509,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    # print("BLER: ", coded_bler)
+    print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
 

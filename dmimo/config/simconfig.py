@@ -16,6 +16,7 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._total_slots = 50                                      # total slots of ns-3 channels
         self._ns3_folder = "../ns3/channels"                        # data folder for ns-3 channels
         self._precoding_method = "ZF"                               # precoding method for phase 2 and baseline: 'ZF', 'SVD', '5G_ZF_no_channel_reconstruction', '5G_ZF', '5G_max_min_demo'
+        self._csi_quantization_on = True                                # Enable PMI, CQI feedback instead of perfect resolution feedback
         self._PMI_feedback_architecture = "dMIMO_phase2_CB2"        # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2'
         self._ue_indices = None                                     # UE antennas indices for MU-MIMO precoding
         self._ue_ranks = None                                       # UE ranks for MU-MIMO precoding
@@ -283,3 +284,11 @@ class SimConfig(CarrierConfig, MCSConfig):
     @channel_prediction_method.setter
     def channel_prediction_method(self, val):
         self._channel_prediction_method = val
+
+    @property 
+    def csi_quantization_on(self):
+        return self._csi_quantization_on
+    
+    @csi_quantization_on.setter
+    def csi_quantization_on(self, val):
+        self._csi_quantization_on = val
