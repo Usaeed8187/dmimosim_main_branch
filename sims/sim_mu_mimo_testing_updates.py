@@ -6,6 +6,7 @@ Simulation of MU-MIMO scenario with ns-3 channels
 import sys
 import os
 import numpy as np
+from fractions import Fraction
 import matplotlib.pyplot as plt
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
@@ -68,22 +69,44 @@ arguments = sys.argv[1:]
 print(f"Script Name: {script_name}")
 print(f"Arguments: {arguments}")
 
+modulation_order = 2
+code_rate = 2 / 3
+num_txue_sel = 10
+
+def _parse_code_rate(value):
+    try:
+        return float(Fraction(value))
+    except (ValueError, ZeroDivisionError):
+        return float(value)
+
 if len(arguments) > 0:
     mobility = arguments[0]
     drop_idx = arguments[1]
-    rx_ues_arr = arguments[2:]
+    rx_ues_arr = [arguments[2]]
     rx_ues_arr = np.array(rx_ues_arr, dtype=int)
+
+    if len(arguments) >= 4:
+        modulation_order = int(arguments[3])
+
+    if len(arguments) >= 5:
+        code_rate = _parse_code_rate(arguments[4])
+
+    if len(arguments) >= 6:
+        num_txue_sel = int(arguments[5])
     
     print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
     print("rx_ues_arr: ", rx_ues_arr)
     print("rx_ues_arr[0]: ", rx_ues_arr[0])
+    print("Modulation order: {}".format(modulation_order))
+    print("Code rate: {}".format(code_rate))
+    print("num_txue_sel: {}".format(num_txue_sel))
 
 # Main function
 if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.rb_size = 12          # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
+    cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
     cfg.total_slots = 50        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 35     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
@@ -95,8 +118,6 @@ if __name__ == "__main__":
     cfg.channel_prediction_method = "two_mode" # "old", "two_mode", "two_mode_tf"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
-    modulation_order = 2
-    cfg.code_rate = 2/3
     if arguments == []:
         mobility = 'high_mobility'
         drop_idx = '3'
@@ -109,7 +130,7 @@ if __name__ == "__main__":
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
 
     # Select Number of TxSquad and RxSquad UEs to use.
-    ns3cfg.num_txue_sel = 10
+    ns3cfg.num_txue_sel = num_txue_sel
     if arguments == []:
         rx_ues_arr = [6]
 
@@ -191,20 +212,20 @@ if __name__ == "__main__":
         if cfg.csi_prediction:
             
             if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_scheduling_prediction.npz")
+                file_path = os.path.join(folder_path, "mu_mimo_results_scheduling_prediction_mod_order_{}_code_rate_{}_tx_UE_{}.npz".format(modulation_order, code_rate, num_txue_sel))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_UE_{}_prediction.npz".format(rx_ues_arr[ue_arr_idx]))
+                file_path = os.path.join(folder_path, "mu_mimo_results_mod_order_{}_code_rate_{}_rx_UE_{}_tx_UE_{}_prediction.npz".format(modulation_order, code_rate, rx_ues_arr[ue_arr_idx], num_txue_sel))
             np.savez(file_path,
-                    ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
+                    cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
                     nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
                     ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11])
         else:
             if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_scheduling.npz")
+                file_path = os.path.join(folder_path, "mu_mimo_results_scheduling_mod_order_{}_code_rate_{}_tx_UE_{}.npz".format(modulation_order, code_rate, num_txue_sel))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_UE_{}.npz".format(rx_ues_arr[ue_arr_idx]))
+                file_path = os.path.join(folder_path, "mu_mimo_results_mod_order_{}_code_rate_{}_rx_UE_{}_tx_UE_{}.npz".format(modulation_order, code_rate, rx_ues_arr[ue_arr_idx], num_txue_sel))
 
             np.savez(file_path,
-                    ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
+                    cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
                     nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], 
                     ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11])
