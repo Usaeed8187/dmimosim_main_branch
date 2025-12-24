@@ -19,7 +19,7 @@ from dmimo.config import Ns3Config, SimConfig, RCConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
 from dmimo.channel import standard_rc_pred_freq_mimo
 from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf
-from dmimo.channel.twomode_wesn_pred import predict_all_links
+from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple 
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
@@ -438,7 +438,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             else:
                 start_time_all_loops = time.time()
 
-                h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg)
+                h_freq_csi = predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg)
 
                 end_time_all_loops = time.time()
                 print("total time for prediction: ", end_time_all_loops-start_time_all_loops)

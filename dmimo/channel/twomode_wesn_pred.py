@@ -1,4 +1,5 @@
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import tensorflow as tf
 
@@ -63,73 +64,15 @@ class twomode_wesn_pred:
     
     def predict(self, h_freq_csi_history):
 
-        h_freq_csi_predicted = self.pred_v2(h_freq_csi_history)
+        h_freq_csi_predicted = self.pred(h_freq_csi_history)
 
         return h_freq_csi_predicted
     
-    def pred_v1(self, h_freq_csi_history):
-
-        # v1 loops over freq REs and does a prediction for each freq RE independently. 
-        # TODO: extend to threemode ESN to do everything at once
-        # 
-        # intended input size: 
-        # [num_batches (time steps), 1, num_rx_nodes, num_rx_antennas, num_tx_nodes, num_tx_antennas, numm_ofdm_syms, num_freq_res (subcarriers or RBs)]
-        # 
-        # can be used per tx-rx pair if needed (eg. if the matrix sizes are too large). 
-        # this should be handled through input dimensions. 
-        # if num_rx_nodes = num_tx_nodes = 1, this function handles all nodes together. 
-        # currently only supports nodes with the same amount of antennas 
-        # (i.e. have to treat gNB as 2 UEs before passing to this function)
-        # TODO: add support for heterogenous antenna sizes later
+    def pred(self, h_freq_csi_history):
         
-        if tf.rank(h_freq_csi_history).numpy() == 8:
-            h_freq_csi_history = np.asarray(h_freq_csi_history).transpose([0,1,2,3,4,5,7,6])
-            num_batches = h_freq_csi_history.shape[1]
-            num_rx_nodes = h_freq_csi_history.shape[2]
-            num_rx_antennas = h_freq_csi_history.shape[3]
-            num_tx_nodes = h_freq_csi_history.shape[4]
-            num_tx_antennas = h_freq_csi_history.shape[5]
-            num_freq_res = h_freq_csi_history.shape[6]
-            num_ofdm_syms = h_freq_csi_history.shape[7]
-        else:
-            raise ValueError("\n The dimensions of h_freq_csi_history are not correct")
-
-        channel_train_input = h_freq_csi_history[:-1, ...]
-        channel_train_gt = h_freq_csi_history[1:, ...]
-
-        if not self.enable_window: # TODO: Test window weights later
-            window_weights = None
-
-        chan_pred = np.zeros(h_freq_csi_history[0,...].shape, dtype=self.dtype)
-        for rx_node in range(num_rx_nodes):
-            for tx_node in range(num_tx_nodes):
-                for freq_re in range(num_freq_res):
-                    for ofdm_sym in range(num_ofdm_syms):
-
-                        self.init_weights()
-                    
-                        channel_train_input_temp = channel_train_input[:, 0, tx_node, :, rx_node, :, freq_re, ofdm_sym]
-
-                        channel_train_gt_temp = channel_train_gt[:, 0, tx_node, :, rx_node, :, freq_re, ofdm_sym]
-
-                        curr_train = self.fitting_time(channel_train_input_temp, channel_train_gt_temp, curr_window_weights=None)
-
-                        channel_test_input = channel_train_gt_temp
-                        channel_pred_temp = self.test_train_predict(channel_test_input, curr_window_weights=None)
-                        channel_pred_temp = channel_pred_temp[:,:,-1:]
-                        channel_pred_temp = np.squeeze(channel_pred_temp)
-                        chan_pred[:, tx_node, :, rx_node, :, freq_re, ofdm_sym] = channel_pred_temp
-
-        chan_pred = chan_pred.transpose([0,1,2,3,4,6,5])
-        chan_pred = tf.convert_to_tensor(chan_pred)
-
-        return chan_pred
-
-    def pred_v2(self, h_freq_csi_history):
-        
-        
-        if tf.rank(h_freq_csi_history).numpy() == 8:
-            h_freq_csi_history = np.asarray(h_freq_csi_history).transpose([0,1,2,3,4,5,7,6])
+        h_freq_csi_history = np.asarray(h_freq_csi_history)
+        if h_freq_csi_history.ndim == 8:
+            h_freq_csi_history = h_freq_csi_history.transpose([0,1,2,3,4,5,7,6])
             num_batches = h_freq_csi_history.shape[1]
             num_rx_nodes = h_freq_csi_history.shape[2]
             num_rx_antennas = h_freq_csi_history.shape[3]
@@ -193,7 +136,6 @@ class twomode_wesn_pred:
                         chan_pred[:, tx_node, :, rx_node, :, freq_re, ofdm_sym] = channel_pred_temp
 
         chan_pred = chan_pred.transpose([0,1,2,3,4,6,5])
-        chan_pred = tf.convert_to_tensor(chan_pred)
         return chan_pred
 
     def build_S_Y(self, channel_input, channel_output, curr_window_weights):
@@ -379,6 +321,62 @@ class twomode_wesn_pred:
         return np.tanh(np.real(Y)) + 1j * np.tanh(np.imag(Y))
     
 def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2):
+
+    base_history = np.asarray(h_freq_csi_history)
+    _, _, _, _, _, _, _, RB = base_history.shape
+    h_freq_csi = np.zeros(base_history[0, ...].shape, dtype=base_history.dtype)
+
+    def _predict_pair(tx_node_idx, rx_node_idx, tx_ant_idx, rx_ant_idx):
+        curr_h_freq_csi_history = base_history[:, :, :, rx_ant_idx, :, ...]
+        curr_h_freq_csi_history = curr_h_freq_csi_history[:, :, :, :, :, tx_ant_idx, ...]
+
+        twomode_predictor = twomode_wesn_pred(
+            rc_config=rc_config,
+            num_freq_re=RB,
+            num_rx_ant=len(rx_ant_idx),
+            num_tx_ant=len(tx_ant_idx),
+        )
+
+        tmp = twomode_predictor.predict(curr_h_freq_csi_history)
+        rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
+        return rx_idx, tx_idx, tmp
+
+    futures = []
+    with ThreadPoolExecutor() as executor:
+        for tx_node_idx in range(ns3cfg.num_txue_sel + 1):
+            for rx_node_idx in range(ns3cfg.num_rxue_sel + 1):
+                if tx_node_idx == 0:
+                    tx_ant_idx = np.arange(0, num_bs_ant)
+                else:
+                    tx_ant_idx = np.arange(
+                        num_bs_ant + (tx_node_idx - 1) * num_ue_ant,
+                        num_bs_ant + (tx_node_idx) * num_ue_ant,
+                    )
+                if rx_node_idx == 0:
+                    rx_ant_idx = np.arange(0, num_bs_ant)
+                else:
+                    rx_ant_idx = np.arange(
+                        num_bs_ant + (rx_node_idx - 1) * num_ue_ant,
+                        num_bs_ant + (rx_node_idx) * num_ue_ant,
+                    )
+
+                futures.append(
+                    executor.submit(
+                        _predict_pair,
+                        tx_node_idx,
+                        rx_node_idx,
+                        tx_ant_idx,
+                        rx_ant_idx,
+                    )
+                )
+        for future in futures:
+            rx_idx, tx_idx, tmp = future.result()
+            h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
+
+    return h_freq_csi
+
+
+def predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2):
 
     T, _, _, RxAnt, _, TxAnt, num_syms, RB = h_freq_csi_history.shape
     h_freq_csi = np.zeros(h_freq_csi_history[0, ...].shape, dtype=h_freq_csi_history.dtype)
