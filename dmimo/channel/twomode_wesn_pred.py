@@ -1,5 +1,6 @@
 import copy
-from concurrent.futures import ThreadPoolExecutor
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import tensorflow as tf
 
@@ -319,6 +320,23 @@ class twomode_wesn_pred:
 
     def complex_tanh(self, Y):
         return np.tanh(np.real(Y)) + 1j * np.tanh(np.imag(Y))
+
+def _predict_pair_worker(args):
+    base_history, rc_config, RB, tx_ant_idx, rx_ant_idx = args
+
+    curr_h_freq_csi_history = base_history[:, :, :, rx_ant_idx, :, ...]
+    curr_h_freq_csi_history = curr_h_freq_csi_history[:, :, :, :, :, tx_ant_idx, ...]
+
+    twomode_predictor = twomode_wesn_pred(
+        rc_config=rc_config,
+        num_freq_re=RB,
+        num_rx_ant=len(rx_ant_idx),
+        num_tx_ant=len(tx_ant_idx),
+    )
+
+    tmp = twomode_predictor.predict(curr_h_freq_csi_history)
+    rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
+    return rx_idx, tx_idx, tmp
     
 def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2):
 
@@ -326,50 +344,30 @@ def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_u
     _, _, _, _, _, _, _, RB = base_history.shape
     h_freq_csi = np.zeros(base_history[0, ...].shape, dtype=base_history.dtype)
 
-    def _predict_pair(tx_node_idx, rx_node_idx, tx_ant_idx, rx_ant_idx):
-        curr_h_freq_csi_history = base_history[:, :, :, rx_ant_idx, :, ...]
-        curr_h_freq_csi_history = curr_h_freq_csi_history[:, :, :, :, :, tx_ant_idx, ...]
-
-        twomode_predictor = twomode_wesn_pred(
-            rc_config=rc_config,
-            num_freq_re=RB,
-            num_rx_ant=len(rx_ant_idx),
-            num_tx_ant=len(tx_ant_idx),
-        )
-
-        tmp = twomode_predictor.predict(curr_h_freq_csi_history)
-        rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
-        return rx_idx, tx_idx, tmp
-
-    futures = []
-    with ThreadPoolExecutor() as executor:
-        for tx_node_idx in range(ns3cfg.num_txue_sel + 1):
-            for rx_node_idx in range(ns3cfg.num_rxue_sel + 1):
-                if tx_node_idx == 0:
-                    tx_ant_idx = np.arange(0, num_bs_ant)
-                else:
-                    tx_ant_idx = np.arange(
-                        num_bs_ant + (tx_node_idx - 1) * num_ue_ant,
-                        num_bs_ant + (tx_node_idx) * num_ue_ant,
-                    )
-                if rx_node_idx == 0:
-                    rx_ant_idx = np.arange(0, num_bs_ant)
-                else:
-                    rx_ant_idx = np.arange(
-                        num_bs_ant + (rx_node_idx - 1) * num_ue_ant,
-                        num_bs_ant + (rx_node_idx) * num_ue_ant,
-                    )
-
-                futures.append(
-                    executor.submit(
-                        _predict_pair,
-                        tx_node_idx,
-                        rx_node_idx,
-                        tx_ant_idx,
-                        rx_ant_idx,
-                    )
+    tasks = []
+    for tx_node_idx in range(ns3cfg.num_txue_sel + 1):
+        for rx_node_idx in range(ns3cfg.num_rxue_sel + 1):
+            if tx_node_idx == 0:
+                tx_ant_idx = np.arange(0, num_bs_ant)
+            else:
+                tx_ant_idx = np.arange(
+                    num_bs_ant + (tx_node_idx - 1) * num_ue_ant,
+                    num_bs_ant + (tx_node_idx) * num_ue_ant,
                 )
-        for future in futures:
+            if rx_node_idx == 0:
+                rx_ant_idx = np.arange(0, num_bs_ant)
+            else:
+                rx_ant_idx = np.arange(
+                    num_bs_ant + (rx_node_idx - 1) * num_ue_ant,
+                    num_bs_ant + (rx_node_idx) * num_ue_ant,
+                )
+
+            tasks.append((base_history, rc_config, RB, tx_ant_idx, rx_ant_idx))
+
+    max_workers = min(len(tasks), os.cpu_count() or 1)
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_task = {executor.submit(_predict_pair_worker, task): task for task in tasks}
+        for future in as_completed(future_to_task):
             rx_idx, tx_idx, tmp = future.result()
             h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
 
