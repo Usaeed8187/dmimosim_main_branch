@@ -338,7 +338,7 @@ def _predict_pair_worker(args):
     rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
     return rx_idx, tx_idx, tmp
     
-def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2):
+def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2, max_workers=None):
 
     base_history = np.asarray(h_freq_csi_history)
     _, _, _, _, _, _, _, RB = base_history.shape
@@ -364,7 +364,8 @@ def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_u
 
             tasks.append((base_history, rc_config, RB, tx_ant_idx, rx_ant_idx))
 
-    max_workers = min(len(tasks), os.cpu_count() or 1)
+    if max_workers is None:
+        max_workers = min(len(tasks), os.cpu_count() or 1)
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         future_to_task = {executor.submit(_predict_pair_worker, task): task for task in tasks}
         for future in as_completed(future_to_task):

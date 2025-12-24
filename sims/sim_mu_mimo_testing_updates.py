@@ -37,7 +37,7 @@ sys.path.append(dmimo_root)
 
 # Set symlinks to channel data files
 sys.path.append(os.path.join('..'))
-source_dir = '/home/data/ns3_channels_q4/'
+source_dir = '/home/usama/ns3_channels_q4/'
 destination_dir = 'ns3/'
 if not os.path.exists(destination_dir):
     os.makedirs(destination_dir)
@@ -107,7 +107,7 @@ if __name__ == "__main__":
     # Simulation settings
     cfg = SimConfig()
     cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
-    cfg.total_slots = 39        # total number of slots in ns-3 channels
+    cfg.total_slots = 100       # total number of slots in ns-3 channels
     cfg.start_slot_idx = 35     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = False

@@ -272,7 +272,7 @@ class MU_MIMO(Model):
         # Hard-decision bit error rate
         d_hard = tf.cast(llr > 0, tf.float32)
         uncoded_ber = compute_ber(d, d_hard).numpy()
-        print(f"\nUncoded BER: {uncoded_ber}\n")
+        # print(f"\nUncoded BER: {uncoded_ber}\n")
 
         # Hard-decision symbol error rate
         x_hard = self.mapper(d_hard)
@@ -422,7 +422,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                             sto_vals=cfg.random_sto_vals,
                                                             estimated_channels_dir=cfg.estimated_channels_dir)
         end_time = time.time()
-        print("Total time for channel history gathering: ", end_time - start_time)
+        # print("Total time for channel history gathering: ", end_time - start_time)
         
         if "two_mode" in cfg.channel_prediction_method:
 
@@ -433,15 +433,15 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                 h_freq_csi = predict_all_links_tf(h_freq_csi_history, rc_config, ns3cfg)
 
                 end_time_all_loops = time.time()
-                print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
+                # print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
 
             else:
                 start_time_all_loops = time.time()
 
-                h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg)
+                h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg, max_workers=8)
 
                 end_time_all_loops = time.time()
-                print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
+                # print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
 
         elif cfg.channel_prediction_method == "old":
             h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
@@ -526,7 +526,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    print("BLER: ", coded_bler)
+    # print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
 
@@ -607,7 +607,7 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         start_time = time.time()
         bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config)
         end_time = time.time()
-        print("Cycle time: ", end_time - start_time, " seconds\n")
+        # print("Cycle time: ", end_time - start_time, " seconds\n")
         
         uncoded_ber += bers[0]
         ldpc_ber += bers[1]
