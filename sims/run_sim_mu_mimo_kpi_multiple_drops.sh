@@ -14,7 +14,7 @@ for i in ${!mobilities[@]}; do
         for k in ${!rx_ues_arr[@]}; do
         
             echo "Mobility: ${mobilities[$i]}, Drop idx: ${drop_idx[$j]}, Rx UEs: ${rx_ues_arr[$k]}"
-            python sims/sim_mu_mimo_integration.py "${mobilities[$i]}" "${drop_idx[$j]}" "${rx_ues_arr[$k]}"
+            python sims/sim_mu_mimo_testing_updates.py "${mobilities[$i]}" "${drop_idx[$j]}" "${rx_ues_arr[$k]}"
         done
     done
 done
