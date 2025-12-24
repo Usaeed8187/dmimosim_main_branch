@@ -96,32 +96,91 @@ class standard_rc_pred_freq_mimo:
             self.RLS_lambda = rc_config.RLS_lambda
             self.RLS_w = 1
 
+        # Buffers for incremental CSI history updates
+        self.csi_history_buffer = None
+        self.csi_history_slots = None
+
+    def reset_csi_history(self):
+        """Reset cached CSI history."""
+
+        self.csi_history_buffer = None
+        self.csi_history_slots = None
+
+    def _load_or_estimate_channel(self, slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir):
+        """Load a single channel estimate from disk or run LMMSE estimation."""
+
+        folder_path = estimated_channels_dir + "_rx_{}_tx_{}".format(
+            self.ns3_config.num_bs_ant + self.ns3_config.num_ue_ant * self.ns3_config.num_rxue_sel,
+            self.ns3_config.num_bs_ant + self.ns3_config.num_ue_ant * self.ns3_config.num_txue_sel,
+        )
+        file_path = "{}/dmimochans_{}".format(folder_path, slot_idx)
+
+        try:
+            data = np.load("{}.npz".format(file_path))
+            h_freq_csi = data['h_freq_csi']
+        except Exception:
+            # h_freq_csi has shape [batch_size, num_rx, num_rx_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
+            h_freq_csi, _ = lmmse_channel_estimation(
+                dmimo_chans,
+                rg_csi,
+                slot_idx=slot_idx,
+                cfo_vals=cfo_vals,
+                sto_vals=sto_vals,
+            )
+            os.makedirs(folder_path, exist_ok=True)
+            np.savez(file_path, h_freq_csi=h_freq_csi)
+
+        return np.expand_dims(h_freq_csi, axis=0)
+
+            
+
+
     def get_csi_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None):
 
         first_csi_history_idx = first_slot_idx - (csi_delay * self.history_len)
         channel_history_slots = np.arange(first_csi_history_idx, first_slot_idx, csi_delay)
 
-        h_freq_csi_list = []
-        for loop_idx, slot_idx in enumerate(channel_history_slots):
-           
-            folder_path = estimated_channels_dir + "_rx_{}_tx_{}/".format(self.ns3_config.num_bs_ant + self.ns3_config.num_ue_ant * self.ns3_config.num_rxue_sel
-                                                                          , self.ns3_config.num_bs_ant + self.ns3_config.num_ue_ant * self.ns3_config.num_txue_sel)
-            file_path = "{}/dmimochans_{}".format(folder_path, slot_idx)
+        # Initialize or rebuild buffer when unavailable or mismatched
+        if (
+            self.csi_history_buffer is None
+            or self.csi_history_slots is None
+            or len(self.csi_history_slots) != len(channel_history_slots)
+        ):
+            h_freq_csi_list = [
+                self._load_or_estimate_channel(
+                    slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir
+                )
+                for slot_idx in channel_history_slots
+            ]
+            self.csi_history_buffer = np.concatenate(h_freq_csi_list, axis=0)
+            self.csi_history_slots = channel_history_slots
+            return self.csi_history_buffer
 
-            try:
-                data = np.load("{}.npz".format(file_path))
-                h_freq_csi = data['h_freq_csi']
-            except:
-                # h_freq_csi has shape [batch_size, num_rx, num_rx_ant, num_tx, num_txs_ant, num_ofdm_sym, fft_size]
-                h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi, slot_idx=slot_idx,
-                                                                cfo_vals=cfo_vals, sto_vals=sto_vals)
-                os.makedirs(folder_path, exist_ok=True)
-                np.savez(file_path, h_freq_csi=h_freq_csi)
-            h_freq_csi_list.append(np.expand_dims(h_freq_csi, axis=0))
+        # If slots are unchanged, return cached buffer
+        if np.array_equal(self.csi_history_slots, channel_history_slots):
+            return self.csi_history_buffer
 
-        h_freq_csi_history = np.concatenate(h_freq_csi_list, axis=0)
+        # If slots advanced by one step, update buffer incrementally
+        if np.array_equal(self.csi_history_slots[1:], channel_history_slots[:-1]):
+            newest_slot_idx = channel_history_slots[-1]
+            new_entry = self._load_or_estimate_channel(
+                newest_slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir
+            )
+            self.csi_history_buffer = np.concatenate([self.csi_history_buffer[1:], new_entry], axis=0)
+            self.csi_history_slots = channel_history_slots
+            return self.csi_history_buffer
 
-        return h_freq_csi_history
+        # Fallback: rebuild buffer if slot progression is unexpected
+        h_freq_csi_list = [
+            self._load_or_estimate_channel(
+                slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir
+            )
+            for slot_idx in channel_history_slots
+        ]
+        self.csi_history_buffer = np.concatenate(h_freq_csi_list, axis=0)
+        self.csi_history_slots = channel_history_slots
+        
+        return self.csi_history_buffer
 
     def get_ideal_csi_history(self, first_slot_idx, csi_delay, dmimo_chans, batch_size=1):
         

@@ -402,7 +402,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         h_freq_csi, rx_snr_db, rx_pwr_dbm = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
                                                                      batch_size=cfg.num_slots_p2)
     elif cfg.csi_prediction is True:
-        rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, ns3cfg)
+        rc_predictor = getattr(cfg, "rc_predictor", None)
+        if rc_predictor is None:
+            rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, ns3cfg)
+            cfg.rc_predictor = rc_predictor
+        if cfg.first_slot_idx == cfg.start_slot_idx:
+            rc_predictor.reset_csi_history()
         # Get CSI history
         # TODO: optimize channel estimation and optimization procedures (currently very slow)        
 
@@ -410,7 +415,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         if cfg.use_perfect_csi_history_for_prediction:
             h_freq_csi_history = rc_predictor.get_ideal_csi_history(cfg.first_slot_idx, cfg.csi_delay,
                                                           dmimo_chans)
-        else:        
+        else:
             h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
                                                             rg_csi, dmimo_chans, 
                                                             cfo_vals=cfg.random_cfo_vals,
