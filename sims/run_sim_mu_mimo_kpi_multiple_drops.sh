@@ -10,7 +10,7 @@ declare -a modulation_orders=("2" "4")
 declare -a code_rates=("2/3" "5/6")
 declare -a num_txue_sel_arr=("2" "4" "6" "8" "10")
 declare -a perfect_csi_arr=("True" "False")
-declare -a csi_prediction_arr=("True" "False")
+declare -a csi_prediction_arr=("False")
 declare -a csi_quantization_arr=("True" "False")
 
 # Loop through the arrays
@@ -23,6 +23,12 @@ for i in ${!mobilities[@]}; do
                         for pcsi in ${!perfect_csi_arr[@]}; do
                             for cpred in ${!csi_prediction_arr[@]}; do
                                 for cquant in ${!csi_quantization_arr[@]}; do
+                                    if [[ "${perfect_csi_arr[$pcsi]}" == "True" && "${csi_prediction_arr[$cpred]}" == "True" ]]; then
+                                        continue
+                                    fi
+                                    if [[ "${perfect_csi_arr[$pcsi]}" == "False" && "${csi_quantization_arr[$cquant]}" == "False" ]]; then
+                                        continue
+                                    fi
                                     echo "Mobility: ${mobilities[$i]}, Drop idx: ${drop_idx[$j]}, Rx UEs: ${rx_ues_arr[$k]}, Modulation order: ${modulation_orders[$m]}, Code rate: ${code_rates[$c]}, num_txue_sel: ${num_txue_sel_arr[$t]}, perfect_csi: ${perfect_csi_arr[$pcsi]}, csi_prediction: ${csi_prediction_arr[$cpred]}, csi_quantization_on: ${csi_quantization_arr[$cquant]}"
                                     python sims/sim_mu_mimo_testing_updates.py "${mobilities[$i]}" "${drop_idx[$j]}" "${rx_ues_arr[$k]}" "${modulation_orders[$m]}" "${code_rates[$c]}" "${num_txue_sel_arr[$t]}" "${perfect_csi_arr[$pcsi]}" "${csi_prediction_arr[$cpred]}" "${csi_quantization_arr[$cquant]}"
                                 done
