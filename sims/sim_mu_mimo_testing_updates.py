@@ -71,10 +71,10 @@ print(f"Arguments: {arguments}")
 
 modulation_order = 2
 code_rate = 2 / 3
-num_txue_sel = 4
-perfect_csi = True
-csi_prediction = False
-csi_quantization_on = False
+num_txue_sel = 8
+perfect_csi = False
+csi_prediction = True
+csi_quantization_on = True
 
 def _parse_bool(value):
     return str(value).lower() in ("true", "1", "yes")
@@ -136,7 +136,7 @@ if __name__ == "__main__":
     cfg.link_adapt = False      # enable/disable link adaptation,. .
     cfg.csi_prediction = csi_prediction
     cfg.use_perfect_csi_history_for_prediction = False
-    cfg.channel_prediction_method = "two_mode" # "old", "two_mode", "two_mode_tf"
+    cfg.channel_prediction_method = "weiner_filter" # "old", "two_mode", "two_mode_tf", "weiner_filter"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
     if arguments == []:

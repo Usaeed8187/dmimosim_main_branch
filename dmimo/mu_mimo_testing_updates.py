@@ -18,7 +18,7 @@ from sionna.utils.metrics import compute_ber, compute_bler
 from dmimo.config import Ns3Config, SimConfig, RCConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
 from dmimo.channel import standard_rc_pred_freq_mimo
-from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf
+from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple 
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
@@ -425,6 +425,10 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
         elif cfg.channel_prediction_method == "old":
             h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
+        elif cfg.channel_prediction_method == "weiner_filter":
+            # Weiner Filter based prediction (MIMO) (per_tx_rx_node_pair)
+            weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
+            h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len-1))
         else:
             raise ValueError("Channel prediction method not implemented here.")
     else:
