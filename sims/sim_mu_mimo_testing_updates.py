@@ -72,6 +72,12 @@ print(f"Arguments: {arguments}")
 modulation_order = 2
 code_rate = 2 / 3
 num_txue_sel = 4
+perfect_csi = True
+csi_prediction = False
+csi_quantization_on = False
+
+def _parse_bool(value):
+    return str(value).lower() in ("true", "1", "yes")
 
 def _parse_code_rate(value):
     try:
@@ -94,12 +100,27 @@ if len(arguments) > 0:
     if len(arguments) >= 6:
         num_txue_sel = int(arguments[5])
     
+    if len(arguments) >= 7:
+        perfect_csi = _parse_bool(arguments[6])
+
+    if len(arguments) >= 8:
+        csi_prediction = _parse_bool(arguments[7])
+
+    if len(arguments) >= 9:
+        csi_quantization_on = _parse_bool(arguments[8])
+
+    if perfect_csi:
+        csi_prediction = False
+    
     print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
     print("rx_ues_arr: ", rx_ues_arr)
     print("rx_ues_arr[0]: ", rx_ues_arr[0])
     print("Modulation order: {}".format(modulation_order))
     print("Code rate: {}".format(code_rate))
     print("num_txue_sel: {}".format(num_txue_sel))
+    print("perfect_csi: {}".format(perfect_csi))
+    print("csi_prediction: {}".format(csi_prediction))
+    print("csi_quantization_on: {}".format(csi_quantization_on))
 
 # Main function
 if __name__ == "__main__":
@@ -110,10 +131,10 @@ if __name__ == "__main__":
     cfg.total_slots = 100       # total number of slots in ns-3 channels
     cfg.start_slot_idx = 35     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
-    cfg.perfect_csi = True
+    cfg.perfect_csi = perfect_csi
     cfg.rank_adapt = False      # enable/disable rank adaptation
     cfg.link_adapt = False      # enable/disable link adaptation,. .
-    cfg.csi_prediction = False
+    cfg.csi_prediction = csi_prediction
     cfg.use_perfect_csi_history_for_prediction = False
     cfg.channel_prediction_method = "two_mode" # "old", "two_mode", "two_mode_tf"
     cfg.enable_ue_selection = False
@@ -127,7 +148,7 @@ if __name__ == "__main__":
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
     cfg.enable_rxsquad = False
     cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT" for quantized CSI feedback
-    cfg.csi_quantization_on = False
+    cfg.csi_quantization_on = csi_quantization_on
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
 
     if cfg.perfect_csi:
