@@ -65,7 +65,7 @@ class PlotConfig:
     fixed_rx_for_tx_sweep: int
     fixed_tx_for_rx_sweep: int
     output_dir: str
-    prediction: bool = True
+    scenarios: Sequence["Scenario"]
 
 
 ################################################################################
@@ -78,6 +78,13 @@ class DataPoint:
     uncoded_ber: float
     throughput: float
 
+@dataclass(frozen=True)
+class Scenario:
+    perfect_csi: bool
+    prediction: bool
+    quantization: bool
+    label: str
+
 
 class ResultLoader:
     def __init__(self, cfg: PlotConfig) -> None:
@@ -86,10 +93,7 @@ class ResultLoader:
     def _drop_folder(self, drop_id: int) -> str:
         folder_name = f"channels_{self.cfg.mobility}_{drop_id}"
         return os.path.join(self.cfg.base_dir, folder_name)
-
-    def _suffix(self) -> str:
-        return "_prediction" if self.cfg.prediction else ""
-
+    
     @staticmethod
     def _parse_code_rate_from_path(path: str) -> Optional[float]:
         basename = os.path.basename(path)
@@ -99,23 +103,77 @@ class ResultLoader:
             return float(code_rate_str)
         except (IndexError, ValueError):
             return None
+        
+    def _prediction_patterns(
+        self,
+        prefix: str,
+        scenario: Scenario,
+    ) -> List[str]:
+        quant_str = str(scenario.quantization)
+        return [
+            f"{prefix}_prediction_*_pmi_quantization_{quant_str}.npz",
+            # Backward compatibility with the legacy naming (no method/quantization).
+            f"{prefix}_prediction.npz",
+        ]
+
+    def _non_prediction_patterns(
+        self,
+        prefix: str,
+        scenario: Scenario,
+    ) -> List[str]:
+        perfect_str = str(scenario.perfect_csi)
+        quant_str = str(scenario.quantization)
+        return [
+            f"{prefix}_perfect_CSI_{perfect_str}_pmi_quantization_{quant_str}.npz",
+            # Backward compatibility with the older perfect CSI naming.
+            f"{prefix}_perfect_CSI_{perfect_str}.npz",
+        ]
+
+    def _candidate_paths(
+        self,
+        folder: str,
+        prefix: str,
+        scenario: Scenario,
+    ) -> List[str]:
+        patterns = (
+            self._prediction_patterns(prefix, scenario)
+            if scenario.prediction
+            else self._non_prediction_patterns(prefix, scenario)
+        )
+
+        candidates: List[str] = []
+        for pattern in patterns:
+            full_pattern = os.path.join(folder, pattern)
+            if "*" in pattern:
+                matches = glob.glob(full_pattern)
+                matches.sort()
+                candidates.extend(matches)
+            else:
+                candidates.append(full_pattern)
+        return candidates
 
     def _find_file(
-        self, drop_id: int, rx_ues: int, tx_ues: int, mod_order: int, code_rate: float
+        self,
+        drop_id: int,
+        rx_ues: int,
+        tx_ues: int,
+        mod_order: int,
+        code_rate: float,
+        scenario: Scenario,
     ) -> Optional[str]:
         folder = self._drop_folder(drop_id)
-        suffix = self._suffix()
         code_rate_str = str(code_rate)
-        candidate = os.path.join(
-            folder,
-            f"mu_mimo_results_mod_order_{mod_order}_code_rate_{code_rate_str}_rx_UE_{rx_ues}_tx_UE_{tx_ues}{suffix}.npz",
+        prefix = (
+            f"mu_mimo_results_mod_order_{mod_order}_code_rate_{code_rate_str}_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
         )
-        if os.path.exists(candidate):
-            return candidate
+        for candidate in self._candidate_paths(folder, prefix, scenario):
+            if os.path.exists(candidate):
+                return candidate
 
+        # As a fallback, try to match slightly different code-rate strings.
         pattern = os.path.join(
             folder,
-            f"mu_mimo_results_mod_order_{mod_order}_code_rate_*_rx_UE_{rx_ues}_tx_UE_{tx_ues}{suffix}.npz",
+            f"mu_mimo_results_mod_order_{mod_order}_code_rate_*_rx_UE_{rx_ues}_tx_UE_{tx_ues}*.npz",
         )
         matches = glob.glob(pattern)
         if not matches:
@@ -127,6 +185,11 @@ class ResultLoader:
                 (self._parse_code_rate_from_path(path) or target) - target
             )
         )
+        for match in matches:
+            if scenario.prediction and "prediction" in os.path.basename(match):
+                return match
+            if not scenario.prediction and "perfect_CSI" in os.path.basename(match):
+                return match
         return matches[0]
 
     @staticmethod
@@ -145,9 +208,17 @@ class ResultLoader:
         return float(np.nanmean(uncoded_array))
 
     def load_datapoint(
-        self, drop_id: int, rx_ues: int, tx_ues: int, mod_order: int, code_rate: float
+        self,
+        drop_id: int,
+        rx_ues: int,
+        tx_ues: int,
+        mod_order: int,
+        code_rate: float,
+        scenario: Scenario,
     ) -> Optional[DataPoint]:
-        file_path = self._find_file(drop_id, rx_ues, tx_ues, mod_order, code_rate)
+        file_path = self._find_file(
+            drop_id, rx_ues, tx_ues, mod_order, code_rate, scenario
+        )
         if file_path is None:
             return None
 
@@ -164,27 +235,40 @@ class ResultLoader:
 
 def aggregate_metrics(
     loader: ResultLoader,
+    scenarios: Iterable[Scenario],
     rx_values: Iterable[int],
     tx_values: Iterable[int],
     modulation_orders: Iterable[int],
     code_rates: Iterable[float],
-) -> Dict[Tuple[int, int, int, float], List[DataPoint]]:
-    results: Dict[Tuple[int, int, int, float], List[DataPoint]] = {}
-    for drop_id in loader.cfg.drops:
-        for rx_ues in rx_values:
-            for tx_ues in tx_values:
-                for mod_order in modulation_orders:
-                    for code_rate in code_rates:
-                        datapoint = loader.load_datapoint(
-                            drop_id, rx_ues, tx_ues, mod_order, code_rate
-                        )
-                        if datapoint is None:
-                            continue
-                        results.setdefault(
-                            (rx_ues, tx_ues, mod_order, float(code_rate)), []
-                        ).append(datapoint)
+) -> Dict[Tuple[Scenario, int, int, int, float], List[DataPoint]]:
+    results: Dict[Tuple[Scenario, int, int, int, float], List[DataPoint]] = {}
+    for scenario in scenarios:
+        for drop_id in loader.cfg.drops:
+            for rx_ues in rx_values:
+                for tx_ues in tx_values:
+                    for mod_order in modulation_orders:
+                        for code_rate in code_rates:
+                            datapoint = loader.load_datapoint(
+                                drop_id, rx_ues, tx_ues, mod_order, code_rate, scenario
+                            )
+                            if datapoint is None:
+                                continue
+                            results.setdefault(
+                                (scenario, rx_ues, tx_ues, mod_order, float(code_rate)), []
+                            ).append(datapoint)
     return results
 
+def _average_metric(
+    aggregated: Dict[Tuple[Scenario, int, int, int, float], List[DataPoint]],
+    scenario: Scenario,
+    rx_ues: int,
+    tx_ues: int,
+    mod_order: int,
+    code_rate: float,
+) -> Optional[DataPoint]:
+    key = (scenario, rx_ues, tx_ues, mod_order, float(code_rate))
+    points = aggregated.get(key, [])
+    return average_datapoints(points) if points else None
 
 def average_datapoints(points: Sequence[DataPoint]) -> DataPoint:
     return DataPoint(
@@ -192,6 +276,37 @@ def average_datapoints(points: Sequence[DataPoint]) -> DataPoint:
         throughput=float(np.nanmean([p.throughput for p in points])),
     )
 
+def _default_scenarios(include_prediction: bool = True) -> List[Scenario]:
+    scenarios = [
+        Scenario(
+            perfect_csi=False,
+            prediction=False,
+            quantization=True,
+            label="Worst case: imperfect channel estimation, quantized feedback",
+        ),
+        Scenario(
+            perfect_csi=False,
+            prediction=True,
+            quantization=True,
+            label="Achievable: imperfect channel estimation + prediction, quantized feedback",
+        ),
+        Scenario(
+            perfect_csi=True,
+            prediction=False,
+            quantization=False,
+            label="Ideal: perfect CSI at BS (no quantization)",
+        ),
+        Scenario(
+            perfect_csi=True,
+            prediction=False,
+            quantization=True,
+            label="Semi-ideal: perfect channel estimation, quantized feedback",
+        ),
+    ]
+
+    if include_prediction:
+        return scenarios
+    return [scenario for scenario in scenarios if not scenario.prediction]
 
 ################################################################################
 # Plotting helpers
@@ -200,36 +315,38 @@ def average_datapoints(points: Sequence[DataPoint]) -> DataPoint:
 
 def plot_metric(
     x_values: Sequence[int],
-    y_values: Sequence[float],
-    xlabel: str,
+    series: Sequence[Tuple[str, Sequence[float]]],    xlabel: str,
     ylabel: str,
     title: str,
     output_path: str,
 ) -> None:
     plt.figure()
-    plt.plot(x_values, y_values, marker="o")
+    for label, y_values in series:
+        plt.plot(x_values, y_values, marker="o", label=label)
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
     plt.title(title)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(output_path)
     print(f"Saved: {output_path}")
 
 def semilogy_metric(
     x_values: Sequence[int],
-    y_values: Sequence[float],
-    xlabel: str,
+    series: Sequence[Tuple[str, Sequence[float]]],    xlabel: str,
     ylabel: str,
     title: str,
     output_path: str,
 ) -> None:
     plt.figure()
-    plt.semilogy(x_values, y_values, marker="o")
+    for label, y_values in series:
+        plt.semilogy(x_values, y_values, marker="o", label=label)
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
     plt.title(title)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(output_path)
     print(f"Saved: {output_path}")
@@ -237,7 +354,8 @@ def semilogy_metric(
 
 
 def select_best_mcs(
-    aggregated: Dict[Tuple[int, int, int, float], List[DataPoint]],
+    aggregated: Dict[Tuple[Scenario, int, int, int, float], List[DataPoint]],
+    scenario: Scenario,
     rx_ues: int,
     tx_ues: int,
     modulation_orders: Iterable[int],
@@ -247,7 +365,7 @@ def select_best_mcs(
     best_mcs: Optional[Tuple[int, float]] = None
     for mod_order in modulation_orders:
         for code_rate in code_rates:
-            key = (rx_ues, tx_ues, mod_order, float(code_rate))
+            key = (scenario, rx_ues, tx_ues, mod_order, float(code_rate))
             if key not in aggregated:
                 continue
             avg_point = average_datapoints(aggregated[key])
@@ -274,7 +392,7 @@ def main() -> None:
         "--drops",
         type=int,
         nargs="+",
-        default=[1, 2, 3],
+        default=[1],
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -337,10 +455,12 @@ def main() -> None:
     parser.add_argument(
         "--no-prediction",
         action="store_true",
-        help="Look for non-prediction result files (omit the _prediction suffix).",
+        help="Exclude CSI prediction curves from the plots.",
     )
 
     args = parser.parse_args()
+
+    scenarios = _default_scenarios(include_prediction=not args.no_prediction)
 
     cfg = PlotConfig(
         base_dir=args.base_dir,
@@ -355,14 +475,15 @@ def main() -> None:
         fixed_rx_for_tx_sweep=args.fixed_rx,
         fixed_tx_for_rx_sweep=args.fixed_tx,
         output_dir=args.output_dir,
-        prediction=not args.no_prediction,
-    )
+        scenarios=scenarios,
+        )
 
     os.makedirs(cfg.output_dir, exist_ok=True)
     loader = ResultLoader(cfg)
 
     aggregated = aggregate_metrics(
         loader,
+        cfg.scenarios,
         cfg.rx_ues,
         cfg.tx_ues,
         cfg.modulation_orders,
@@ -370,14 +491,23 @@ def main() -> None:
     )
 
     # BER vs Tx UEs (fixed Rx)
-    ber_tx = []
-    for tx in cfg.tx_ues:
-        key = (cfg.fixed_rx_for_tx_sweep, tx, cfg.ber_modulation_order, float(cfg.ber_code_rate))
-        points = aggregated.get(key, [])
-        ber_tx.append(average_datapoints(points).uncoded_ber if points else np.nan)
-    semilogy_metric(
+    ber_tx_series = []
+    for scenario in cfg.scenarios:
+        scenario_values = []
+        for tx in cfg.tx_ues:
+            datapoint = _average_metric(
+                aggregated,
+                scenario,
+                cfg.fixed_rx_for_tx_sweep,
+                tx,
+                cfg.ber_modulation_order,
+                float(cfg.ber_code_rate),
+            )
+            scenario_values.append(datapoint.uncoded_ber if datapoint else np.nan)
+        ber_tx_series.append((scenario.label, scenario_values))
+        semilogy_metric(
         cfg.tx_ues,
-        ber_tx,
+        ber_tx_series,
         xlabel="Number of Tx UEs",
         ylabel="Uncoded BER",
         title=f"Uncoded BER vs Tx UEs (Rx UEs={cfg.fixed_rx_for_tx_sweep}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",
@@ -385,14 +515,23 @@ def main() -> None:
     )
 
     # BER vs Rx UEs (fixed Tx)
-    ber_rx = []
-    for rx in cfg.rx_ues:
-        key = (rx, cfg.fixed_tx_for_rx_sweep, cfg.ber_modulation_order, float(cfg.ber_code_rate))
-        points = aggregated.get(key, [])
-        ber_rx.append(average_datapoints(points).uncoded_ber if points else np.nan)
+    ber_rx_series = []
+    for scenario in cfg.scenarios:
+        scenario_values = []
+        for rx in cfg.rx_ues:
+            datapoint = _average_metric(
+                aggregated,
+                scenario,
+                rx,
+                cfg.fixed_tx_for_rx_sweep,
+                cfg.ber_modulation_order,
+                float(cfg.ber_code_rate),
+            )
+            scenario_values.append(datapoint.uncoded_ber if datapoint else np.nan)
+        ber_rx_series.append((scenario.label, scenario_values))
     semilogy_metric(
         cfg.rx_ues,
-        ber_rx,
+        ber_rx_series,
         xlabel="Number of Rx UEs",
         ylabel="Uncoded BER",
         title=f"Uncoded BER vs Rx UEs (Tx UEs={cfg.fixed_tx_for_rx_sweep}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",
@@ -400,21 +539,29 @@ def main() -> None:
     )
 
     # Throughput vs Tx UEs (fixed Rx, best MCS)
-    thr_tx = []
-    best_mcs_tx = []
-    for tx in cfg.tx_ues:
-        best_throughput, best_mcs = select_best_mcs(
-            aggregated,
-            cfg.fixed_rx_for_tx_sweep,
-            tx,
-            cfg.modulation_orders,
-            cfg.code_rates,
-        )
-        thr_tx.append(best_throughput if best_throughput is not None else np.nan)
-        best_mcs_tx.append(best_mcs)
-    plot_metric(
+    thr_tx_series = []
+    best_mcs_tx = {}
+    for scenario in cfg.scenarios:
+        scenario_thr = []
+        scenario_best_mcs = []
+        for tx in cfg.tx_ues:
+            best_throughput, best_mcs = select_best_mcs(
+                aggregated,
+                scenario,
+                cfg.fixed_rx_for_tx_sweep,
+                tx,
+                cfg.modulation_orders,
+                cfg.code_rates,
+            )
+            scenario_thr.append(
+                best_throughput if best_throughput is not None else np.nan
+            )
+            scenario_best_mcs.append(best_mcs)
+        thr_tx_series.append((scenario.label, scenario_thr))
+        best_mcs_tx[scenario] = scenario_best_mcs
+        plot_metric(
         cfg.tx_ues,
-        thr_tx,
+        thr_tx_series,
         xlabel="Number of Tx UEs",
         ylabel="Throughput",
         title=f"Throughput vs Tx UEs (Rx UEs={cfg.fixed_rx_for_tx_sweep}, best MCS)",
@@ -422,21 +569,29 @@ def main() -> None:
     )
 
     # Throughput vs Rx UEs (fixed Tx, best MCS)
-    thr_rx = []
-    best_mcs_rx = []
-    for rx in cfg.rx_ues:
-        best_throughput, best_mcs = select_best_mcs(
-            aggregated,
-            rx,
-            cfg.fixed_tx_for_rx_sweep,
-            cfg.modulation_orders,
-            cfg.code_rates,
-        )
-        thr_rx.append(best_throughput if best_throughput is not None else np.nan)
-        best_mcs_rx.append(best_mcs)
-    plot_metric(
+    thr_rx_series = []
+    best_mcs_rx = {}
+    for scenario in cfg.scenarios:
+        scenario_thr = []
+        scenario_best_mcs = []
+        for rx in cfg.rx_ues:
+            best_throughput, best_mcs = select_best_mcs(
+                aggregated,
+                scenario,
+                rx,
+                cfg.fixed_tx_for_rx_sweep,
+                cfg.modulation_orders,
+                cfg.code_rates,
+            )
+            scenario_thr.append(
+                best_throughput if best_throughput is not None else np.nan
+            )
+            scenario_best_mcs.append(best_mcs)
+        thr_rx_series.append((scenario.label, scenario_thr))
+        best_mcs_rx[scenario] = scenario_best_mcs
+        plot_metric(
         cfg.rx_ues,
-        thr_rx,
+        thr_rx_series,
         xlabel="Number of Rx UEs",
         ylabel="Throughput",
         title=f"Throughput vs Rx UEs (Tx UEs={cfg.fixed_tx_for_rx_sweep}, best MCS)",
@@ -445,13 +600,19 @@ def main() -> None:
 
     # Print the maximizing MCS selections for throughput plots
     print("\nMaximizing MCS for Throughput vs Tx UEs (Rx UEs fixed at {}):".format(cfg.fixed_rx_for_tx_sweep))
-    for tx, mcs in zip(cfg.tx_ues, best_mcs_tx):
-        print(f"  Tx UEs={tx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'})")
-
+    for scenario in cfg.scenarios:
+        print(f"  Scenario: {scenario.label}")
+        for tx, mcs in zip(cfg.tx_ues, best_mcs_tx.get(scenario, [])):
+            print(
+                f"    Tx UEs={tx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
+            )
     print("\nMaximizing MCS for Throughput vs Rx UEs (Tx UEs fixed at {}):".format(cfg.fixed_tx_for_rx_sweep))
-    for rx, mcs in zip(cfg.rx_ues, best_mcs_rx):
-        print(f"  Rx UEs={rx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'})")
-
+    for scenario in cfg.scenarios:
+        print(f"  Scenario: {scenario.label}")
+        for rx, mcs in zip(cfg.rx_ues, best_mcs_rx.get(scenario, [])):
+            print(
+                f"    Rx UEs={rx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
+            )
 
 if __name__ == "__main__":
     main()
