@@ -29,6 +29,9 @@ for i in ${!mobilities[@]}; do
                                     if [[ "${perfect_csi_arr[$pcsi]}" == "False" && "${csi_quantization_arr[$cquant]}" == "False" ]]; then
                                         continue
                                     fi
+                                    if [[ "${csi_prediction_arr[$cpred]}" == "True" && "${csi_quantization_arr[$cquant]}" == "False" ]]; then
+                                        continue
+                                    fi
                                     echo "Mobility: ${mobilities[$i]}, Drop idx: ${drop_idx[$j]}, Rx UEs: ${rx_ues_arr[$k]}, Modulation order: ${modulation_orders[$m]}, Code rate: ${code_rates[$c]}, num_txue_sel: ${num_txue_sel_arr[$t]}, perfect_csi: ${perfect_csi_arr[$pcsi]}, csi_prediction: ${csi_prediction_arr[$cpred]}, csi_quantization_on: ${csi_quantization_arr[$cquant]}"
                                     python sims/sim_mu_mimo_testing_updates.py "${mobilities[$i]}" "${drop_idx[$j]}" "${rx_ues_arr[$k]}" "${modulation_orders[$m]}" "${code_rates[$c]}" "${num_txue_sel_arr[$t]}" "${perfect_csi_arr[$pcsi]}" "${csi_prediction_arr[$cpred]}" "${csi_quantization_arr[$cquant]}"
                                 done
@@ -40,3 +43,16 @@ for i in ${!mobilities[@]}; do
         done
     done
 done
+
+
+# Reference table
+# Perfect CSI |  Prediction | Quantization | Meaning
+#------------------------------------------------------
+#     F       |      F      |     F        | Not simulated
+#     F       |      F      |     T        | Baseline: imperfect channel estimation, quantized CSI feedback without prediction
+#     F       |      T      |     F        | Not simulated
+#     F       |      T      |     T        | Achievable case: imperfect channel estimation, CSI prediction, quantized CSI feedback
+#     T       |      F      |     F        | Ideal case: perfect CSI at the BS (perfect channel estimation, no delay, no quantization)
+#     T       |      F      |     T        | Semi-ideal case: perfect CSI at the UE, quantized CSI feedback
+#     T       |      T      |     F        | Not simulated
+#     T       |      T      |     T        | Not simulated
