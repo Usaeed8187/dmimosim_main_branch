@@ -242,18 +242,18 @@ if __name__ == "__main__":
         if cfg.csi_prediction:
             
             if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
             np.savez(file_path,
                     cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
                     nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
                     ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11])
         else:
             if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
 
             np.savez(file_path,
                     cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
