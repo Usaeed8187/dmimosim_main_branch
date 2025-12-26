@@ -1,0 +1,218 @@
+import numpy as np
+#from pyESN_online_new import ESN
+#from pyDeepESN_online import ESN
+#from pyDeepESN2_online import ESN
+#from pyDeepESN3_online import ESN
+from pyDeepWESN4_online import WESN #best
+#from pyDeepESN5_online import ESN
+#from pyDeepESN6_online import ESN
+#from pyESN_online_decorr import ESN
+import copy
+
+
+# Deep Q Network off-policy
+class DeepWESNQNetwork:
+    def __init__(
+            self,
+            n_actions,
+            n_features,
+            input_window_size,
+            output_window_size,
+            memory_size,
+            n_layers,
+            nInternalUnits = 64,
+            reward_decay=0.9,
+            e_greedy=0.9,
+            lr=0.01,
+            random_seed=1,
+            spectral_radius = 0.30
+    ):
+        self.n_actions = n_actions
+        self.n_features = n_features
+        self.n_layers = n_layers
+        self.gamma = reward_decay
+        self.memory_size = memory_size
+        self.input_window_size = input_window_size
+        self.output_window_size = output_window_size
+        self.batch_size = memory_size
+        self.epsilon = e_greedy
+        self.spectral_radius = spectral_radius
+        self.nInternalUnits = nInternalUnits
+        # total learning step
+        self.learn_step_counter = 0
+
+        # initialize learning rate
+        self.lr = lr
+
+        # initialize zero memory [s, a, r, s_]
+        self.memory = np.zeros((self.memory_size, n_features * 2 + 2))
+
+        # build net
+        self._build_net(random_seed)
+
+        self.cost_his = []
+
+        self.training_batch_size = 40
+        self.training_iteration = 100
+        self.replace_target_iter = 25
+
+        self.rng = np.random.RandomState(random_seed) # Line added by Ramin. Random number generator.
+
+        
+
+    def _build_net(self, random_seed):
+        # ------------------ ESN parameters ------------------
+        nInternalUnits = self.nInternalUnits #64 # 32, 128
+        spectralRadius = self.spectral_radius
+        inputScaling = 2 * np.ones(self.n_features)
+        inputScaling = 1 * np.ones(self.n_features)
+        #inputScaling = 1 * np.ones(self.n_features)
+        inputShift = -1 * np.ones(self.n_features)
+        inputShift = 0 * np.ones(self.n_features)
+        #inputShift = 0 * np.ones(self.n_features)
+        teacherScaling = 1 * np.ones(self.n_actions)
+        teacherShift = 0 * np.ones(self.n_actions)
+        self.nForgetPoints = 50  # 50
+
+        # ------------------ build evaluate_net ------------------
+        self.eval_net = WESN(n_inputs=self.n_features, n_outputs=self.n_actions, n_reservoir=nInternalUnits,
+                            n_layers = self.n_layers, memory_size = self.memory_size,
+                            input_window_length = self.input_window_size,
+                            output_window_length = self.output_window_size,
+                            spectral_radius=spectralRadius, sparsity=0, noise=0,
+                            lr=self.lr,
+                            input_shift=inputShift, input_scaling=inputScaling,
+                            teacher_scaling=teacherScaling, teacher_shift=teacherShift,
+                            random_seed=random_seed)
+
+        # ------------------ build target_net ------------------
+        self.target_net = WESN(n_inputs=self.n_features, n_outputs=self.n_actions, n_reservoir=nInternalUnits,
+                            n_layers = self.n_layers, memory_size = self.memory_size,
+                            input_window_length = self.input_window_size,
+                            output_window_length = self.output_window_size,
+                            spectral_radius=spectralRadius, sparsity=0, noise=0,
+                            lr=self.lr,
+                            input_shift=inputShift, input_scaling=inputScaling,
+                            teacher_scaling=teacherScaling, teacher_shift=teacherShift,
+                            random_seed=random_seed)
+
+        self.target_net = copy.deepcopy(self.eval_net)
+        #self.target_net.copy_net(self.eval_net)
+
+    def store_transition(self, s, a, r, s_):
+        if not hasattr(self, 'memory_counter'):
+            self.memory_counter = 0
+
+        transition = np.hstack((s, [a, r], s_))
+
+        # replace the old memory with new memory
+        self.memory_counter = self.memory_counter % self.memory_size
+        self.memory[self.memory_counter, :] = transition
+
+        self.memory_counter += 1
+
+    def choose_action(self, observation):
+        # to have batch dimension when feed into tf placeholder
+        observation = observation[np.newaxis, :]
+
+        # forward feed the observation and get q value for every actions
+        actions_value = self.eval_net.predict(observation, 0, continuation=True)
+        #print(actions_value)
+        # if np.random.uniform() < self.epsilon:
+        if self.rng.uniform() < self.epsilon: # Line added by Ramin
+            action = np.argmax(actions_value)
+        else:
+            # action = np.random.randint(0, self.n_actions)
+            action = self.rng.randint(0, self.n_actions)
+            #action = 2 * np.random.randint(0, int(self.n_actions/2))
+        return action
+
+    def activate_target_net(self, observation_):
+        # to have batch dimension when feed into tf placeholder
+        observation_ = observation_[np.newaxis, :]
+
+        # forward feed the observation and get q value for every actions
+        actions_value = self.target_net.predict(observation_, 0, continuation=True)
+
+
+    def learn_new(self, episode_size, step, method):
+
+        sequential = False
+        batch = self.memory
+        training_batch_size = self.training_batch_size  # 40, 50
+        training_iteration = self.training_iteration  # 100, 200
+        replace_target_iter = self.replace_target_iter  # 25, 50, 50
+        
+
+        if (step == episode_size - 1):
+            # index_start = np.random.randint(episode_size * index_episode + self.nForgetPoints,
+            #                                episode_size * (index_episode + 1) - training_batch_size + 1)
+            index_train = np.arange(self.nForgetPoints, episode_size)
+        else:
+            # index_start = np.random.randint(episode_size * index_episode,
+            #                                episode_size * (index_episode+1) - training_batch_size + 1)
+            index_train = np.arange(0, episode_size)
+
+        for i in range(training_iteration):
+            if (sequential==True):
+                if (step == episode_size - 1):
+                    # index_start = np.random.randint(self.nForgetPoints,
+                    #                                 episode_size - training_batch_size + 1)
+                    index_start = self.rng.randint(self.nForgetPoints, # Line added by Ramin
+                                                    episode_size - training_batch_size + 1)
+                else:
+                    # index_start = np.random.randint(0,
+                    #                                 episode_size - training_batch_size + 1)
+                    index_start = self.rng.randint(0, # Line added by Ramin
+                                                    episode_size - training_batch_size + 1)
+                index_train = np.arange(index_start, index_start+training_batch_size)
+            else:
+                # np.random.shuffle(index_train)
+                self.rng.shuffle(index_train) # Line added by Ramin 
+            batch_memory = batch[index_train[:training_batch_size]]
+            #
+            q_eval = self.eval_net.predict_training(index_train[:training_batch_size])
+            q_next = self.target_net.predict_training(index_train[:training_batch_size])
+            if (method == 'double'):
+                q_next_action = self.eval_net.predict_training(index_train[:training_batch_size])
+                next_action = np.argmax(q_next_action, axis = 1)
+
+
+            # change q_target w.r.t q_eval's action
+            q_target = q_eval.copy()
+
+            eval_act_index = batch_memory[:, self.n_features].astype(int)
+            reward = batch_memory[:, self.n_features + 1]
+
+            if (method == 'normal'):
+                next_q_value = self.gamma * np.max(q_next, axis=1)
+                for index in range(len(eval_act_index)):
+                    q_target[index, eval_act_index[index]] = reward[index] + next_q_value[index]
+
+            elif (method == 'double'):
+                for index in range(len(eval_act_index)):
+                    q_target[index, eval_act_index[index]] = reward[index] + \
+                                                             self.gamma * q_next[index, next_action[index]]
+
+            # train eval network
+            self.eval_net.fit(q_target, index_train[:training_batch_size])
+
+            if ((i+1) % replace_target_iter == 0):
+                self.target_net.W_out = copy.deepcopy(self.eval_net.W_out)
+                #self.target_net.copy_net(self.eval_net)
+
+        # Refresh the laststate
+        self.eval_net.refresh_state()
+        self.target_net.refresh_state()
+
+
+    def update_lr(self, lr):
+        self.eval_net.lr = lr
+        self.target_net.lr = lr
+
+    def plot_cost(self):
+        import matplotlib.pyplot as plt
+        plt.plot(np.arange(len(self.cost_his)), self.cost_his)
+        plt.ylabel('Cost')
+        plt.xlabel('training steps')
+        plt.show()
