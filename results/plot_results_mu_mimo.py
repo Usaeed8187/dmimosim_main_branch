@@ -392,7 +392,7 @@ def main() -> None:
         "--drops",
         type=int,
         nargs="+",
-        default=[1],
+        default=[1, 2, 3],
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -426,7 +426,7 @@ def main() -> None:
     parser.add_argument(
         "--ber-modulation-order",
         type=int,
-        default=2,
+        default=4,
         help="Modulation order to use for BER plots.",
     )
     parser.add_argument(
