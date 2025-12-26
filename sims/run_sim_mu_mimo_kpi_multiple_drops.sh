@@ -42,7 +42,8 @@ for i in ${!mobilities[@]}; do
                                         continue
                                     fi
                                     echo "Mobility: ${mobilities[$i]}, Drop idx: ${drop_idx[$j]}, Rx UEs: ${rx_ues_arr[$k]}, Modulation order: ${modulation_orders[$m]}, Code rate: ${code_rates[$c]}, num_txue_sel: ${num_txue_sel_arr[$t]}, perfect_csi: ${perfect_csi_arr[$pcsi]}, channel_prediction_setting: ${channel_prediction_setting}, csi_prediction: ${csi_prediction_enabled}, csi_quantization_on: ${csi_quantization_arr[$cquant]}, channel_prediction_method: ${channel_prediction_method}"
-                                    python sims/sim_mu_mimo_testing_updates.py "${mobilities[$i]}" "${drop_idx[$j]}" "${rx_ues_arr[$k]}" "${modulation_orders[$m]}" "${code_rates[$c]}" "${num_txue_sel_arr[$t]}" "${perfect_csi_arr[$pcsi]}" "${channel_prediction_setting}" "${csi_quantization_arr[$cquant]}"                                done
+                                    python sims/sim_mu_mimo_testing_updates.py "${mobilities[$i]}" "${drop_idx[$j]}" "${rx_ues_arr[$k]}" "${modulation_orders[$m]}" "${code_rates[$c]}" "${num_txue_sel_arr[$t]}" "${perfect_csi_arr[$pcsi]}" "${channel_prediction_setting}" "${csi_quantization_arr[$cquant]}"                                    
+                                done
                             done
                         done
                     done
