@@ -73,7 +73,9 @@ modulation_order = 2
 code_rate = 2 / 3
 num_txue_sel = 8
 perfect_csi = False
-csi_prediction = True
+channel_prediction_setting = "None"
+csi_prediction = False
+channel_prediction_method = None
 csi_quantization_on = True
 
 def _parse_bool(value):
@@ -104,13 +106,21 @@ if len(arguments) > 0:
         perfect_csi = _parse_bool(arguments[6])
 
     if len(arguments) >= 8:
-        csi_prediction = _parse_bool(arguments[7])
+        channel_prediction_setting = arguments[7]
 
     if len(arguments) >= 9:
         csi_quantization_on = _parse_bool(arguments[8])
 
+    if str(channel_prediction_setting).lower() == "none":
+        csi_prediction = False
+        channel_prediction_method = None
+    else:
+        csi_prediction = True
+        channel_prediction_method = channel_prediction_setting
+
     if perfect_csi:
         csi_prediction = False
+        channel_prediction_method = None
     
     print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
     print("rx_ues_arr: ", rx_ues_arr)
@@ -119,8 +129,10 @@ if len(arguments) > 0:
     print("Code rate: {}".format(code_rate))
     print("num_txue_sel: {}".format(num_txue_sel))
     print("perfect_csi: {}".format(perfect_csi))
+    print("channel_prediction_setting: {}".format(channel_prediction_setting))
     print("csi_prediction: {}".format(csi_prediction))
     print("csi_quantization_on: {}".format(csi_quantization_on))
+    print("channel_prediction_method: {}".format(channel_prediction_method))
 
 # Main function
 if __name__ == "__main__":
@@ -136,7 +148,7 @@ if __name__ == "__main__":
     cfg.link_adapt = False      # enable/disable link adaptation,. .
     cfg.csi_prediction = csi_prediction
     cfg.use_perfect_csi_history_for_prediction = False
-    cfg.channel_prediction_method = "weiner_filter" # "old", "two_mode", "two_mode_tf", "weiner_filter"
+    cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
     if arguments == []:
