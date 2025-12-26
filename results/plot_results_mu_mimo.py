@@ -84,6 +84,7 @@ class Scenario:
     prediction: bool
     quantization: bool
     label: str
+    prediction_method: Optional[str] = None
 
 
 class ResultLoader:
@@ -110,8 +111,15 @@ class ResultLoader:
         scenario: Scenario,
     ) -> List[str]:
         quant_str = str(scenario.quantization)
+        method = scenario.prediction_method
+        if method:
+            return [
+                f"{prefix}_prediction_{method}_pmi_quantization_{quant_str}.npz",
+                f"{prefix}_prediction_{method}.npz",
+            ]
+
         return [
-            f"{prefix}_prediction_*_pmi_quantization_{quant_str}.npz",
+            f"{prefix}_prediction_pmi_quantization_{quant_str}.npz",
             # Backward compatibility with the legacy naming (no method/quantization).
             f"{prefix}_prediction.npz",
         ]
@@ -282,13 +290,21 @@ def _default_scenarios(include_prediction: bool = True) -> List[Scenario]:
             perfect_csi=False,
             prediction=False,
             quantization=True,
-            label="Worst case: imperfect channel estimation, quantized feedback",
+            label="Worst case: Outdated CSI",
         ),
         Scenario(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Achievable: imperfect channel estimation + prediction, quantized feedback",
+            label="Achievable: Two-Mode WESN prediction",
+            prediction_method=None,
+        ),
+        Scenario(
+            perfect_csi=False,
+            prediction=True,
+            quantization=True,
+            label="Achievable: Wiener filter prediction",
+            prediction_method="weiner_filter",
         ),
         Scenario(
             perfect_csi=True,
@@ -392,7 +408,7 @@ def main() -> None:
         "--drops",
         type=int,
         nargs="+",
-        default=[1, 2, 3],
+        default=[1],
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -505,7 +521,8 @@ def main() -> None:
             )
             scenario_values.append(datapoint.uncoded_ber if datapoint else np.nan)
         ber_tx_series.append((scenario.label, scenario_values))
-        semilogy_metric(
+    
+    semilogy_metric(
         cfg.tx_ues,
         ber_tx_series,
         xlabel="Number of Tx UEs",
@@ -559,7 +576,8 @@ def main() -> None:
             scenario_best_mcs.append(best_mcs)
         thr_tx_series.append((scenario.label, scenario_thr))
         best_mcs_tx[scenario] = scenario_best_mcs
-        plot_metric(
+    
+    plot_metric(
         cfg.tx_ues,
         thr_tx_series,
         xlabel="Number of Tx UEs",
@@ -589,7 +607,8 @@ def main() -> None:
             scenario_best_mcs.append(best_mcs)
         thr_rx_series.append((scenario.label, scenario_thr))
         best_mcs_rx[scenario] = scenario_best_mcs
-        plot_metric(
+    
+    plot_metric(
         cfg.rx_ues,
         thr_rx_series,
         xlabel="Number of Rx UEs",
