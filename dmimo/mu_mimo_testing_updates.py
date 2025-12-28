@@ -444,6 +444,13 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_tx_ue_indices, (-1,)), axis=4)
 
+    # TODO : Make rank and link adaptation work with quantized CSI feedback
+    if cfg.rank_adapt or cfg.link_adapt:
+        # Rank and link adaptation
+        # TODO: add support for quantized CSI feedback
+        rank_feedback_report, n_var, mcs_feedback_report = \
+            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
+
     if cfg.csi_quantization_on:
         h_freq_csi = tf.reduce_mean(h_freq_csi, axis=0, keepdims=True)
         if cfg.PMI_feedback_architecture == "RVQ":
@@ -464,12 +471,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             else:
                 h_freq_csi = PMI_feedback_report
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
-
-    if cfg.rank_adapt or cfg.link_adapt:
-        # Rank and link adaptation
-        # TODO: add support for quantized CSI feedback
-        rank_feedback_report, n_var, mcs_feedback_report = \
-            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
         
     if cfg.rank_adapt:
         # Update rank and total number of streams
