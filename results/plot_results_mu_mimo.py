@@ -5,10 +5,10 @@ The plotting logic is tailored for the artifacts produced by
 per-drop ``npz`` files, averages metrics across drops, and produces four
 figures:
 
-* Uncoded BER vs. number of Tx UEs (fixed Rx UEs, fixed MCS)
-* Uncoded BER vs. number of Rx UEs (fixed Tx UEs, fixed MCS)
-* Throughput vs. number of Tx UEs (fixed Rx UEs, best MCS per point)
-* Throughput vs. number of Rx UEs (fixed Tx UEs, best MCS per point)
+* Uncoded BER vs. number of RUs (fixed UEs, fixed MCS)
+* Uncoded BER vs. number of UEs (fixed RUs, fixed MCS)
+* Throughput vs. number of RUs (fixed UEs, best MCS per point)
+* Throughput vs. number of UEs (fixed RUs, best MCS per point)
 
 For BER plots, the modulation order and code rate are fixed by the
 command-line arguments.  For throughput plots, the script selects, for
@@ -296,27 +296,27 @@ def _default_scenarios(include_prediction: bool = True) -> List[Scenario]:
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Achievable: Two-Mode WESN prediction",
+            label="Two-Mode WESN prediction",
             prediction_method=None,
         ),
         Scenario(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Achievable: Wiener filter prediction",
+            label="Wiener filter prediction",
             prediction_method="weiner_filter",
         ),
         Scenario(
             perfect_csi=True,
             prediction=False,
             quantization=False,
-            label="Ideal: perfect CSI at BS (no quantization)",
+            label="Perfect CSI at BS (no quantization)",
         ),
         Scenario(
             perfect_csi=True,
             prediction=False,
             quantization=True,
-            label="Semi-ideal: perfect channel estimation, quantized feedback",
+            label="Perfect channel estimation, quantized feedback",
         ),
     ]
 
@@ -408,7 +408,7 @@ def main() -> None:
         "--drops",
         type=int,
         nargs="+",
-        default=[1],
+        default=[1, 2],
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -416,14 +416,14 @@ def main() -> None:
         type=int,
         nargs="+",
         default=[0, 2, 4, 6],
-        help="Rx UE counts that were simulated.",
+        help="UE counts that were simulated.",
     )
     parser.add_argument(
         "--tx-ues",
         type=int,
         nargs="+",
         default=[2, 4, 6, 8, 10],
-        help="Tx UE counts that were simulated (num_txue_sel).",
+        help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
         "--modulation-orders",
@@ -455,13 +455,13 @@ def main() -> None:
         "--fixed-rx",
         type=int,
         default=4,
-        help="Rx UE count to hold fixed when sweeping Tx UEs.",
+        help="UE count to hold fixed when sweeping RUs.",
     )
     parser.add_argument(
         "--fixed-tx",
         type=int,
         default=8,
-        help="Tx UE count to hold fixed when sweeping Rx UEs.",
+        help="RU count to hold fixed when sweeping UEs.",
     )
     parser.add_argument(
         "--output-dir",
@@ -506,7 +506,7 @@ def main() -> None:
         cfg.code_rates,
     )
 
-    # BER vs Tx UEs (fixed Rx)
+    # BER vs RUs (fixed Rx)
     ber_tx_series = []
     for scenario in cfg.scenarios:
         scenario_values = []
@@ -525,13 +525,13 @@ def main() -> None:
     semilogy_metric(
         cfg.tx_ues,
         ber_tx_series,
-        xlabel="Number of Tx UEs",
+        xlabel="Number of RUs",
         ylabel="Uncoded BER",
-        title=f"Uncoded BER vs Tx UEs (Rx UEs={cfg.fixed_rx_for_tx_sweep}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",
+        title=f"Uncoded BER vs RUs (UEs={cfg.fixed_rx_for_tx_sweep}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",
         output_path=os.path.join(cfg.output_dir, "uncoded_ber_vs_tx_ues.png"),
     )
 
-    # BER vs Rx UEs (fixed Tx)
+    # BER vs UEs (fixed Tx)
     ber_rx_series = []
     for scenario in cfg.scenarios:
         scenario_values = []
@@ -549,13 +549,13 @@ def main() -> None:
     semilogy_metric(
         cfg.rx_ues,
         ber_rx_series,
-        xlabel="Number of Rx UEs",
+        xlabel="Number of UEs",
         ylabel="Uncoded BER",
-        title=f"Uncoded BER vs Rx UEs (Tx UEs={cfg.fixed_tx_for_rx_sweep}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",
+        title=f"Uncoded BER vs UEs (RUs={cfg.fixed_tx_for_rx_sweep}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",
         output_path=os.path.join(cfg.output_dir, "uncoded_ber_vs_rx_ues.png"),
     )
 
-    # Throughput vs Tx UEs (fixed Rx, best MCS)
+    # Throughput vs RUs (fixed Rx, best MCS)
     thr_tx_series = []
     best_mcs_tx = {}
     for scenario in cfg.scenarios:
@@ -580,13 +580,13 @@ def main() -> None:
     plot_metric(
         cfg.tx_ues,
         thr_tx_series,
-        xlabel="Number of Tx UEs",
+        xlabel="Number of RUs",
         ylabel="Throughput",
-        title=f"Throughput vs Tx UEs (Rx UEs={cfg.fixed_rx_for_tx_sweep}, best MCS)",
+        title=f"Throughput vs RUs (UEs={cfg.fixed_rx_for_tx_sweep}, best MCS)",
         output_path=os.path.join(cfg.output_dir, "throughput_vs_tx_ues.png"),
     )
 
-    # Throughput vs Rx UEs (fixed Tx, best MCS)
+    # Throughput vs UEs (fixed Tx, best MCS)
     thr_rx_series = []
     best_mcs_rx = {}
     for scenario in cfg.scenarios:
@@ -611,26 +611,26 @@ def main() -> None:
     plot_metric(
         cfg.rx_ues,
         thr_rx_series,
-        xlabel="Number of Rx UEs",
+        xlabel="Number of UEs",
         ylabel="Throughput",
-        title=f"Throughput vs Rx UEs (Tx UEs={cfg.fixed_tx_for_rx_sweep}, best MCS)",
+        title=f"Throughput vs UEs (RUs={cfg.fixed_tx_for_rx_sweep}, best MCS)",
         output_path=os.path.join(cfg.output_dir, "throughput_vs_rx_ues.png"),
     )
 
     # Print the maximizing MCS selections for throughput plots
-    print("\nMaximizing MCS for Throughput vs Tx UEs (Rx UEs fixed at {}):".format(cfg.fixed_rx_for_tx_sweep))
+    print("\nMaximizing MCS for Throughput vs RUs (UEs fixed at {}):".format(cfg.fixed_rx_for_tx_sweep))
     for scenario in cfg.scenarios:
         print(f"  Scenario: {scenario.label}")
         for tx, mcs in zip(cfg.tx_ues, best_mcs_tx.get(scenario, [])):
             print(
-                f"    Tx UEs={tx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
+                f"    RUs={tx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
             )
-    print("\nMaximizing MCS for Throughput vs Rx UEs (Tx UEs fixed at {}):".format(cfg.fixed_tx_for_rx_sweep))
+    print("\nMaximizing MCS for Throughput vs UEs (RUs fixed at {}):".format(cfg.fixed_tx_for_rx_sweep))
     for scenario in cfg.scenarios:
         print(f"  Scenario: {scenario.label}")
         for rx, mcs in zip(cfg.rx_ues, best_mcs_rx.get(scenario, [])):
             print(
-                f"    Rx UEs={rx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
+                f"    UEs={rx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
             )
 
 if __name__ == "__main__":
