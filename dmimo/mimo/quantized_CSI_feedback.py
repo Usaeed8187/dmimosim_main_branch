@@ -76,14 +76,14 @@ class quantized_CSI_feedback(Layer):
         self.num_BS_Ant = 4
         self.num_UE_Ant = 2
 
-    def call(self, h_est, return_codebook=False):
+    def call(self, h_est, return_codebook=False, return_feedback_bits=False):
         
         if self.method == '5G' and self.architecture == 'baseline':
 
             codebook = self.cal_codebook_type_I(h_est)
             PMI, rate_for_selected_precoder, precoding_matrices = self.cal_PMI_type_I(codebook, h_est)
             
-            CSI_feedback_report = [PMI, rate_for_selected_precoder, precoding_matrices]
+            PMI_feedback_report = [PMI, rate_for_selected_precoder, precoding_matrices]
 
         elif self.method == '5G' and self.architecture == 'dMIMO_phase2_rel_15_type_II':
 
@@ -137,7 +137,7 @@ class quantized_CSI_feedback(Layer):
             h_est_quant = tf.transpose(h_est_quant, perm=[3, 2, 0, 1])
             h_est_quant  = h_est_quant[tf.newaxis, tf.newaxis, :, tf.newaxis, :, :, :] # [1,1,total_Ns,1,N_tx,N_syms,N_fft]
 
-            CSI_feedback_report = h_est_quant
+            PMI_feedback_report = h_est_quant
 
         elif self.method == '5G' and self.architecture == 'dMIMO_phase2_type_II_CB1':
 
@@ -225,7 +225,7 @@ class quantized_CSI_feedback(Layer):
             h_est_quant = tf.transpose(h_est_quant, perm=[3, 2, 0, 1])
             h_est_quant  = h_est_quant[tf.newaxis, tf.newaxis, :, tf.newaxis, :, :, :] # [1,1,total_Ns,1,N_tx,N_syms,N_fft]
 
-            CSI_feedback_report = h_est_quant
+            PMI_feedback_report = h_est_quant
 
         elif self.method == '5G' and self.architecture == 'dMIMO_phase2_type_II_CB2':
 
@@ -242,6 +242,7 @@ class quantized_CSI_feedback(Layer):
             num_streams_per_UE = self.num_tx_streams // (num_rx_ues + 2)
 
             W_rb_all = []
+            feedback_bits = []
             ref_tx = 0
 
             for rx_idx in range(num_rx_ues+1):
@@ -258,7 +259,8 @@ class quantized_CSI_feedback(Layer):
 
                 curr_h_est_big = tf.gather(h_est_rb, rx_ant_idx, axis=0)
 
-                W1_rb_all_tx = []                
+                W1_rb_all_tx = []
+                W1_indices = []        
 
                 for tx_idx in range(num_tx_ues+1):
                     
@@ -279,13 +281,28 @@ class quantized_CSI_feedback(Layer):
 
                     m1_list, m2_list, col_idx_list = self.select_L_beams(curr_R, V, return_column_indices=True, L=L_g, N1=N_1_g)
 
+                    W1_indices.append(col_idx_list)
+
                     W_1 = tf.gather(V, col_idx_list, axis=1)  # [Nt, L]
 
                     W1_rb_all_tx.append(W_1)
 
                 W1_rb_all_tx = self.block_diag(W1_rb_all_tx)
 
-                W_rb = self.type_II_precoder_CB2(W1_rb_all_tx, curr_h_est_big, Ns, N1=W1_rb_all_tx.shape[0])
+                W_rb_out = self.type_II_precoder_CB2(
+                    W1_rb_all_tx,
+                    curr_h_est_big,
+                    Ns,
+                    N1=W1_rb_all_tx.shape[0],
+                    return_feedback_bits=return_feedback_bits,
+                    w1_beam_indices=W1_indices,
+                )
+
+                if return_feedback_bits:
+                    W_rb, pmi_bits = W_rb_out
+                    feedback_bits.append(pmi_bits)
+                else:
+                    W_rb = W_rb_out
 
                 W_rb_all.append(W_rb)
 
@@ -297,7 +314,10 @@ class quantized_CSI_feedback(Layer):
             h_est_quant = tf.transpose(h_est_quant, perm=[3, 2, 0, 1])
             h_est_quant  = h_est_quant[tf.newaxis, tf.newaxis, :, tf.newaxis, :, :, :] # [1,1,total_Ns,1,N_tx,N_syms,N_fft]
 
-            CSI_feedback_report = h_est_quant
+            if return_feedback_bits:
+                PMI_feedback_report = (h_est_quant, feedback_bits)
+            else:
+                PMI_feedback_report = h_est_quant
             
 
         elif self.method == '5G' and self.architecture == 'dMIMO_phase1':
@@ -321,7 +341,7 @@ class quantized_CSI_feedback(Layer):
             rate_for_selected_precoder = np.asarray(rate_for_selected_precoder)
             precoding_matrices = np.asarray(precoding_matrices)
             
-            CSI_feedback_report = [PMI, rate_for_selected_precoder, precoding_matrices]
+            PMI_feedback_report = [PMI, rate_for_selected_precoder, precoding_matrices]
 
         elif self.method == '5G' and self.architecture == 'dMIMO_phase3_SU_MIMO':
 
@@ -344,17 +364,17 @@ class quantized_CSI_feedback(Layer):
             rate_for_selected_precoder = np.asarray(rate_for_selected_precoder)
             precoding_matrices = np.asarray(precoding_matrices)
             
-            CSI_feedback_report = [PMI, rate_for_selected_precoder, precoding_matrices]
+            PMI_feedback_report = [PMI, rate_for_selected_precoder, precoding_matrices]
         
         elif self.method == 'RVQ':
-            CSI_feedback_report  = self.VectorQuantizationLoader(h_est)
+            PMI_feedback_report  = self.VectorQuantizationLoader(h_est)
         else:
             raise Exception(f"The {self.method} CSI feedback mechanism has not been implemented. The simulator supports 5G standard CSI feedback and RVQ CSI feedback only.")
         
         if return_codebook:
-            return CSI_feedback_report, codebook
+            return PMI_feedback_report, codebook
         else:
-            return CSI_feedback_report
+            return PMI_feedback_report
         
     def type_II_precoder(self, curr_h_est, V, Ns, L=None, N1=None):
 
@@ -417,7 +437,7 @@ class quantized_CSI_feedback(Layer):
 
         return W_rb
     
-    def type_II_precoder_CB2(self, W_1, curr_h_est, Ns, L=None, N1=None):
+    def type_II_precoder_CB2(self, W_1, curr_h_est, Ns, L=None, N1=None, return_feedback_bits=False, w1_beam_indices=None):
 
             
         # H_A[k] = H[k] @ W_1  => [N_rx, L, N_SB]
@@ -438,7 +458,12 @@ class quantized_CSI_feedback(Layer):
         W_C1 = tf.linalg.diag(tf.transpose(P_wb, perm=[1, 0]))
 
         # SB amplitude quantization
-        W_C2, p_l_i_t_2_all = self.sb_coeff_quantize(G_sb_normalized, P_wb, N_PSK=8) # [N_sb, L, Ns]
+        if return_feedback_bits:
+            W_C2, p_l_i_t_2_all, p_l_i_t_2_idx, phi_l_i_t_idx = self.sb_coeff_quantize(
+                G_sb_normalized, P_wb, N_PSK=8, return_indices=True
+            ) # [N_sb, L, Ns]
+        else:
+            W_C2, p_l_i_t_2_all = self.sb_coeff_quantize(G_sb_normalized, P_wb, N_PSK=8) # [N_sb, L, Ns]
         W_C2 = tf.transpose(W_C2, perm=[2,1,0])  # [Ns, L, N_sb]
 
         # Assemble W2(t)
@@ -450,6 +475,15 @@ class quantized_CSI_feedback(Layer):
         norm_factor = tf.cast(norm_factor, self.dtype)
         W_rb = norm_factor[..., tf.newaxis] * W_rb
         W_rb = tf.transpose(W_rb, perm=[0,2,1]) # [N_sb, N_tx, Ns]
+
+        if return_feedback_bits:
+            feedback_bits = {
+                "wb_amplitude_indices": tf.identity(k_wb),
+                "sb_amplitude_indices": tf.identity(p_l_i_t_2_idx),
+                "sb_phase_indices": tf.identity(phi_l_i_t_idx),
+                "w1_beam_indices": w1_beam_indices,
+            }
+            return W_rb, feedback_bits
 
         return W_rb
     
@@ -1120,7 +1154,7 @@ class quantized_CSI_feedback(Layer):
         # TS 38.214 Table 5.2.2.2.3-3: {sqrt(1/2), 1}
         return tf.convert_to_tensor([tf.sqrt(0.5), 1.0], dtype=self.real_dtype)
 
-    def sb_coeff_quantize(self, G_sb_normalized, P_wb, N_PSK=8, eps=1e-12):
+    def sb_coeff_quantize(self, G_sb_normalized, P_wb, N_PSK=8, eps=1e-12, return_indices=False):
         """
         Subband amplitude quantization using P2={1/2,1}.
 
@@ -1149,9 +1183,11 @@ class quantized_CSI_feedback(Layer):
         # calculate quantized subband amplitudes and phases
         W_C2_l = []
         p_l_i_t_2_all = []
+        p_l_i_t_2_idx_all = []
+        phi_l_i_t_idx_all = []
         for l in range(G_sb_normalized.shape[-1]):
-            W_C1_l = tf.linalg.diag(P_wb[:,l])
-            W_C1_l_inv = tf.linalg.inv(W_C1_l)
+            W_C1_l_inv = tf.where(tf.abs(P_wb[:,l]) > 0, 1.0/P_wb[:,l], tf.zeros_like(P_wb[:,l]))
+            W_C1_l_inv = tf.linalg.diag(W_C1_l_inv)
             W_2_l = tf.gather(G_sb_normalized, l, axis=-1)
             D_l = tf.matmul(W_C1_l_inv[tf.newaxis, ...], W_2_l[..., tf.newaxis])
 
@@ -1159,11 +1195,13 @@ class quantized_CSI_feedback(Layer):
             p_l_i_t_2_idx = tf.argmin(abs_dist, axis=-1, output_type=tf.int32)                             # [N_sb,L]
             p_l_i_t_2 = tf.gather(P2, p_l_i_t_2_idx)
             p_l_i_t_2_all.append(p_l_i_t_2[..., tf.newaxis])
+            p_l_i_t_2_idx_all.append(p_l_i_t_2_idx[..., tf.newaxis])
 
             theta_0_2pi = tf.math.mod(tf.math.angle(D_l) + 2*np.pi, 2*np.pi)
             phi_dist = tf.abs(theta_0_2pi - ph[tf.newaxis, tf.newaxis, :])
             phi_l_i_t_idx = tf.argmin(phi_dist, axis=-1, output_type=tf.int32)                             # [N_sb,L]
             phi_l_i_t = tf.gather(ph, phi_l_i_t_idx)
+            phi_l_i_t_idx_all.append(phi_l_i_t_idx[..., tf.newaxis])
 
             p_phi = tf.cast(p_l_i_t_2, self.dtype) * tf.exp(
                 1j * tf.cast(phi_l_i_t, self.dtype)
@@ -1173,7 +1211,11 @@ class quantized_CSI_feedback(Layer):
 
         W_C2_l = tf.concat(W_C2_l, axis=-1)
         p_l_i_t_2_all = tf.concat(p_l_i_t_2_all, axis=-1)
+        p_l_i_t_2_idx_all = tf.concat(p_l_i_t_2_idx_all, axis=-1)
+        phi_l_i_t_idx_all = tf.concat(phi_l_i_t_idx_all, axis=-1)
 
+        if return_indices:
+            return W_C2_l, p_l_i_t_2_all, p_l_i_t_2_idx_all, phi_l_i_t_idx_all
 
         return W_C2_l, p_l_i_t_2_all 
     

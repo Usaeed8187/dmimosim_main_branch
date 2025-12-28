@@ -456,7 +456,13 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                             architecture=cfg.PMI_feedback_architecture,
                                                             rbs_per_subband=4,
                                                             snrdb=rx_snr_db)
-            h_freq_csi = type_II_PMI_quantizer(h_freq_csi)
+            return_feedback_bits = True
+            PMI_feedback_report = type_II_PMI_quantizer(h_freq_csi, return_feedback_bits=return_feedback_bits)
+            if return_feedback_bits:
+                h_freq_csi = PMI_feedback_report[0]
+                PMI_feedback_bits = PMI_feedback_report[1]
+            else:
+                h_freq_csi = PMI_feedback_report
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
 
     if cfg.rank_adapt or cfg.link_adapt:
@@ -561,7 +567,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_dB_arr]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_dB_arr, PMI_feedback_bits]
 
 
 def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
@@ -584,6 +590,7 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     ldpc_ber_list = []
     uncoded_ber_list = []
     sinr_dB_list = []
+    PMI_feedback_bits = []
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
         print("first_slot_idx: ", first_slot_idx, "\n")
@@ -610,6 +617,7 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         nodewise_bitrate.append(additional_KPIs[2])
         ranks_list.append(additional_KPIs[3])
         sinr_dB_list.append(additional_KPIs[4])
+        PMI_feedback_bits.append(additional_KPIs[5])
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
