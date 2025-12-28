@@ -1,5 +1,6 @@
 import numpy as np
 import tensorflow as tf
+import os
 from tensorflow.python.keras import Model
 import matplotlib.pyplot as plt
 import time
@@ -444,13 +445,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_tx_ue_indices, (-1,)), axis=4)
 
-    # TODO : Make rank and link adaptation work with quantized CSI feedback
-    if cfg.rank_adapt or cfg.link_adapt:
-        # Rank and link adaptation
-        # TODO: add support for quantized CSI feedback
-        rank_feedback_report, n_var, mcs_feedback_report = \
-            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
-
     if cfg.csi_quantization_on:
         h_freq_csi = tf.reduce_mean(h_freq_csi, axis=0, keepdims=True)
         if cfg.PMI_feedback_architecture == "RVQ":
@@ -471,6 +465,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             else:
                 h_freq_csi = PMI_feedback_report
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
+
+    if cfg.rank_adapt or cfg.link_adapt:
+        # Rank and link adaptation
+        # TODO: add support for quantized CSI feedback
+        rank_feedback_report, n_var, mcs_feedback_report = \
+            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
         
     if cfg.rank_adapt:
         # Update rank and total number of streams
@@ -571,6 +571,172 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_dB_arr, PMI_feedback_bits]
 
 
+def _flatten_pmi_values(val):
+    if val is None:
+        return np.array([])
+    if isinstance(val, tf.Tensor):
+        val = val.numpy()
+    if isinstance(val, np.ndarray):
+        return val.flatten()
+    if isinstance(val, (list, tuple)):
+        if len(val) == 0:
+            return np.array([])
+        flattened = [_flatten_pmi_values(v) for v in val if v is not None]
+        flattened = [v for v in flattened if v.size > 0]
+        if len(flattened) == 0:
+            return np.array([])
+        return np.concatenate(flattened)
+    try:
+        return np.array([val]).flatten()
+    except Exception:
+        return np.array([])
+
+
+def _extract_pmi_field(entry, rx_idx, key, tx_idx=None):
+    if entry is None:
+        return np.array([])
+    if isinstance(entry, list):
+        if rx_idx >= len(entry):
+            return np.array([])
+        entry = entry[rx_idx]
+    if not isinstance(entry, dict) or key not in entry:
+        return np.array([])
+    value = entry[key]
+    if key == "w1_beam_indices" and isinstance(value, (list, tuple)) and tx_idx is not None:
+        if tx_idx < len(value):
+            value = value[tx_idx]
+        else:
+            return np.array([])
+    return _flatten_pmi_values(value)
+
+
+def _extract_all_pmi_fields(entry, key):
+    if entry is None:
+        return np.array([])
+    values = []
+    rx_entries = entry if isinstance(entry, list) else [entry]
+    for rx_entry in rx_entries:
+        if not isinstance(rx_entry, dict) or key not in rx_entry:
+            continue
+        data = rx_entry[key]
+        if key == "w1_beam_indices" and isinstance(data, (list, tuple)):
+            for tx_val in data:
+                flattened = _flatten_pmi_values(tx_val)
+                if flattened.size > 0:
+                    values.append(flattened)
+        else:
+            flattened = _flatten_pmi_values(data)
+            if flattened.size > 0:
+                values.append(flattened)
+    if len(values) == 0:
+        return np.array([])
+    return np.concatenate(values)
+
+
+def _compute_change_rate(sequences):
+    if len(sequences) < 2:
+        return 0.0
+    changes = 0
+    for idx in range(1, len(sequences)):
+        if not np.array_equal(sequences[idx], sequences[idx-1]):
+            changes += 1
+    return changes / float(len(sequences) - 1)
+
+
+def _debug_pmi_temporal_change(PMI_feedback_bits, ref_tx=0, ref_rx=0, save_dir="results"):
+    if PMI_feedback_bits is None or len(PMI_feedback_bits) < 2:
+        print("PMI debug requested but insufficient PMI feedback samples were collected.")
+        return
+
+    valid_feedback = [entry for entry in PMI_feedback_bits if entry is not None]
+    if len(valid_feedback) < 2:
+        print("PMI debug requested but PMI feedback entries are missing.")
+        return
+
+    keys = ["w1_beam_indices", "wb_amplitude_indices", "sb_amplitude_indices", "sb_phase_indices"]
+
+    sample_entry = valid_feedback[0]
+    num_rx = len(sample_entry) if isinstance(sample_entry, list) else 1
+    num_tx = 1
+    if isinstance(sample_entry, list) and len(sample_entry) > 0 and isinstance(sample_entry[0], dict):
+        w1_first = sample_entry[0].get("w1_beam_indices")
+        if isinstance(w1_first, (list, tuple)):
+            num_tx = len(w1_first)
+
+    rx_rates = {key: [] for key in keys}
+    for rx_idx in range(num_rx):
+        for key in keys:
+            sequences = [_extract_pmi_field(entry, rx_idx, key, tx_idx=ref_tx) for entry in valid_feedback]
+            rx_rates[key].append(_compute_change_rate(sequences))
+
+    tx_rates = {key: [] for key in keys}
+    for tx_idx in range(num_tx):
+        for key in keys:
+            sequences = [_extract_pmi_field(entry, ref_rx, key, tx_idx=tx_idx) for entry in valid_feedback]
+            tx_rates[key].append(_compute_change_rate(sequences))
+
+    aggregate_rates = {}
+    for key in keys:
+        sequences = [_extract_all_pmi_fields(entry, key) for entry in valid_feedback]
+        aggregate_rates[key] = _compute_change_rate(sequences)
+
+    print("\nPMI temporal change debug (fraction of subframe transitions that changed):")
+    print(f"  Reference transmitter {ref_tx} across receivers:")
+    for key in keys:
+        if len(rx_rates[key]) == 0:
+            continue
+        max_rx = int(np.argmax(rx_rates[key]))
+        print(f"    {key}: mean change rate {np.mean(rx_rates[key]):.2f}, max at RX {max_rx} ({rx_rates[key][max_rx]:.2f})")
+
+    print(f"  Reference receiver {ref_rx} across transmitters:")
+    for key in keys:
+        if len(tx_rates[key]) == 0:
+            continue
+        max_tx = int(np.argmax(tx_rates[key]))
+        print(f"    {key}: mean change rate {np.mean(tx_rates[key]):.2f}, max at TX {max_tx} ({tx_rates[key][max_tx]:.2f})")
+
+    print("  Aggregate across all transmitters and receivers:")
+    for key in keys:
+        print(f"    {key}: change rate {aggregate_rates.get(key, 0.0):.2f}")
+
+    os.makedirs(save_dir, exist_ok=True)
+    fig, axes = plt.subplots(3, 1, figsize=(10, 12))
+
+    rx_axis = np.arange(len(next(iter(rx_rates.values()), [])))
+    for key in keys:
+        if len(rx_rates[key]) == 0:
+            continue
+        axes[0].plot(rx_axis, rx_rates[key], marker='o', label=key)
+    axes[0].set_title(f"PMI change vs. receivers (ref TX {ref_tx})")
+    axes[0].set_xlabel("Receiver index")
+    axes[0].set_ylabel("Change rate")
+    axes[0].grid(True)
+    axes[0].legend()
+
+    tx_axis = np.arange(len(next(iter(tx_rates.values()), [])))
+    for key in keys:
+        if len(tx_rates[key]) == 0:
+            continue
+        axes[1].plot(tx_axis, tx_rates[key], marker='o', label=key)
+    axes[1].set_title(f"PMI change vs. transmitters (ref RX {ref_rx})")
+    axes[1].set_xlabel("Transmitter index")
+    axes[1].set_ylabel("Change rate")
+    axes[1].grid(True)
+    axes[1].legend()
+
+    aggregate_axis = np.arange(len(keys))
+    aggregate_values = [aggregate_rates.get(key, 0.0) for key in keys]
+    axes[2].bar(aggregate_axis, aggregate_values, tick_label=keys)
+    axes[2].set_title("Aggregate PMI change across TX/RX")
+    axes[2].set_ylabel("Change rate")
+    axes[2].grid(True, axis='y')
+
+    plt.tight_layout()
+    fig_path = os.path.join(save_dir, "pmi_dynamics_debug.png")
+    plt.savefig(fig_path)
+    plt.close(fig)
+    print(f"PMI dynamics debug plot saved to {fig_path}\n")
+
 def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     """"
     Simulation of MU-MIMO scenario according to the frame structure
@@ -618,7 +784,19 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         nodewise_bitrate.append(additional_KPIs[2])
         ranks_list.append(additional_KPIs[3])
         sinr_dB_list.append(additional_KPIs[4])
-        PMI_feedback_bits.append(additional_KPIs)
+        PMI_feedback_bits.append(additional_KPIs[5])
+
+    debug = False
+    if debug:
+        debug_ref_tx = ns3cfg.num_txue_sel // 2
+        debug_ref_rx = ns3cfg.num_rxue_sel // 2
+
+        _debug_pmi_temporal_change(
+            PMI_feedback_bits,
+            ref_tx=debug_ref_tx,
+            ref_rx=debug_ref_rx,
+            save_dir="results",
+        )
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps

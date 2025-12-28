@@ -71,8 +71,8 @@ print(f"Arguments: {arguments}")
 
 modulation_order = 2
 code_rate = 2 / 3
-num_txue_sel = 8
-perfect_csi = False
+num_txue_sel = 10
+perfect_csi = True
 channel_prediction_setting = "None"
 csi_prediction = False
 channel_prediction_method = None
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     # Select Number of TxSquad and RxSquad UEs to use.
     ns3cfg.num_txue_sel = num_txue_sel
     if arguments == []:
-        rx_ues_arr = [6]
+        rx_ues_arr = [10]
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)
