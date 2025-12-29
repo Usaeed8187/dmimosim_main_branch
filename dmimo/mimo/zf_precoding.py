@@ -343,7 +343,7 @@ def mumimo_zf_precoder_quantized_new(x, h_quantized, ue_indices, ue_ranks, retur
     MU-MIMO zero-forcing precoding supporting rank adaptation.
 
     :param x: data stream symbols of shape [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx]
-    :param h_quantized: quantized channel coefficients of shape [batch_size, num_tx_ants, num_streams, num_ofdm_symbols, num_subcarriers]
+    :param h_quantized: quantized channel coefficients of shape [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, num_subcarriers]
     :param ue_indices: receiver antenna indices for all users of shape [num_users, list of antenna indices]
     :param ue_ranks: number of streams (ranks) for all users of shape [num_users]
     :param return_precoding_matrix: return precoding matrix

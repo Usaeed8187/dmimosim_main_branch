@@ -22,7 +22,7 @@ from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple 
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
-from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
+from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, QuantizedSLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
 from dmimo.mimo import rankAdaptation, linkAdaptation
 from dmimo.mimo import MUMIMOScheduler
 from dmimo.mimo import update_node_selection, quantized_CSI_feedback, RandomVectorQuantizer, RandomVectorQuantizerNumpy
@@ -122,6 +122,8 @@ class MU_MIMO(Model):
         elif self.cfg.precoding_method == "SLNR":
             self.slnr_precoder = SLNRPrecoder(self.rg, sm, return_effective_channel=True)
             self.slnr_equalizer = SLNREqualizer(self.rg, sm)
+            self.slnr_quantized_precoder = QuantizedSLNRPrecoder(self.rg, sm)
+            # self.slnr_quantized_equalizer = QuantizedSLNREqualizer(self.rg, sm)
         elif "DIRECT" in self.cfg.precoding_method:
             self.quantized_direct_precoder = QuantizedDirectPrecoder(self.rg, sm)
         else:
@@ -141,7 +143,7 @@ class MU_MIMO(Model):
         # The decoder provides hard-decisions on the information bits
         self.decoder = LDPC5GDecoder(self.encoder, hard_out=True)
 
-    def call(self, dmimo_chans: dMIMOChannels, h_freq_csi, info_bits):
+    def call(self, dmimo_chans: dMIMOChannels, h_freq_csi, info_bits, sinr_dB_arr):
         """
         Signal processing for one MU-MIMO transmission cycle (P2)
 
@@ -176,7 +178,10 @@ class MU_MIMO(Model):
             x_precoded, g = self.bd_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "SLNR":
             nvar = 5e-2  # TODO optimize value
-            x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi, nvar, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
+            if "type_II" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
+                x_precoded, g = self.slnr_quantized_precoder(x_rg, h_freq_csi, sinr_dB_arr, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+            else:
+                x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi, nvar, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "DIRECT":
             x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
         else:
@@ -197,8 +202,8 @@ class MU_MIMO(Model):
 
         if self.cfg.precoding_method == "BD":
             y = self.bd_equalizer([y, h_freq_csi, self.cfg.ue_indices, self.cfg.ue_ranks])
-        elif self.cfg.precoding_method == "SLNR":
-            y = self.slnr_equalizer([y, h_freq_csi, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
+        # elif self.cfg.precoding_method == "SLNR":
+        #     y = self.slnr_equalizer([y, h_freq_csi, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
 
         # LS channel estimation with linear interpolation
         no = 5e-2  # initial noise estimation (tunable param)
@@ -512,15 +517,15 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         # print("BER: {}  BLER: {}".format(txs_ber, txs_bler))
         assert txs_ber <= 1e-3, "TxSquad transmission BER too high"
 
-    # MU-MIMO transmission (P2)
-    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser = mu_mimo(dmimo_chans, h_freq_csi, info_bits)
-
     # Saving Rx SNRs
     rx_snr_lin = 10.0 **( rx_snr_db / 10.0)
     rx_snr_lin = np.mean(rx_snr_lin, axis=(0,1, 3))
     rx_snr_lin = np.reshape(rx_snr_lin, [ns3cfg.num_rxue_sel+2, -1])
     rx_snr_lin = np.mean(rx_snr_lin, axis=-1)
     sinr_dB_arr = 10*np.log10(rx_snr_lin)
+
+    # MU-MIMO transmission (P2)
+    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser = mu_mimo(dmimo_chans, h_freq_csi, info_bits, sinr_dB_arr)
 
     # Update error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]

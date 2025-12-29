@@ -159,7 +159,7 @@ if __name__ == "__main__":
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
     cfg.enable_rxsquad = False
-    cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT" for quantized CSI feedback
+    cfg.precoding_method = "SLNR" # Options: "ZF", "DIRECT" for quantized CSI feedback
     cfg.csi_quantization_on = csi_quantization_on
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
 
