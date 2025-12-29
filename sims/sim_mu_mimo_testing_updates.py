@@ -69,9 +69,9 @@ arguments = sys.argv[1:]
 print(f"Script Name: {script_name}")
 print(f"Arguments: {arguments}")
 
-modulation_order = 2
+modulation_order = 4
 code_rate = 2 / 3
-num_txue_sel = 2
+num_txue_sel = 10
 perfect_csi = True
 channel_prediction_setting = "None"
 csi_prediction = False

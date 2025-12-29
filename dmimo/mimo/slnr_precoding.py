@@ -156,7 +156,7 @@ def mumimo_slnr_precoder_quantized(x, w, rx_snr_db, ue_indices, ue_ranks, return
 
     # Apply precoder: (Nt x Ns) @ (Ns x 1) -> (Nt x 1)
     # G is [B,Nsym,Nsc,Nt,Ns] and x is [B,num_tx,Nsym,Nsc,Ns,1]
-    x_precoded = tf.matmul(G, x_vec)  # [B,num_tx,Nsym,Nsc,Nt,1] if num_tx==1? see note below
+    x_precoded = tf.matmul(G, x_vec)  # [B,num_tx,Nsym,Nsc,Nt,1]    
     x_precoded = tf.squeeze(x_precoded, -1)
 
     if return_precoding_matrix:
