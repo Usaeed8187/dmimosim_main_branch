@@ -507,6 +507,9 @@ def main() -> None:
     )
 
     # BER vs RUs (fixed Rx)
+    tx_display = [tx + 2 for tx in cfg.tx_ues]
+    rx_display = [rx + 2 for rx in cfg.rx_ues]
+
     ber_tx_series = []
     for scenario in cfg.scenarios:
         scenario_values = []
@@ -523,7 +526,7 @@ def main() -> None:
         ber_tx_series.append((scenario.label, scenario_values))
     
     semilogy_metric(
-        cfg.tx_ues,
+        tx_display,
         ber_tx_series,
         xlabel="Number of RUs",
         ylabel="Uncoded BER",
@@ -547,7 +550,7 @@ def main() -> None:
             scenario_values.append(datapoint.uncoded_ber if datapoint else np.nan)
         ber_rx_series.append((scenario.label, scenario_values))
     semilogy_metric(
-        cfg.rx_ues,
+        rx_display,
         ber_rx_series,
         xlabel="Number of UEs",
         ylabel="Uncoded BER",
@@ -578,7 +581,7 @@ def main() -> None:
         best_mcs_tx[scenario] = scenario_best_mcs
     
     plot_metric(
-        cfg.tx_ues,
+        tx_display,
         thr_tx_series,
         xlabel="Number of RUs",
         ylabel="Throughput (Mbps)",
@@ -609,7 +612,7 @@ def main() -> None:
         best_mcs_rx[scenario] = scenario_best_mcs
     
     plot_metric(
-        cfg.rx_ues,
+        rx_display,
         thr_rx_series,
         xlabel="Number of UEs",
         ylabel="Throughput (Mbps)",
@@ -621,14 +624,14 @@ def main() -> None:
     print("\nMaximizing MCS for Throughput vs RUs (UEs fixed at {}):".format(cfg.fixed_rx_for_tx_sweep+2)) # treating rx BS as 2 UEs
     for scenario in cfg.scenarios:
         print(f"  Scenario: {scenario.label}")
-        for tx, mcs in zip(cfg.tx_ues, best_mcs_tx.get(scenario, [])):
+        for tx, mcs in zip(tx_display, best_mcs_tx.get(scenario, [])):
             print(
                 f"    RUs={tx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
             )
     print("\nMaximizing MCS for Throughput vs UEs (RUs fixed at {}):".format(cfg.fixed_tx_for_rx_sweep+2)) # treating tx BS as 2 UEs
     for scenario in cfg.scenarios:
         print(f"  Scenario: {scenario.label}")
-        for rx, mcs in zip(cfg.rx_ues, best_mcs_rx.get(scenario, [])):
+        for rx, mcs in zip(rx_display, best_mcs_rx.get(scenario, [])):
             print(
                 f"    UEs={rx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
             )
