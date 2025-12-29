@@ -373,12 +373,13 @@ def mumimo_zf_precoder_quantized_new(x, h_quantized, ue_indices, ue_ranks, retur
     g = g/tf.cast(norm, g.dtype)
     g = tf.cast(g, x.dtype)
 
-    WG = tf.matmul(h_zf, g, adjoint_a=True)
-    I = tf.eye(WG.shape[-1], dtype=WG.dtype)
-    off_diag_idx = 1 - I
-    off_diag_vals = WG * off_diag_idx
-    max_off_diag = tf.reduce_max(tf.abs(off_diag_vals))
-    assert max_off_diag < 1e-3, "orthogonalization failed"
+    if reg == 0.0:
+        WG = tf.matmul(h_zf, g, adjoint_a=True)
+        I = tf.eye(WG.shape[-1], dtype=WG.dtype)
+        off_diag_idx = 1 - I
+        off_diag_vals = WG * off_diag_idx
+        max_off_diag = tf.reduce_max(tf.abs(off_diag_vals))
+        tf.debugging.assert_less(max_off_diag, tf.cast(1e-3, max_off_diag.dtype), message="orthogonalization failed")
 
     # Expand last dim of `x` for precoding
     x_precoded = tf.expand_dims(x, -1)

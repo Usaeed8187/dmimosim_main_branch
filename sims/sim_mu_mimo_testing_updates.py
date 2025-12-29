@@ -76,7 +76,7 @@ perfect_csi = True
 channel_prediction_setting = "None"
 csi_prediction = False
 channel_prediction_method = None
-csi_quantization_on = False
+csi_quantization_on = True
 
 def _parse_bool(value):
     return str(value).lower() in ("true", "1", "yes")
