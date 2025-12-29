@@ -143,7 +143,7 @@ class MU_MIMO(Model):
         # The decoder provides hard-decisions on the information bits
         self.decoder = LDPC5GDecoder(self.encoder, hard_out=True)
 
-    def call(self, dmimo_chans: dMIMOChannels, h_freq_csi, info_bits, sinr_dB_arr):
+    def call(self, dmimo_chans: dMIMOChannels, h_freq_csi, info_bits, snr_dB_arr):
         """
         Signal processing for one MU-MIMO transmission cycle (P2)
 
@@ -179,7 +179,7 @@ class MU_MIMO(Model):
         elif self.cfg.precoding_method == "SLNR":
             nvar = 5e-2  # TODO optimize value
             if "type_II" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
-                x_precoded, g = self.slnr_quantized_precoder(x_rg, h_freq_csi, sinr_dB_arr, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+                x_precoded, g = self.slnr_quantized_precoder(x_rg, h_freq_csi, snr_dB_arr, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
             else:
                 x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi, nvar, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "DIRECT":
@@ -522,10 +522,10 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     rx_snr_lin = np.mean(rx_snr_lin, axis=(0,1, 3))
     rx_snr_lin = np.reshape(rx_snr_lin, [ns3cfg.num_rxue_sel+2, -1])
     rx_snr_lin = np.mean(rx_snr_lin, axis=-1)
-    sinr_dB_arr = 10*np.log10(rx_snr_lin)
+    snr_dB_arr = 10*np.log10(rx_snr_lin)
 
     # MU-MIMO transmission (P2)
-    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser = mu_mimo(dmimo_chans, h_freq_csi, info_bits, sinr_dB_arr)
+    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser = mu_mimo(dmimo_chans, h_freq_csi, info_bits, snr_dB_arr)
 
     # Update error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
@@ -579,7 +579,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_dB_arr, PMI_feedback_bits]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, snr_dB_arr, PMI_feedback_bits]
 
 
 def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
