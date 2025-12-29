@@ -76,7 +76,7 @@ def mumimo_slnr_precoder_quantized(x, w, rx_snr_db, ue_indices, ue_ranks, return
 
     :param x: data stream symbols of shape [batch_size, num_tx, num_ofdm_symbols, fft_size, num_streams_per_tx]
     :param w: quantized channel coefficients of shape [batch_size, num_streams, num_tx_ants, num_ofdm_symbols, num_subcarriers]
-    :param no: scalar noise power
+    :param rx_snr_db: noise power [num_rx_ues]
     :param ue_indices: receiver antenna indices for all users of shape [num_users, list of antenna indices]
     :param ue_ranks: number of streams (ranks) for all users of shape [num_users]
     :param return_precoding_matrix: return precoding matrix

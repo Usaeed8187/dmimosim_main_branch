@@ -156,7 +156,7 @@ class QuantizedSLNRPrecoder(Layer):
         self._stream_management = stream_management
         self._remove_nulled_scs = RemoveNulledSubcarriers(self._resource_grid)
 
-    def call(self, x_rg, h_freq_quantized, nvar, scheduled_rx_ue_indices, ue_ranks, new=False):
+    def call(self, x_rg, h_freq_quantized, rx_snr_db, scheduled_rx_ue_indices, ue_ranks, new=False):
         """
         Returns precoded data symbols using SLNR precoding with quantized CSI
 
@@ -188,7 +188,7 @@ class QuantizedSLNRPrecoder(Layer):
 
         x_precoded, g = mumimo_slnr_precoder_quantized(x_precoded,
                                         h_freq_quantized,
-                                        nvar,
+                                        rx_snr_db,
                                         scheduled_rx_ue_indices,
                                         ue_ranks,
                                         return_precoding_matrix=True)
