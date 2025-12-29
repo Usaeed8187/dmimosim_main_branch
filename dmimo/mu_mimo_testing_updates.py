@@ -275,7 +275,7 @@ class MU_MIMO(Model):
         dec_bits = self.decoder(llr)
 
         sinr_linear = tf.math.reciprocal(tf.cast(no_eff, tf.float32) + 1e-12)
-        sinr_linear = tf.reduce_mean(sinr_linear, axis=[-1, -2])
+        sinr_linear = tf.reduce_mean(sinr_linear, axis=[1, -1])
         sinr_linear = tf.reduce_mean(sinr_linear, axis=0)
         sinr_dB_arr = 10 * np.log10(sinr_linear.numpy() + 1e-12)
 
