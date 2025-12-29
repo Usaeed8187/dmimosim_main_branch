@@ -309,14 +309,14 @@ def _default_scenarios(include_prediction: bool = True) -> List[Scenario]:
         Scenario(
             perfect_csi=True,
             prediction=False,
-            quantization=False,
-            label="Perfect CSI at BS (no quantization)",
+            quantization=True,
+            label="Perfect channel estimation, fb w/ delay, quantization",
         ),
         Scenario(
             perfect_csi=True,
             prediction=False,
-            quantization=True,
-            label="Perfect channel estimation, quantized feedback",
+            quantization=False,
+            label="Perfect CSI at BS (no quantization, no delay)",
         ),
     ]
 
@@ -527,7 +527,7 @@ def main() -> None:
         ber_tx_series,
         xlabel="Number of RUs",
         ylabel="Uncoded BER",
-        title=f"Uncoded BER vs RUs (UEs={cfg.fixed_rx_for_tx_sweep}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",
+        title=f"Uncoded BER vs RUs (UEs={cfg.fixed_rx_for_tx_sweep+2}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})", # treating rx BS as 2 UEs
         output_path=os.path.join(cfg.output_dir, "uncoded_ber_vs_tx_ues.png"),
     )
 
@@ -551,7 +551,7 @@ def main() -> None:
         ber_rx_series,
         xlabel="Number of UEs",
         ylabel="Uncoded BER",
-        title=f"Uncoded BER vs UEs (RUs={cfg.fixed_tx_for_rx_sweep}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",
+        title=f"Uncoded BER vs UEs (RUs={cfg.fixed_tx_for_rx_sweep+2}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",  # treating tx BS as 2 UEs
         output_path=os.path.join(cfg.output_dir, "uncoded_ber_vs_rx_ues.png"),
     )
 
@@ -581,8 +581,8 @@ def main() -> None:
         cfg.tx_ues,
         thr_tx_series,
         xlabel="Number of RUs",
-        ylabel="Throughput",
-        title=f"Throughput vs RUs (UEs={cfg.fixed_rx_for_tx_sweep}, best MCS)",
+        ylabel="Throughput (Mbps)",
+        title=f"Throughput vs RUs (UEs={cfg.fixed_rx_for_tx_sweep+2}, best MCS)", # treating rx BS as 2 UEs
         output_path=os.path.join(cfg.output_dir, "throughput_vs_tx_ues.png"),
     )
 
@@ -612,20 +612,20 @@ def main() -> None:
         cfg.rx_ues,
         thr_rx_series,
         xlabel="Number of UEs",
-        ylabel="Throughput",
-        title=f"Throughput vs UEs (RUs={cfg.fixed_tx_for_rx_sweep}, best MCS)",
+        ylabel="Throughput (Mbps)",
+        title=f"Throughput vs UEs (RUs={cfg.fixed_tx_for_rx_sweep+2}, best MCS)", # treating tx BS as 2 UEs
         output_path=os.path.join(cfg.output_dir, "throughput_vs_rx_ues.png"),
     )
 
     # Print the maximizing MCS selections for throughput plots
-    print("\nMaximizing MCS for Throughput vs RUs (UEs fixed at {}):".format(cfg.fixed_rx_for_tx_sweep))
+    print("\nMaximizing MCS for Throughput vs RUs (UEs fixed at {}):".format(cfg.fixed_rx_for_tx_sweep+2)) # treating rx BS as 2 UEs
     for scenario in cfg.scenarios:
         print(f"  Scenario: {scenario.label}")
         for tx, mcs in zip(cfg.tx_ues, best_mcs_tx.get(scenario, [])):
             print(
                 f"    RUs={tx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
             )
-    print("\nMaximizing MCS for Throughput vs UEs (RUs fixed at {}):".format(cfg.fixed_tx_for_rx_sweep))
+    print("\nMaximizing MCS for Throughput vs UEs (RUs fixed at {}):".format(cfg.fixed_tx_for_rx_sweep+2)) # treating tx BS as 2 UEs
     for scenario in cfg.scenarios:
         print(f"  Scenario: {scenario.label}")
         for rx, mcs in zip(cfg.rx_ues, best_mcs_rx.get(scenario, [])):

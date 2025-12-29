@@ -266,8 +266,7 @@ class MU_MIMO(Model):
         # LDPC hard-decision decoding
         dec_bits = self.decoder(llr)
 
-        sinr_dB_arr = None
-        return dec_bits, uncoded_ber, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_dB_arr
+        return dec_bits, uncoded_ber, uncoded_ser, x_hat, node_wise_uncoded_ser
 
 
 def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
@@ -514,7 +513,14 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         assert txs_ber <= 1e-3, "TxSquad transmission BER too high"
 
     # MU-MIMO transmission (P2)
-    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_dB_arr = mu_mimo(dmimo_chans, h_freq_csi, info_bits)
+    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser = mu_mimo(dmimo_chans, h_freq_csi, info_bits)
+
+    # Saving Rx SNRs
+    rx_snr_lin = 10.0 **( rx_snr_db / 10.0)
+    rx_snr_lin = np.mean(rx_snr_lin, axis=(0,1, 3))
+    rx_snr_lin = np.reshape(rx_snr_lin, [ns3cfg.num_rxue_sel+2, -1])
+    rx_snr_lin = np.mean(rx_snr_lin, axis=-1)
+    sinr_dB_arr = 10*np.log10(rx_snr_lin)
 
     # Update error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]

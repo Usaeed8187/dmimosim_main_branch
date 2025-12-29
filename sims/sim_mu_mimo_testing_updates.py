@@ -69,14 +69,14 @@ arguments = sys.argv[1:]
 print(f"Script Name: {script_name}")
 print(f"Arguments: {arguments}")
 
-modulation_order = 2
+modulation_order = 4
 code_rate = 2 / 3
-num_txue_sel = 10
+num_txue_sel = 8
 perfect_csi = True
 channel_prediction_setting = "None"
 csi_prediction = False
 channel_prediction_method = None
-csi_quantization_on = True
+csi_quantization_on = False
 
 def _parse_bool(value):
     return str(value).lower() in ("true", "1", "yes")
@@ -153,7 +153,7 @@ if __name__ == "__main__":
     cfg.scheduling = False
     if arguments == []:
         mobility = 'high_mobility'
-        drop_idx = '3'
+        drop_idx = '2'
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     # cfg.ns3_folder = "ns3/channels/LowMobility/"
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
@@ -174,7 +174,7 @@ if __name__ == "__main__":
     # Select Number of TxSquad and RxSquad UEs to use.
     ns3cfg.num_txue_sel = num_txue_sel
     if arguments == []:
-        rx_ues_arr = [10]
+        rx_ues_arr = [4]
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)
