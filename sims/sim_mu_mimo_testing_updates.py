@@ -75,7 +75,7 @@ num_txue_sel = 10
 perfect_csi = True
 channel_prediction_setting = "None"
 csi_prediction = False
-channel_prediction_method = None
+channel_prediction_method = None # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 
 def _parse_bool(value):

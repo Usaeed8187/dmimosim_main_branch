@@ -244,23 +244,27 @@ class quantized_CSI_feedback(Layer):
 
             W_rb_all = []
             feedback_bits = []
-            ref_tx = 0
 
-            for rx_idx in range(num_rx_ues+1):
+            rx_ue_ant_indices = [
+                np.arange(0, 2),
+                np.arange(2, 4),
+            ]
+            for rx_idx in range(num_rx_ues):
+                rx_ue_ant_indices.append(
+                    np.arange((rx_idx) * self.num_UE_Ant + self.num_BS_Ant, (rx_idx + 1) * self.num_UE_Ant + self.num_BS_Ant)
+                )
+            
+            total_pmi_streams = 0
+
+            Ns = num_streams_per_UE
+
+            assert Ns <= 2, "Type II codebook only defined for rank 1 and rank 2"
+
+            for rx_idx, rx_ant_idx in enumerate(rx_ue_ant_indices):
 
                 rx_override = None
                 if w1_beam_indices_override is not None and rx_idx < len(w1_beam_indices_override):
                     rx_override = w1_beam_indices_override[rx_idx]
-
-                if rx_idx == 0:
-                    # BS
-                    rx_ant_idx = np.arange(0, self.num_BS_Ant)
-                    Ns = 2 * num_streams_per_UE 
-                else:
-                    rx_ant_idx = np.arange((rx_idx-1)*self.num_UE_Ant + self.num_BS_Ant, (rx_idx)*self.num_UE_Ant + self.num_BS_Ant)
-                    Ns = num_streams_per_UE
-
-                assert Ns <= 2, "Type II codebook only defined for rank 1 and rank 2"
 
                 curr_h_est_big = tf.gather(h_est_rb, rx_ant_idx, axis=0)
 
@@ -319,6 +323,9 @@ class quantized_CSI_feedback(Layer):
                     W_rb = W_rb_out
 
                 W_rb_all.append(W_rb)
+                total_pmi_streams += Ns
+
+            assert total_pmi_streams == self.num_tx_streams, "Total PMI streams must match the configured number of transmit streams"
 
             h_est_quant = tf.concat(W_rb_all, axis=-1)  # [N_RB, N_tx, total_Ns]
             h_est_quant = tf.repeat(h_est_quant, repeats=np.ceil(self.nfft/W_rb.shape[0]), axis=0)

@@ -260,6 +260,8 @@ class MU_MIMO(Model):
         uncoded_ber = compute_ber(d, d_hard).numpy()
         # print(f"\nUncoded BER: {uncoded_ber}\n")
 
+        nodewise_uncoded_ber, _ = compute_UE_wise_BER(d, d_hard, self.cfg.ue_ranks[0], self.cfg.num_tx_streams)
+
         # Hard-decision symbol error rate
         x_hard = self.mapper(d_hard)
         uncoded_ser = np.count_nonzero(x - x_hard) / np.prod(x.shape)
@@ -544,8 +546,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    # print("BLER: ", coded_bler)
-    # print("BER: ", uncoded_ber_phase_2)
+    print("BLER: ", coded_bler)
+    print("BER: ", uncoded_ber_phase_2)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
 
