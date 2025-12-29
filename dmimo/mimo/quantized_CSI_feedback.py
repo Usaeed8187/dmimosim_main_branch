@@ -76,7 +76,8 @@ class quantized_CSI_feedback(Layer):
         self.num_BS_Ant = 4
         self.num_UE_Ant = 2
 
-    def call(self, h_est, return_codebook=False, return_feedback_bits=False):
+    def call(self, h_est, return_codebook=False, return_feedback_bits=False, w1_beam_indices_override=None):
+
         
         if self.method == '5G' and self.architecture == 'baseline':
 
@@ -247,6 +248,10 @@ class quantized_CSI_feedback(Layer):
 
             for rx_idx in range(num_rx_ues+1):
 
+                rx_override = None
+                if w1_beam_indices_override is not None and rx_idx < len(w1_beam_indices_override):
+                    rx_override = w1_beam_indices_override[rx_idx]
+
                 if rx_idx == 0:
                     # BS
                     rx_ant_idx = np.arange(0, self.num_BS_Ant)
@@ -279,7 +284,16 @@ class quantized_CSI_feedback(Layer):
                     V = self.build_sd_beam_grid(N1=N_1_g)
                     V = tf.convert_to_tensor(V, dtype=self.dtype)
 
-                    m1_list, m2_list, col_idx_list = self.select_L_beams(curr_R, V, return_column_indices=True, L=L_g, N1=N_1_g)
+                    forced_indices = None
+                    if rx_override is not None and isinstance(rx_override, (list, tuple)) and tx_idx < len(rx_override):
+                        tx_override = rx_override[tx_idx]
+                        if tx_override is not None:
+                            forced_indices = tf.convert_to_tensor(tx_override, dtype=tf.int32)
+
+                    if forced_indices is not None and tf.size(forced_indices) > 0:
+                        col_idx_list = forced_indices
+                    else:
+                        _, _, col_idx_list = self.select_L_beams(curr_R, V, return_column_indices=True, L=L_g, N1=N_1_g)
 
                     W1_indices.append(col_idx_list)
 

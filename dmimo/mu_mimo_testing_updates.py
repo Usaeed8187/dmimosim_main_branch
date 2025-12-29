@@ -19,7 +19,8 @@ from dmimo.config import Ns3Config, SimConfig, RCConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
 from dmimo.channel import standard_rc_pred_freq_mimo
 from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred
-from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple 
+from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
+from dmimo.channel.rl_beam_selector import RLBeamSelector
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, QuantizedSLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
@@ -271,7 +272,12 @@ class MU_MIMO(Model):
         # LDPC hard-decision decoding
         dec_bits = self.decoder(llr)
 
-        return dec_bits, uncoded_ber, uncoded_ser, x_hat, node_wise_uncoded_ser
+        sinr_linear = tf.math.reciprocal(tf.cast(no_eff, tf.float32) + 1e-12)
+        sinr_linear = tf.reduce_mean(sinr_linear, axis=[-1, -2])
+        sinr_linear = tf.reduce_mean(sinr_linear, axis=0)
+        sinr_dB_arr = 10 * np.log10(sinr_linear.numpy() + 1e-12)
+
+        return dec_bits, uncoded_ber, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_dB_arr
 
 
 def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
@@ -433,6 +439,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             # Weiner Filter based prediction (MIMO) (per_tx_rx_node_pair)
             weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
             h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len-1))
+        elif cfg.channel_prediction_method == "deqn":
+            h_freq_csi = h_freq_csi_history[-1]
         else:
             raise ValueError("Channel prediction method not implemented here.")
     else:
@@ -468,7 +476,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                             rbs_per_subband=4,
                                                             snrdb=rx_snr_db)
             return_feedback_bits = True
-            PMI_feedback_report = type_II_PMI_quantizer(h_freq_csi, return_feedback_bits=return_feedback_bits)
+            w1_override = getattr(cfg, "rl_w1_override", None)
+            PMI_feedback_report = type_II_PMI_quantizer(
+                h_freq_csi,
+                return_feedback_bits=return_feedback_bits,
+                w1_beam_indices_override=w1_override,
+            )
             if return_feedback_bits:
                 h_freq_csi = PMI_feedback_report[0]
                 PMI_feedback_bits = PMI_feedback_report[1]
@@ -525,7 +538,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     snr_dB_arr = 10*np.log10(rx_snr_lin)
 
     # MU-MIMO transmission (P2)
-    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser = mu_mimo(dmimo_chans, h_freq_csi, info_bits, snr_dB_arr)
+    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_db_arr = mu_mimo(dmimo_chans, h_freq_csi, info_bits, snr_dB_arr)
 
     # Update error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
@@ -580,7 +593,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, snr_dB_arr, PMI_feedback_bits]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, PMI_feedback_bits, node_wise_bler]
+
 
 
 def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
@@ -604,12 +618,17 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     uncoded_ber_list = []
     sinr_dB_list = []
     PMI_feedback_bits = []
+    nodewise_bler_list = []
+    rl_selector = RLBeamSelector() if cfg.channel_prediction_method == "deqn" else None
+    pending_overrides = None
+
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
         print("first_slot_idx: ", first_slot_idx, "\n")
 
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
+        cfg.rl_w1_override = pending_overrides
 
         start_time = time.time()
         bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config)
@@ -630,7 +649,16 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         nodewise_bitrate.append(additional_KPIs[2])
         ranks_list.append(additional_KPIs[3])
         sinr_dB_list.append(additional_KPIs[4])
-        PMI_feedback_bits.append(additional_KPIs)
+        PMI_feedback_bits.append(additional_KPIs[5])
+        nodewise_bler_list.append(additional_KPIs[6])
+
+        if rl_selector is not None:
+            pending_overrides = rl_selector.prepare_next_actions(
+                additional_KPIs[5],
+                additional_KPIs[4],
+                additional_KPIs[6],
+            )
+
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
