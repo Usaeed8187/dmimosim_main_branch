@@ -325,7 +325,6 @@ def _default_scenarios(
             quantization=True,
             label="Two-Mode WESN prediction",
             prediction_method="two_mode",
-            prediction_method=None,
             link_adapt=link_adapt,
         ),
         Scenario(
