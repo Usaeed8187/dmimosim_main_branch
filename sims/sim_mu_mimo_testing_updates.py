@@ -71,6 +71,7 @@ print(f"Arguments: {arguments}")
 
 modulation_order = 4
 code_rate = 2 / 3
+link_adapt = False
 num_txue_sel = 10
 perfect_csi = False
 channel_prediction_setting = "weiner_filter" # "None", "two_mode", "weiner_filter", "deqn"
@@ -111,6 +112,9 @@ if len(arguments) > 0:
     if len(arguments) >= 9:
         csi_quantization_on = _parse_bool(arguments[8])
 
+    if len(arguments) >= 10:
+        link_adapt = _parse_bool(arguments[9])
+
     if str(channel_prediction_setting).lower() == "none":
         csi_prediction = False
         channel_prediction_method = None
@@ -133,6 +137,7 @@ if len(arguments) > 0:
     print("csi_prediction: {}".format(csi_prediction))
     print("csi_quantization_on: {}".format(csi_quantization_on))
     print("channel_prediction_method: {}".format(channel_prediction_method))
+    print("link_adapt: {}".format(link_adapt))
 
 # Main function
 if __name__ == "__main__":
@@ -145,7 +150,7 @@ if __name__ == "__main__":
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = perfect_csi
     cfg.rank_adapt = False      # enable/disable rank adaptation
-    cfg.link_adapt = True      # enable/disable link adaptation,. .
+    cfg.link_adapt = link_adapt      # enable/disable link adaptation,. .
     cfg.csi_prediction = csi_prediction
     cfg.use_perfect_csi_history_for_prediction = False
     cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"

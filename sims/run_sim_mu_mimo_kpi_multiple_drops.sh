@@ -13,6 +13,13 @@ declare -a perfect_csi_arr=("True" "False")
 declare -a channel_prediction_settings=("None" "weiner_filter" "two_mode") # "None", "weiner_filter", "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
 declare -a csi_quantization_arr=("True" "False")
 
+link_adapt="True"
+
+if [[ "${link_adapt}" == "True" ]]; then
+    modulation_orders=("${modulation_orders[0]}")
+    code_rates=("${code_rates[0]}")
+fi
+
 PARALLEL_JOBS=${PARALLEL_JOBS:-4}
 PARALLEL_EXTRA_OPTS=${PARALLEL_EXTRA_OPTS:-}
 
@@ -46,8 +53,8 @@ generate_args() {
                                             continue
                                         fi
 
-                                        echo "Mobility: ${mobilities[$i]}, Drop idx: ${drop_idx[$j]}, Rx UEs: ${rx_ues_arr[$k]}, Modulation order: ${modulation_orders[$m]}, Code rate: ${code_rates[$c]}, num_txue_sel: ${num_txue_sel_arr[$t]}, perfect_csi: ${perfect_csi_arr[$pcsi]}, channel_prediction_setting: ${channel_prediction_setting}, csi_prediction: ${csi_prediction_enabled}, csi_quantization_on: ${csi_quantization_arr[$cquant]}, channel_prediction_method: ${channel_prediction_method}" >&2
-                                        echo "${mobilities[$i]} ${drop_idx[$j]} ${rx_ues_arr[$k]} ${modulation_orders[$m]} ${code_rates[$c]} ${num_txue_sel_arr[$t]} ${perfect_csi_arr[$pcsi]} ${channel_prediction_setting} ${csi_quantization_arr[$cquant]}"
+                                        echo "Mobility: ${mobilities[$i]}, Drop idx: ${drop_idx[$j]}, Rx UEs: ${rx_ues_arr[$k]}, Modulation order: ${modulation_orders[$m]}, Code rate: ${code_rates[$c]}, num_txue_sel: ${num_txue_sel_arr[$t]}, perfect_csi: ${perfect_csi_arr[$pcsi]}, channel_prediction_setting: ${channel_prediction_setting}, csi_prediction: ${csi_prediction_enabled}, csi_quantization_on: ${csi_quantization_arr[$cquant]}, channel_prediction_method: ${channel_prediction_method}, link_adapt: ${link_adapt}" >&2
+                                        echo "${mobilities[$i]} ${drop_idx[$j]} ${rx_ues_arr[$k]} ${modulation_orders[$m]} ${code_rates[$c]} ${num_txue_sel_arr[$t]} ${perfect_csi_arr[$pcsi]} ${channel_prediction_setting} ${csi_quantization_arr[$cquant]} ${link_adapt}"
                                 done
                             done
                         done
@@ -58,7 +65,7 @@ generate_args() {
     done
 }
 
-generate_args | parallel -j "${PARALLEL_JOBS}" ${PARALLEL_EXTRA_OPTS} --colsep ' ' python sims/sim_mu_mimo_testing_updates.py {1} {2} {3} {4} {5} {6} {7} {8} {9}
+generate_args | parallel -j "${PARALLEL_JOBS}" ${PARALLEL_EXTRA_OPTS} --colsep ' ' python sims/sim_mu_mimo_testing_updates.py {1} {2} {3} {4} {5} {6} {7} {8} {9} {10}
 
 # Reference table
 # Perfect CSI |  Prediction | Quantization | Meaning
