@@ -73,9 +73,9 @@ modulation_order = 4
 code_rate = 2 / 3
 num_txue_sel = 10
 perfect_csi = False
-channel_prediction_setting = "two_mode" # "None", "two_mode", "weiner_filter", "deqn"
+channel_prediction_setting = "weiner_filter" # "None", "two_mode", "weiner_filter", "deqn"
 csi_prediction = True
-channel_prediction_method = "two_mode" # None, "two_mode", "weiner_filter", "deqn"
+channel_prediction_method = "weiner_filter" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 
 def _parse_bool(value):
@@ -140,7 +140,7 @@ if __name__ == "__main__":
     # Simulation settings
     cfg = SimConfig()
     cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
-    cfg.total_slots = 100       # total number of slots in ns-3 channels
+    cfg.total_slots = 99       # total number of slots in ns-3 channels
     cfg.start_slot_idx = 35     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = perfect_csi
@@ -247,7 +247,7 @@ if __name__ == "__main__":
         uncoded_ber_list.append(rst_zf[9])
         ldpc_ber_list.append(rst_zf[10])
         if rst_zf[11] is not None:
-            sinr_dB.append(np.concatenate(rst_zf[11]))
+            sinr_dB.append(rst_zf[11])
 
         folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
         os.makedirs(folder_path, exist_ok=True)
