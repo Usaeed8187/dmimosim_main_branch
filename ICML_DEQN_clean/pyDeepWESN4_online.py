@@ -240,6 +240,10 @@ class WESN():
 
         gradient = np.dot(error_train, states_train)
         #print(gradient / error_train.shape[1])
+        sample_count = error_train.shape[1]
+        if sample_count == 0:
+            return
+
         gradient[gradient / error_train.shape[1] > gradient_clip] = gradient_clip * error_train.shape[1]
         gradient[gradient / error_train.shape[1] < -gradient_clip] = -gradient_clip * error_train.shape[1]
         self.W_out = self.W_out - self.lr * gradient / error_train.shape[1]
