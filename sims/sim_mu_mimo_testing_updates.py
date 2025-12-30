@@ -72,10 +72,10 @@ print(f"Arguments: {arguments}")
 modulation_order = 4
 code_rate = 2 / 3
 num_txue_sel = 10
-perfect_csi = True
-channel_prediction_setting = "None" # "None", "two_mode", "weiner_filter", "deqn"
-csi_prediction = False
-channel_prediction_method = None # None, "two_mode", "weiner_filter", "deqn"
+perfect_csi = False
+channel_prediction_setting = "two_mode" # "None", "two_mode", "weiner_filter", "deqn"
+csi_prediction = True
+channel_prediction_method = "two_mode" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 
 def _parse_bool(value):
@@ -145,7 +145,7 @@ if __name__ == "__main__":
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = perfect_csi
     cfg.rank_adapt = False      # enable/disable rank adaptation
-    cfg.link_adapt = False      # enable/disable link adaptation,. .
+    cfg.link_adapt = True      # enable/disable link adaptation,. .
     cfg.csi_prediction = csi_prediction
     cfg.use_perfect_csi_history_for_prediction = False
     cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"
@@ -222,6 +222,7 @@ if __name__ == "__main__":
 
         # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
         cfg.modulation_order = modulation_order
+        cfg.code_rate = code_rate
         
         # if not cfg.scheduling:
         #     tx_ue_mask = np.zeros(10)

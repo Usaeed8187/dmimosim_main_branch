@@ -512,8 +512,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         most_frequent_value = values[np.argmax(counts)]
         cfg.code_rate = most_frequent_value
 
-        # print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
-        # print("\n", "Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
+        print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
+        print("\n", "Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
 
     ranks_out = int(cfg.num_tx_streams / (cfg.num_scheduled_ues+2))
 

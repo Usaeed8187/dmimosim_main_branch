@@ -9,9 +9,9 @@ declare -a rx_ues_arr=("0" "2" "4" "6")
 declare -a modulation_orders=("2" "4")
 declare -a code_rates=("2/3" "5/6")
 declare -a num_txue_sel_arr=("2" "4" "6" "8" "10")
-declare -a perfect_csi_arr=("False")
-declare -a channel_prediction_settings=("weiner_filter") # "None", "weiner_filter", "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
-declare -a csi_quantization_arr=("True")
+declare -a perfect_csi_arr=("True" "False")
+declare -a channel_prediction_settings=("None" "weiner_filter" "two_mode") # "None", "weiner_filter", "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
+declare -a csi_quantization_arr=("True" "False")
 
 PARALLEL_JOBS=${PARALLEL_JOBS:-4}
 PARALLEL_EXTRA_OPTS=${PARALLEL_EXTRA_OPTS:-}
@@ -64,7 +64,7 @@ generate_args | parallel -j "${PARALLEL_JOBS}" ${PARALLEL_EXTRA_OPTS} --colsep '
 # Perfect CSI |  Prediction | Quantization | Meaning
 #------------------------------------------------------
 #     F       |      F      |     F        | Not simulated
-#     F       |      F      |     T        | Baseline: imperfect channel estimation, quantized CSI feedback without prediction
+#     F       |      F      |     T        | Worst case: imperfect channel estimation, quantized CSI feedback without prediction
 #     F       |      T      |     F        | Not simulated
 #     F       |      T      |     T        | Achievable case: imperfect channel estimation, CSI prediction, quantized CSI feedback
 #     T       |      F      |     F        | Ideal case: perfect CSI at the BS (perfect channel estimation, no delay, no quantization)

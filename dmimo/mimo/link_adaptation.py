@@ -80,7 +80,7 @@ class linkAdaptation(Layer):
 
                 beta_list = np.array([1.61, 6.42, 28.38])
                 refer_sinr_db = np.array([4.3, 10.3, 22.7])
-                mcs_candidates = np.array([np.array([2,0.6]), np.array([4,0.66]), np.array([6,0.65])])
+                mcs_candidates = np.array([np.array([2,0.6]), np.array([4,0.5]), np.array([6,0.65])])
 
 
             qam_order_arr = np.zeros((self.N_s))
@@ -191,7 +191,7 @@ class linkAdaptation(Layer):
 
                 beta_list = np.array([1.61, 6.42, 28.38])
                 refer_sinr_db = np.array([4.3, 10.3, 22.7])
-                mcs_candidates = np.array([np.array([2,0.6]), np.array([4,0.66]), np.array([6,0.65])])
+                mcs_candidates = np.array([np.array([2,0.6]), np.array([4,0.5]), np.array([6,0.65])])
 
 
             qam_order_arr = np.zeros((self.N_s, num_rx_nodes))
