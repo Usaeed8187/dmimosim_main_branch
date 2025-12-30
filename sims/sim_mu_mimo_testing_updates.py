@@ -10,6 +10,7 @@ import traceback
 import numpy as np
 from fractions import Fraction
 import matplotlib.pyplot as plt
+from typing import List
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
@@ -31,7 +32,7 @@ tf.get_logger().setLevel('ERROR')
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
 from dmimo.mu_mimo_testing_updates import sim_mu_mimo_all
-
+from dmimo.channel.rl_beam_selector import RLBeamSelector
 
 # Add system path for the dmimo library
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")

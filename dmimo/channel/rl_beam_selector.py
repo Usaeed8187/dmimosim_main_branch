@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 import itertools
+import pickle
 
 import numpy as np
 
@@ -148,6 +149,13 @@ class RLBeamSelector:
         self.prev_actions: List[List[Optional[int]]] = []
         self.state_dims: List[List[Optional[int]]] = []
 
+    def reset_episode(self):
+        """Clear per-episode state without discarding learned experience."""
+
+        for rx_idx in range(len(self.prev_states)):
+            for tx_idx in range(len(self.prev_states[rx_idx])):
+                self.prev_states[rx_idx][tx_idx] = None
+                self.prev_actions[rx_idx][tx_idx] = None
 
     def _ensure_pair_capacity(self, rx_idx: int, tx_idx: int):
         while len(self.agents) <= rx_idx:
@@ -355,3 +363,87 @@ class RLBeamSelector:
             overrides.append(rx_overrides)
 
         return overrides
+
+    def save_all(self, base_path) -> None:
+        """Persist all agents and associated metadata to disk."""
+
+        base = Path(base_path)
+        base.mkdir(parents=True, exist_ok=True)
+
+        agent_files: List[List[Optional[str]]] = []
+        for rx_idx, row in enumerate(self.agents):
+            rx_files: List[Optional[str]] = []
+            for tx_idx, agent in enumerate(row):
+                if agent is None:
+                    rx_files.append(None)
+                    continue
+
+                agent_path = base / f"agent_{rx_idx}_{tx_idx}.pkl"
+                agent.save(agent_path)
+                rx_files.append(agent_path.name)
+            agent_files.append(rx_files)
+
+        metadata = {
+            "action_maps": self.action_maps,
+            "state_dims": self.state_dims,
+            "prev_states": self.prev_states,
+            "prev_actions": self.prev_actions,
+            "num_beams": self.num_beams,
+            "N1": self.N1,
+            "N2": self.N2,
+            "O1": self.O1,
+            "O2": self.O2,
+            "max_actions": self.max_actions,
+            "memory_size": self.memory_size,
+            "input_window_size": self.input_window_size,
+            "output_window_size": self.output_window_size,
+            "use_enumerated_actions": self.use_enumerated_actions,
+            "agent_files": agent_files,
+        }
+
+        with open(base / "metadata.pkl", "wb") as f:
+            pickle.dump(metadata, f)
+
+    def load_all(self, base_path) -> None:
+        """Restore agents and metadata previously persisted with :meth:`save_all`."""
+
+        base = Path(base_path)
+        meta_path = base / "metadata.pkl"
+        if not meta_path.exists():
+            raise FileNotFoundError(f"No checkpoint metadata found at {meta_path}")
+
+        with open(meta_path, "rb") as f:
+            metadata = pickle.load(f)
+
+        self.action_maps = metadata.get("action_maps", [])
+        self.state_dims = metadata.get("state_dims", [])
+        self.prev_states = metadata.get("prev_states", [])
+        self.prev_actions = metadata.get("prev_actions", [])
+        self.num_beams = metadata.get("num_beams", self.num_beams)
+        self.N1 = metadata.get("N1", self.N1)
+        self.N2 = metadata.get("N2", self.N2)
+        self.O1 = metadata.get("O1", self.O1)
+        self.O2 = metadata.get("O2", self.O2)
+        self.max_actions = metadata.get("max_actions", self.max_actions)
+        self.memory_size = metadata.get("memory_size", self.memory_size)
+        self.input_window_size = metadata.get("input_window_size", self.input_window_size)
+        self.output_window_size = metadata.get("output_window_size", self.output_window_size)
+        self.use_enumerated_actions = metadata.get("use_enumerated_actions", self.use_enumerated_actions)
+
+        agent_files: List[List[Optional[str]]] = metadata.get("agent_files", [])
+        self.agents = []
+        for rx_idx, tx_row in enumerate(agent_files):
+            agent_row: List[Optional[DeepWESNQNetwork]] = []
+            for tx_idx, filename in enumerate(tx_row):
+                if filename is None:
+                    agent_row.append(None)
+                    continue
+
+                agent_path = base / filename
+                agent_row.append(DeepWESNQNetwork.load(agent_path))
+            self.agents.append(agent_row)
+
+        # Ensure companion arrays have matching dimensions
+        for rx_idx, tx_row in enumerate(self.action_maps):
+            for tx_idx, _ in enumerate(tx_row):
+                self._ensure_pair_capacity(rx_idx, tx_idx)

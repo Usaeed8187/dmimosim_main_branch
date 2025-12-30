@@ -3,6 +3,8 @@ import tensorflow as tf
 from tensorflow.python.keras import Model
 import matplotlib.pyplot as plt
 import time
+from typing import Optional
+from pathlib import Path
 
 from sionna.ofdm import ResourceGrid, ResourceGridMapper, LSChannelEstimator, LMMSEEqualizer
 from sionna.mimo import StreamManagement
@@ -604,7 +606,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler]
 
 
-def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
+def sim_mu_mimo_all(
+    cfg: SimConfig,
+    ns3cfg: Ns3Config,
+    rc_config:RCConfig,
+    rl_selector: Optional[RLBeamSelector] = None,
+):
     """"
     Simulation of MU-MIMO scenario according to the frame structure
 
@@ -627,7 +634,8 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     snr_dB_list = []
     PMI_feedback_bits = []
     nodewise_bler_list = []
-    rl_selector = RLBeamSelector() if cfg.channel_prediction_method == "deqn" else None
+    if rl_selector is None and cfg.channel_prediction_method == "deqn":
+        rl_selector = RLBeamSelector()
     pending_overrides = None
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
@@ -686,5 +694,9 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         snr_dB = np.concatenate(snr_dB_list)
     else:
         snr_dB = None
+
+    if rl_selector is not None:
+        checkpoint_dir = Path("results") / "deqn_checkpoints" / Path(cfg.ns3_folder.rstrip("/")).name
+        rl_selector.save_all(checkpoint_dir)
 
     return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate, nodewise_goodput, nodewise_throughput, nodewise_bitrate, ranks, uncoded_ber_list, ldpc_ber_list, sinr_dB, snr_dB]

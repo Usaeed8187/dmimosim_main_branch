@@ -8,6 +8,8 @@ from pyDeepWESN4_online import WESN #best
 #from pyDeepESN6_online import ESN
 #from pyESN_online_decorr import ESN
 import copy
+import pickle
+from pathlib import Path
 
 
 # Deep Q Network off-policy
@@ -216,3 +218,71 @@ class DeepWESNQNetwork:
         plt.ylabel('Cost')
         plt.xlabel('training steps')
         plt.show()
+
+    def save(self, path):
+        """Persist network state to disk using pickle."""
+
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        init_kwargs = {
+            "n_actions": self.n_actions,
+            "n_features": self.n_features,
+            "input_window_size": self.input_window_size,
+            "output_window_size": self.output_window_size,
+            "memory_size": self.memory_size,
+            "n_layers": self.n_layers,
+            "nInternalUnits": self.nInternalUnits,
+            "reward_decay": self.gamma,
+            "e_greedy": self.epsilon,
+            "lr": self.lr,
+            "random_seed": None,
+            "spectral_radius": self.spectral_radius,
+        }
+
+        data = {
+            "init_kwargs": init_kwargs,
+            "eval_net": self.eval_net,
+            "target_net": self.target_net,
+            "epsilon": self.epsilon,
+            "memory": self.memory,
+            "memory_counter": getattr(self, "memory_counter", 0),
+            "learn_step_counter": self.learn_step_counter,
+            "rng_state": self.rng.get_state(),
+            "cost_his": self.cost_his,
+            "training_batch_size": self.training_batch_size,
+            "training_iteration": self.training_iteration,
+            "replace_target_iter": self.replace_target_iter,
+        }
+
+        with open(path, "wb") as f:
+            pickle.dump(data, f)
+
+    @classmethod
+    def load(cls, path):
+        """Load a saved network from disk."""
+
+        path = Path(path)
+        with open(path, "rb") as f:
+            data = pickle.load(f)
+
+        init_kwargs = data.get("init_kwargs", {})
+        obj = cls(**init_kwargs)
+
+        obj.eval_net = data.get("eval_net")
+        obj.target_net = data.get("target_net")
+        obj.epsilon = data.get("epsilon", obj.epsilon)
+        obj.memory = data.get("memory", obj.memory)
+        obj.memory_counter = data.get("memory_counter", getattr(obj, "memory_counter", 0))
+        obj.learn_step_counter = data.get("learn_step_counter", obj.learn_step_counter)
+        obj.cost_his = data.get("cost_his", [])
+        obj.training_batch_size = data.get("training_batch_size", obj.training_batch_size)
+        obj.training_iteration = data.get("training_iteration", obj.training_iteration)
+        obj.replace_target_iter = data.get("replace_target_iter", obj.replace_target_iter)
+
+        rng_state = data.get("rng_state")
+        if rng_state is not None:
+            obj.rng.set_state(rng_state)
+
+        return obj
+
