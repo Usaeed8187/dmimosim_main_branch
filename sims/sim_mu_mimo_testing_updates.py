@@ -68,8 +68,6 @@ for root, dirs, files in os.walk(source_dir):
 script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
-print(f"Script Name: {script_name}")
-print(f"Arguments: {arguments}")
 
 mobility = 'high_mobility'
 drop_idx = '2'
@@ -153,17 +151,17 @@ def parse_arguments():
             channel_prediction_method = None
 
         print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
-        print("rx_ues_arr: ", rx_ues_arr)
-        print("rx_ues_arr[0]: ", rx_ues_arr[0])
-        print("Modulation order: {}".format(modulation_order))
-        print("Code rate: {}".format(code_rate))
-        print("num_txue_sel: {}".format(num_txue_sel))
-        print("perfect_csi: {}".format(perfect_csi))
-        print("channel_prediction_setting: {}".format(channel_prediction_setting))
-        print("csi_prediction: {}".format(csi_prediction))
-        print("csi_quantization_on: {}".format(csi_quantization_on))
-        print("channel_prediction_method: {}".format(channel_prediction_method))
-        print("link_adapt: {}".format(link_adapt))
+        # print("rx_ues_arr: ", rx_ues_arr)
+        # print("rx_ues_arr[0]: ", rx_ues_arr[0])
+        # print("Modulation order: {}".format(modulation_order))
+        # print("Code rate: {}".format(code_rate))
+        # print("num_txue_sel: {}".format(num_txue_sel))
+        # print("perfect_csi: {}".format(perfect_csi))
+        # print("channel_prediction_setting: {}".format(channel_prediction_setting))
+        # print("csi_prediction: {}".format(csi_prediction))
+        # print("csi_quantization_on: {}".format(csi_quantization_on))
+        # print("channel_prediction_method: {}".format(channel_prediction_method))
+        # print("link_adapt: {}".format(link_adapt))
 
 
 # Main function
@@ -207,7 +205,7 @@ def run_simulation():
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)
-    print("Using channels in {}".format(folder_name))    
+    # print("Using channels in {}".format(folder_name))    
 
     rc_config = RCConfig()
     rc_config.enable_window = True

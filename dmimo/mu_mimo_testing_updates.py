@@ -628,7 +628,7 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
-        print("first_slot_idx: ", first_slot_idx)
+        # print("first_slot_idx: ", first_slot_idx)
 
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
