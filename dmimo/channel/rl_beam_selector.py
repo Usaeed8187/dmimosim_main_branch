@@ -298,9 +298,9 @@ class RLBeamSelector:
                 # Ensure we have storage for this Rx/Tx pair before accessing any state
                 self._ensure_pair_capacity(rx_idx, tx_idx)
 
-                prev_action_value = self.prev_actions[rx_idx][tx_idx]
+                curr_w1_idx = self._register_action(rx_idx, tx_idx, normalized_w1, L)
                 state = self._build_state(
-                    int(prev_action_value) if prev_action_value is not None else 0, sinr_vec
+                    int(curr_w1_idx) if curr_w1_idx is not None else 0, sinr_vec
                 )
 
                 if self.use_enumerated_actions:
@@ -319,7 +319,7 @@ class RLBeamSelector:
                 prev_state = self.prev_states[rx_idx][tx_idx]
                 prev_action = self.prev_actions[rx_idx][tx_idx]
                 if prev_state is not None and prev_action is not None:
-                    target_w1_idx = self._register_action(rx_idx, tx_idx, normalized_w1, L)
+                    
                     if self.use_enumerated_actions:
                         match_bonus = int(
                             target_w1_idx is not None
