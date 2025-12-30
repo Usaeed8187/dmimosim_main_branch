@@ -69,10 +69,9 @@ for root, dirs, files in os.walk(source_dir):
 script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
-
 mobility = 'high_mobility'
-drop_idx = '2'
-drop_list: List[str] = [drop_idx]
+drop_idx = '1,2,3'
+drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [4]
 num_txue_sel = 10
 
@@ -114,8 +113,6 @@ def parse_arguments():
     global csi_prediction, channel_prediction_method
     global csi_quantization_on, link_adapt
 
-    drop_list = [item.strip() for item in str(drop_idx).split(",") if item.strip()]
-
     if len(arguments) > 0:
         mobility = arguments[0]
         drop_idx = arguments[1]
@@ -154,6 +151,8 @@ def parse_arguments():
             csi_prediction = False
             channel_prediction_method = None
 
+        drop_list = [item.strip() for item in str(drop_idx).split(",") if item.strip()]
+
         print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
         # print("rx_ues_arr: ", rx_ues_arr)
         # print("rx_ues_arr[0]: ", rx_ues_arr[0])
@@ -166,6 +165,8 @@ def parse_arguments():
         # print("csi_quantization_on: {}".format(csi_quantization_on))
         # print("channel_prediction_method: {}".format(channel_prediction_method))
         # print("link_adapt: {}".format(link_adapt))
+    else:
+        drop_list = [item.strip() for item in str(drop_idx).split(",") if item.strip()]
 
 
 # Main function
