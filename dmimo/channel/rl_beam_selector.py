@@ -114,18 +114,10 @@ def _enumerate_beam_sets(N1, O1, N2, O2, L):
 
     return sorted(beam_sets)
 
-def _ensure_1d_array(arr: Optional[np.ndarray], target_len: int) -> np.ndarray:
+def _ensure_1d_array(arr: Optional[np.ndarray]) -> np.ndarray:
     if arr is None:
-        return np.zeros(target_len, dtype=np.float32)
-    arr = np.asarray(arr, dtype=np.float32).flatten()
-    if arr.size == 0:
-        return np.zeros(target_len, dtype=np.float32)
-    if arr.size < target_len:
-        padding = np.zeros(target_len - arr.size, dtype=np.float32)
-        arr = np.concatenate([arr, padding])
-    elif arr.size > target_len:
-        arr = arr[:target_len]
-    return arr
+        return np.array([], dtype=np.float32)
+    return np.asarray(arr, dtype=np.float32).flatten()
 
 
 class RLBeamSelector:
@@ -301,12 +293,19 @@ class RLBeamSelector:
                 w1_vec = _flatten_w1_indices(tx_w1)
                 L = len(w1_vec) if len(w1_vec) > 0 else 1
                 sinr_vec = sinr_array[rx_idx] if rx_idx < len(sinr_array) else None
-                sinr_vec = _ensure_1d_array(sinr_vec, max(L, 1))
+                sinr_vec = _ensure_1d_array(sinr_vec)
+
+                # Ensure we have storage for this Rx/Tx pair before accessing any state
+                self._ensure_pair_capacity(rx_idx, tx_idx)
 
                 prev_action_value = self.prev_actions[rx_idx][tx_idx]
                 state = self._build_state(
                     int(prev_action_value) if prev_action_value is not None else 0, sinr_vec
                 )
+
+                if self.use_enumerated_actions:
+                    beam_sets = _enumerate_beam_sets(self.N1, self.O1, self.N2, self.O2, L)
+                    self.max_actions = len(beam_sets)
 
                 self._maybe_init_agent(rx_idx, tx_idx, state.shape[0])
 
@@ -333,9 +332,9 @@ class RLBeamSelector:
 
 
                     if node_bler is not None and node_bler.size > rx_idx:
-                        bler_val = float(np.mean(node_bler[rx_idx]))
+                        bler_val = 1.0 - float(np.mean(node_bler[rx_idx]))
                     else:
-                        bler_val = 0.0
+                        bler_val = 1.0
 
                     reward = bler_val + match_bonus
 

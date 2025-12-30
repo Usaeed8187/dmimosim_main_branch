@@ -72,7 +72,7 @@ class DeepWESNQNetwork:
         #inputShift = 0 * np.ones(self.n_features)
         teacherScaling = 1 * np.ones(self.n_actions)
         teacherShift = 0 * np.ones(self.n_actions)
-        self.nForgetPoints = 50  # 50
+        self.nForgetPoints = 1  # 50
 
         # ------------------ build evaluate_net ------------------
         self.eval_net = WESN(n_inputs=self.n_features, n_outputs=self.n_actions, n_reservoir=nInternalUnits,
