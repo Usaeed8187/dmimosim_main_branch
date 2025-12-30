@@ -114,17 +114,18 @@ class ResultLoader:
     ) -> List[str]:
         quant_str = str(scenario.quantization)
         method = scenario.prediction_method
+        patterns = []
         if method:
-            return [
-                f"{prefix}_prediction_{method}_pmi_quantization_{quant_str}.npz",
-                f"{prefix}_prediction_{method}.npz",
-            ]
-
-        return [
-            f"{prefix}_prediction_pmi_quantization_{quant_str}.npz",
-            # Backward compatibility with the legacy naming (no method/quantization).
-            f"{prefix}_prediction.npz",
-        ]
+            patterns.append(
+                f"{prefix}_prediction_{method}_pmi_quantization_{quant_str}.npz"
+            )
+        else:
+            patterns.append(
+                f"{prefix}_prediction_two_mode_pmi_quantization_{quant_str}.npz"
+            )
+            patterns.append(f"{prefix}_prediction.npz")
+        
+        return patterns
 
     def _non_prediction_patterns(
         self,
@@ -310,20 +311,20 @@ def average_datapoints(points: Sequence[DataPoint]) -> DataPoint:
 def _default_scenarios(
     include_prediction: bool = True, link_adapt: bool = False
 ) -> List[Scenario]:
-    label_suffix = " (Link adaptation)" if link_adapt else ""
     scenarios = [
         Scenario(
             perfect_csi=False,
             prediction=False,
             quantization=True,
-            label="Worst case: Outdated CSI" + label_suffix,
+            label="Worst case: Outdated CSI",
             link_adapt=link_adapt,
         ),
         Scenario(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Two-Mode WESN prediction" + label_suffix,
+            label="Two-Mode WESN prediction",
+            prediction_method="two_mode",
             prediction_method=None,
             link_adapt=link_adapt,
         ),
@@ -331,7 +332,7 @@ def _default_scenarios(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Wiener filter prediction" + label_suffix,
+            label="Wiener filter prediction",
             link_adapt=link_adapt,
             prediction_method="weiner_filter",
         ),
@@ -339,15 +340,14 @@ def _default_scenarios(
             perfect_csi=True,
             prediction=False,
             quantization=True,
-            label="Perfect channel estimation, fb w/ delay, quantization"
-            + label_suffix,
+            label="Perfect channel estimation, fb w/ delay, quantization",
             link_adapt=link_adapt,
         ),
         Scenario(
             perfect_csi=True,
             prediction=False,
             quantization=False,
-            label="Perfect CSI at BS (no quantization, no delay)" + label_suffix,
+            label="Perfect CSI at BS (no quantization, no delay)",
             link_adapt=link_adapt,
         ),
     ]
@@ -445,7 +445,7 @@ def main() -> None:
         "--drops",
         type=int,
         nargs="+",
-        default=[1, 2],
+        default=[1, 2, 3],
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -607,6 +607,7 @@ def main() -> None:
     # Throughput vs RUs (fixed Rx, best MCS)
     thr_tx_series = []
     best_mcs_tx = {}
+    throughput_title_descriptor = "Link adaptation" if cfg.link_adapt else "best MCS"
     for scenario in cfg.scenarios:
         scenario_thr = []
         scenario_best_mcs = []
@@ -631,7 +632,7 @@ def main() -> None:
         thr_tx_series,
         xlabel="Number of RUs",
         ylabel="Throughput (Mbps)",
-        title=f"Throughput vs RUs (UEs={cfg.fixed_rx_for_tx_sweep+2}, best MCS)", # treating rx BS as 2 UEs
+        title=f"Throughput vs RUs (UEs={cfg.fixed_rx_for_tx_sweep+2}, {throughput_title_descriptor})", # treating rx BS as 2 UEs
         output_path=os.path.join(cfg.output_dir, "throughput_vs_tx_ues.png"),
     )
 
@@ -662,7 +663,7 @@ def main() -> None:
         thr_rx_series,
         xlabel="Number of UEs",
         ylabel="Throughput (Mbps)",
-        title=f"Throughput vs UEs (RUs={cfg.fixed_tx_for_rx_sweep+2}, best MCS)", # treating tx BS as 2 UEs
+        title=f"Throughput vs UEs (RUs={cfg.fixed_tx_for_rx_sweep+2}, {throughput_title_descriptor})", # treating tx BS as 2 UEs
         output_path=os.path.join(cfg.output_dir, "throughput_vs_rx_ues.png"),
     )
 
