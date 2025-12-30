@@ -486,9 +486,13 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                 return_feedback_bits=return_feedback_bits,
                 w1_beam_indices_override=w1_override,
             )
+            PMI_feedback_report_without_override = type_II_PMI_quantizer(
+                h_freq_csi,
+                return_feedback_bits=return_feedback_bits,
+            )
             if return_feedback_bits:
                 h_freq_csi = PMI_feedback_report[0]
-                PMI_feedback_bits = PMI_feedback_report[1]
+                PMI_feedback_bits = PMI_feedback_report_without_override[1]
             else:
                 h_freq_csi = PMI_feedback_report
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
