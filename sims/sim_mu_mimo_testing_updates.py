@@ -70,8 +70,8 @@ print(f"Script Name: {script_name}")
 print(f"Arguments: {arguments}")
 
 modulation_order = 4
-code_rate = 2 / 3
-link_adapt = False
+code_rate = 1 / 2
+link_adapt = True
 num_txue_sel = 10
 perfect_csi = False
 channel_prediction_setting = "weiner_filter" # "None", "two_mode", "weiner_filter", "deqn"
@@ -207,6 +207,7 @@ if __name__ == "__main__":
     ldpc_ber_list = []
     uncoded_ber_list = []
     sinr_dB = []
+    snr_dB = []
     phase_1_ue_ber = []
 
     for ue_arr_idx in range(np.size(rx_ues_arr)):
@@ -253,6 +254,8 @@ if __name__ == "__main__":
         ldpc_ber_list.append(rst_zf[10])
         if rst_zf[11] is not None:
             sinr_dB.append(rst_zf[11])
+        if rst_zf[12] is not None:
+            snr_dB.append(rst_zf[12])
 
         folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
         os.makedirs(folder_path, exist_ok=True)
@@ -266,7 +269,7 @@ if __name__ == "__main__":
             np.savez(file_path,
                     cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
                     nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
-                    ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11])
+                    ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])
         else:
             if cfg.scheduling:
                 file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
@@ -276,4 +279,4 @@ if __name__ == "__main__":
             np.savez(file_path,
                     cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
                     nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], 
-                    ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11])
+                    ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])

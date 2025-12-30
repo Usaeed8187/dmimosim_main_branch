@@ -512,8 +512,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         most_frequent_value = values[np.argmax(counts)]
         cfg.code_rate = most_frequent_value
 
-        print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
-        print("\n", "Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
+        # print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
+        # print("\n", "Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
 
     ranks_out = int(cfg.num_tx_streams / (cfg.num_scheduled_ues+2))
 
@@ -546,8 +546,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    print("BLER: ", coded_bler)
-    print("BER: ", uncoded_ber_phase_2)
+    # print("BLER: ", coded_bler)
+    # print("BER: ", uncoded_ber_phase_2)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
 
@@ -595,8 +595,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, PMI_feedback_bits, node_wise_bler]
-
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler]
 
 
 def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
@@ -619,6 +618,7 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     ldpc_ber_list = []
     uncoded_ber_list = []
     sinr_dB_list = []
+    snr_dB_list = []
     PMI_feedback_bits = []
     nodewise_bler_list = []
     rl_selector = RLBeamSelector() if cfg.channel_prediction_method == "deqn" else None
@@ -626,7 +626,7 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
-        print("first_slot_idx: ", first_slot_idx, "\n")
+        print("first_slot_idx: ", first_slot_idx)
 
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
@@ -651,14 +651,15 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         nodewise_bitrate.append(additional_KPIs[2])
         ranks_list.append(additional_KPIs[3])
         sinr_dB_list.append(additional_KPIs[4])
-        PMI_feedback_bits.append(additional_KPIs[5])
-        nodewise_bler_list.append(additional_KPIs[6])
+        snr_dB_list.append(additional_KPIs[5])
+        PMI_feedback_bits.append(additional_KPIs[6])
+        nodewise_bler_list.append(additional_KPIs[7])
 
         if rl_selector is not None:
             pending_overrides = rl_selector.prepare_next_actions(
-                additional_KPIs[5],
-                additional_KPIs[4],
                 additional_KPIs[6],
+                additional_KPIs[4],
+                additional_KPIs[7],
             )
 
 
@@ -675,5 +676,9 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     else:
         sinr_dB = None
 
-    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate, nodewise_goodput, nodewise_throughput, nodewise_bitrate, ranks, uncoded_ber_list, ldpc_ber_list, sinr_dB]
+    if snr_dB_list[0] is not None:
+        snr_dB = np.concatenate(snr_dB_list)
+    else:
+        snr_dB = None
 
+    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate, nodewise_goodput, nodewise_throughput, nodewise_bitrate, ranks, uncoded_ber_list, ldpc_ber_list, sinr_dB, snr_dB]
