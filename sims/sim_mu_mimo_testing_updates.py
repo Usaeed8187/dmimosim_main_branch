@@ -79,9 +79,9 @@ code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "weiner_filter" # "None", "two_mode", "weiner_filter", "deqn"
+channel_prediction_setting = "deqn" # "None", "two_mode", "weiner_filter", "deqn"
 csi_prediction = True
-channel_prediction_method = "weiner_filter" # None, "two_mode", "weiner_filter", "deqn"
+channel_prediction_method = "deqn" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 
 def log_error(exc: Exception) -> str:

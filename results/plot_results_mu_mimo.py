@@ -339,7 +339,7 @@ def _default_scenarios(
             perfect_csi=True,
             prediction=False,
             quantization=True,
-            label="Perfect channel estimation, fb w/ delay, quantization",
+            label="Perfect channel estimation, fb without delay, with quantization",
             link_adapt=link_adapt,
         ),
         Scenario(

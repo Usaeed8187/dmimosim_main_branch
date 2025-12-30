@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -10,7 +10,7 @@ DEQN_PATH = REPO_ROOT / "ICML_DEQN_clean"
 if str(DEQN_PATH) not in sys.path:
     sys.path.append(str(DEQN_PATH))
 
-from ICML_DEQN_clean.DQN_RC_new import DeepQNetwork  # noqa: E402
+from ICML_DEQN_clean.DQN_RC_new_WESN import DeepWESNQNetwork  # noqa: E402
 
 
 def _flatten_w1_indices(w1_entry) -> np.ndarray:
@@ -85,55 +85,118 @@ def _ensure_1d_array(arr: Optional[np.ndarray], target_len: int) -> np.ndarray:
 class RLBeamSelector:
     """Lightweight manager to run DEQN agents for PMI beam predictions."""
 
-    def __init__(self, max_actions: int = 128, memory_size: int = 200):
-        self.max_actions = max_actions
-        self.memory_size = memory_size
+    def __init__(
+        self,
+        max_actions: int = 128,
+        memory_size: int = 200,
+        input_window_size: int = 3,
+        output_window_size: int = 3,
+        O1: int = 4,
+        N1: int = 2,
+        O2: int = 1,
+        N2: int = 1,
+    ):
 
-        self.agents: List[Optional[DeepQNetwork]] = []
-        self.action_maps: List[List[np.ndarray]] = []
-        self.prev_states: List[Optional[np.ndarray]] = []
-        self.prev_actions: List[Optional[int]] = []
-        self.state_dims: List[Optional[int]] = []
+        self.O1 = int(O1)
+        self.N1 = int(N1)
+        self.O2 = int(O2)
+        self.N2 = int(N2)
+        self.num_beams = (self.O1 * self.N1) * (self.O2 * self.N2)
 
-    def _maybe_init_agent(self, rx_idx: int, state_dim: int):
+        self.agents: List[List[Optional[DeepWESNQNetwork]]] = []
+        self.action_maps: List[List[List[Tuple[int, ...]]]] = []
+        self.prev_states: List[List[Optional[np.ndarray]]] = []
+        self.prev_actions: List[List[Optional[int]]] = []
+        self.state_dims: List[List[Optional[int]]] = []
+
+
+    def _ensure_pair_capacity(self, rx_idx: int, tx_idx: int):
         while len(self.agents) <= rx_idx:
-            self.agents.append(None)
+            self.agents.append([])
             self.action_maps.append([])
-            self.prev_states.append(None)
-            self.prev_actions.append(None)
-            self.state_dims.append(None)
+            self.prev_states.append([])
+            self.prev_actions.append([])
+            self.state_dims.append([])
 
-        if self.agents[rx_idx] is None:
-            self.agents[rx_idx] = DeepQNetwork(
+        while len(self.agents[rx_idx]) <= tx_idx:
+            self.agents[rx_idx].append(None)
+            self.action_maps[rx_idx].append([])
+            self.prev_states[rx_idx].append(None)
+            self.prev_actions[rx_idx].append(None)
+            self.state_dims[rx_idx].append(None)
+
+    def _maybe_init_agent(self, rx_idx: int, tx_idx: int, state_dim: int):
+        self._ensure_pair_capacity(rx_idx, tx_idx)
+
+        if self.agents[rx_idx][tx_idx] is None:
+            
+            self.agents[rx_idx][tx_idx] = DeepWESNQNetwork(
                 self.max_actions,
                 state_dim,
+                self.input_window_size,
+                self.output_window_size,
                 self.memory_size,
                 n_layers=1,
                 nInternalUnits=64,
                 spectral_radius=0.3,
             )
             self.state_dims[rx_idx] = state_dim
+            self.state_dims[rx_idx][tx_idx] = state_dim
 
-    def _register_action(self, rx_idx: int, beam_struct) -> int:
-        beam_tuple = _structure_to_tuple(beam_struct)
-        existing = self.action_maps[rx_idx]
+    def _canonical_action(self, beam_struct, L: int) -> Optional[Tuple[int, ...]]:
+        beams = _flatten_w1_indices(beam_struct).astype(int)
+
+        unique_beams: List[int] = []
+        seen = set()
+
+        for beam in beams.flatten():
+            if len(unique_beams) >= L:
+                break
+            if not 0 <= int(beam) < self.num_beams:
+                continue
+            if int(beam) in seen:
+                continue
+            unique_beams.append(int(beam))
+            seen.add(int(beam))
+
+        candidate = 0
+        while len(unique_beams) < L and self.num_beams > 0:
+            if candidate not in seen and 0 <= candidate < self.num_beams:
+                unique_beams.append(candidate)
+                seen.add(candidate)
+            candidate += 1
+
+        if len(unique_beams) < L:
+            return None
+
+        return tuple(unique_beams[:L])
+
+    def _register_action(self, rx_idx: int, tx_idx: int, beam_struct, L: int) -> Optional[int]:
+        beam_tuple = self._canonical_action(beam_struct, L)
+        if beam_tuple is None:
+            return None
+        
+        existing = self.action_maps[rx_idx][tx_idx]
+
         for idx, saved in enumerate(existing):
             if saved == beam_tuple:
                 return idx
 
         if len(existing) < self.max_actions:
-            self.action_maps[rx_idx].append(beam_tuple)
+            self.action_maps[rx_idx][tx_idx].append(beam_tuple)
             return len(existing)
 
         return 0
 
-    def _decode_action(self, rx_idx: int, action_idx: int) -> Optional[np.ndarray]:
+    def _decode_action(self, rx_idx: int, tx_idx: int, action_idx: int) -> Optional[Tuple[int, ...]]:
         if action_idx is None:
             return None
-        if rx_idx >= len(self.action_maps):
+        if rx_idx >= len(self.action_maps) or tx_idx >= len(self.action_maps[rx_idx]):
+
             return None
-        if 0 <= action_idx < len(self.action_maps[rx_idx]):
-            return self.action_maps[rx_idx][action_idx]
+        if 0 <= action_idx < len(self.action_maps[rx_idx][tx_idx]):
+            return self.action_maps[rx_idx][tx_idx][action_idx]
+
         return None
 
     def _build_state(self, w1_vec: np.ndarray, sinr_vec: np.ndarray) -> np.ndarray:
@@ -144,8 +207,8 @@ class RLBeamSelector:
         pmi_feedback_bits,
         sinr_dB,
         node_wise_bler,
-    ) -> Optional[List[Optional[np.ndarray]]]:
-        """Update all agents with the newest feedback and return predicted beams."""
+    ) -> Optional[List[List[Optional[np.ndarray]]]]:
+        """Update all agents with the newest feedback and return predicted beams per Rx–Tx pair."""
 
         w1_structures = _extract_w1_from_feedback(pmi_feedback_bits)
         if len(w1_structures) == 0:
@@ -159,48 +222,60 @@ class RLBeamSelector:
 
         node_bler = np.asarray(node_wise_bler) if node_wise_bler is not None else None
 
-        overrides: List[Optional[np.ndarray]] = []
+        overrides: List[List[Optional[np.ndarray]]] = []
 
         for rx_idx, raw_w1 in enumerate(w1_structures):
-            w1_vec = _flatten_w1_indices(raw_w1)
-            sinr_vec = sinr_array[rx_idx] if rx_idx < len(sinr_array) else None
-            sinr_vec = _ensure_1d_array(sinr_vec, max(len(w1_vec), 1))
+            rx_overrides: List[Optional[np.ndarray]] = []
+            tx_entries = raw_w1 if isinstance(raw_w1, (list, tuple)) else [raw_w1]
 
-            state = self._build_state(_ensure_1d_array(w1_vec, len(w1_vec) if len(w1_vec) > 0 else 1), sinr_vec)
-            self._maybe_init_agent(rx_idx, state.shape[0])
+            for tx_idx, tx_w1 in enumerate(tx_entries):
+                w1_vec = _flatten_w1_indices(tx_w1)
+                L = len(w1_vec) if len(w1_vec) > 0 else 1
+                sinr_vec = sinr_array[rx_idx] if rx_idx < len(sinr_array) else None
+                sinr_vec = _ensure_1d_array(sinr_vec, max(L, 1))
 
-            agent = self.agents[rx_idx]
-            assert agent is not None
+                state = self._build_state(_ensure_1d_array(w1_vec, L), sinr_vec)
+                self._maybe_init_agent(rx_idx, tx_idx, state.shape[0])
 
-            normalized_w1 = _structure_to_tuple(raw_w1)
-            current_action_idx = self._register_action(rx_idx, normalized_w1 if normalized_w1 is not None else (0,))
+                agent = self.agents[rx_idx][tx_idx]
+                assert agent is not None
 
-            if self.prev_states[rx_idx] is not None and self.prev_actions[rx_idx] is not None:
-                target_w1 = self._decode_action(rx_idx, self.prev_actions[rx_idx])
-                match_bonus = int(target_w1 is not None and _flatten_w1_indices(target_w1).shape == w1_vec.shape and np.array_equal(_flatten_w1_indices(target_w1), w1_vec))
+                normalized_w1 = self._canonical_action(tx_w1, L)
+                if normalized_w1 is None:
+                    normalized_w1 = tuple(range(min(L, self.num_beams)))
+                
+                current_action_idx = self._register_action(rx_idx, tx_idx, normalized_w1, L)
 
-                if node_bler is not None and node_bler.size > rx_idx:
-                    bler_val = float(np.mean(node_bler[rx_idx]))
-                else:
-                    bler_val = 0.0
+                prev_state = self.prev_states[rx_idx][tx_idx]
+                prev_action = self.prev_actions[rx_idx][tx_idx]
+                if prev_state is not None and prev_action is not None:
+                    target_w1 = self._decode_action(rx_idx, tx_idx, prev_action)
+                    match_bonus = int(target_w1 is not None and target_w1 == normalized_w1)
 
-                reward = bler_val + match_bonus
+                    if node_bler is not None and node_bler.size > rx_idx:
+                        bler_val = float(np.mean(node_bler[rx_idx]))
+                    else:
+                        bler_val = 0.0
 
-                agent.store_transition(self.prev_states[rx_idx], self.prev_actions[rx_idx], reward, state)
-                agent.activate_target_net(state)
+                    reward = bler_val + match_bonus
 
-                episode_len = getattr(agent, "memory_counter", 0)
-                if episode_len >= agent.nForgetPoints:
-                    agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
+                    agent.store_transition(prev_state, prev_action, reward, state)
+                    agent.activate_target_net(state)
 
-            predicted_idx = agent.choose_action(state)
-            predicted_w1 = self._decode_action(rx_idx, predicted_idx)
-            if predicted_w1 is None:
-                predicted_w1 = normalized_w1
+                    episode_len = getattr(agent, "memory_counter", 0)
+                    if episode_len >= agent.nForgetPoints:
+                        agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
+                
+                predicted_idx = agent.choose_action(state)
+                predicted_w1 = self._decode_action(rx_idx, tx_idx, predicted_idx)
+                if predicted_w1 is None:
+                    predicted_w1 = normalized_w1
 
-            overrides.append(_tuple_to_list(predicted_w1) if predicted_w1 is not None else None)
+                rx_overrides.append(_tuple_to_list(predicted_w1) if predicted_w1 is not None else None)
 
-            self.prev_states[rx_idx] = state
-            self.prev_actions[rx_idx] = current_action_idx if current_action_idx is not None else predicted_idx
+                self.prev_states[rx_idx][tx_idx] = state
+                self.prev_actions[rx_idx][tx_idx] = current_action_idx if current_action_idx is not None else predicted_idx
+
+            overrides.append(rx_overrides)
 
         return overrides
