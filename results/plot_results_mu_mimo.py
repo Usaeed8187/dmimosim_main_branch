@@ -65,6 +65,7 @@ class PlotConfig:
     fixed_rx_for_tx_sweep: int
     fixed_tx_for_rx_sweep: int
     output_dir: str
+    link_adapt: bool
     scenarios: Sequence["Scenario"]
 
 
@@ -84,6 +85,7 @@ class Scenario:
     prediction: bool
     quantization: bool
     label: str
+    link_adapt: bool = False
     prediction_method: Optional[str] = None
 
 
@@ -171,12 +173,18 @@ class ResultLoader:
     ) -> Optional[str]:
         folder = self._drop_folder(drop_id)
         code_rate_str = str(code_rate)
-        prefix = (
-            f"mu_mimo_results_mod_order_{mod_order}_code_rate_{code_rate_str}_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
-        )
+        if scenario.link_adapt:
+            prefix = f"mu_mimo_results_link_adapt_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
+        else:
+            prefix = (
+                f"mu_mimo_results_mod_order_{mod_order}_code_rate_{code_rate_str}_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
+            )
         for candidate in self._candidate_paths(folder, prefix, scenario):
             if os.path.exists(candidate):
                 return candidate
+            
+        if scenario.link_adapt:
+            return None
 
         # As a fallback, try to match slightly different code-rate strings.
         pattern = os.path.join(
@@ -248,12 +256,24 @@ def aggregate_metrics(
     tx_values: Iterable[int],
     modulation_orders: Iterable[int],
     code_rates: Iterable[float],
-) -> Dict[Tuple[Scenario, int, int, int, float], List[DataPoint]]:
-    results: Dict[Tuple[Scenario, int, int, int, float], List[DataPoint]] = {}
+) -> Dict[Tuple[Scenario, int, int, Optional[int], Optional[float]], List[DataPoint]]:
+    results: Dict[
+        Tuple[Scenario, int, int, Optional[int], Optional[float]], List[DataPoint]
+    ] = {}
     for scenario in scenarios:
         for drop_id in loader.cfg.drops:
             for rx_ues in rx_values:
                 for tx_ues in tx_values:
+                    if scenario.link_adapt:
+                        datapoint = loader.load_datapoint(
+                            drop_id, rx_ues, tx_ues, 0, 0, scenario
+                        )
+                        if datapoint is None:
+                            continue
+                        results.setdefault(
+                            (scenario, rx_ues, tx_ues, None, None), []
+                        ).append(datapoint)
+                        continue
                     for mod_order in modulation_orders:
                         for code_rate in code_rates:
                             datapoint = loader.load_datapoint(
@@ -267,14 +287,17 @@ def aggregate_metrics(
     return results
 
 def _average_metric(
-    aggregated: Dict[Tuple[Scenario, int, int, int, float], List[DataPoint]],
+    aggregated: Dict[Tuple[Scenario, int, int, Optional[int], Optional[float]], List[DataPoint]],
     scenario: Scenario,
     rx_ues: int,
     tx_ues: int,
-    mod_order: int,
-    code_rate: float,
+    mod_order: Optional[int],
+    code_rate: Optional[float],
 ) -> Optional[DataPoint]:
-    key = (scenario, rx_ues, tx_ues, mod_order, float(code_rate))
+    if scenario.link_adapt:
+        key = (scenario, rx_ues, tx_ues, None, None)
+    else:
+        key = (scenario, rx_ues, tx_ues, mod_order, float(code_rate))
     points = aggregated.get(key, [])
     return average_datapoints(points) if points else None
 
@@ -284,39 +307,48 @@ def average_datapoints(points: Sequence[DataPoint]) -> DataPoint:
         throughput=float(np.nanmean([p.throughput for p in points])),
     )
 
-def _default_scenarios(include_prediction: bool = True) -> List[Scenario]:
+def _default_scenarios(
+    include_prediction: bool = True, link_adapt: bool = False
+) -> List[Scenario]:
+    label_suffix = " (Link adaptation)" if link_adapt else ""
     scenarios = [
         Scenario(
             perfect_csi=False,
             prediction=False,
             quantization=True,
-            label="Worst case: Outdated CSI",
+            label="Worst case: Outdated CSI" + label_suffix,
+            link_adapt=link_adapt,
         ),
         Scenario(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Two-Mode WESN prediction",
+            label="Two-Mode WESN prediction" + label_suffix,
             prediction_method=None,
+            link_adapt=link_adapt,
         ),
         Scenario(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Wiener filter prediction",
+            label="Wiener filter prediction" + label_suffix,
+            link_adapt=link_adapt,
             prediction_method="weiner_filter",
         ),
         Scenario(
             perfect_csi=True,
             prediction=False,
             quantization=True,
-            label="Perfect channel estimation, fb w/ delay, quantization",
+            label="Perfect channel estimation, fb w/ delay, quantization"
+            + label_suffix,
+            link_adapt=link_adapt,
         ),
         Scenario(
             perfect_csi=True,
             prediction=False,
             quantization=False,
-            label="Perfect CSI at BS (no quantization, no delay)",
+            label="Perfect CSI at BS (no quantization, no delay)" + label_suffix,
+            link_adapt=link_adapt,
         ),
     ]
 
@@ -370,13 +402,18 @@ def semilogy_metric(
 
 
 def select_best_mcs(
-    aggregated: Dict[Tuple[Scenario, int, int, int, float], List[DataPoint]],
+    aggregated: Dict[Tuple[Scenario, int, int, Optional[int], Optional[float]], List[DataPoint]],
     scenario: Scenario,
     rx_ues: int,
     tx_ues: int,
     modulation_orders: Iterable[int],
     code_rates: Iterable[float],
 ) -> Tuple[Optional[float], Optional[Tuple[int, float]]]:
+    if scenario.link_adapt:
+        datapoint = _average_metric(
+            aggregated, scenario, rx_ues, tx_ues, mod_order=None, code_rate=None
+        )
+        return (datapoint.throughput if datapoint else None), None
     best_throughput = None
     best_mcs: Optional[Tuple[int, float]] = None
     for mod_order in modulation_orders:
@@ -473,10 +510,18 @@ def main() -> None:
         action="store_true",
         help="Exclude CSI prediction curves from the plots.",
     )
+    parser.add_argument(
+        "--link-adapt",
+        default=True,
+        action="store_true",
+        help="Plot link adaptation results saved when link adaptation was enabled.",
+    )
 
     args = parser.parse_args()
 
-    scenarios = _default_scenarios(include_prediction=not args.no_prediction)
+    scenarios = _default_scenarios(
+        include_prediction=not args.no_prediction, link_adapt=args.link_adapt
+    )
 
     cfg = PlotConfig(
         base_dir=args.base_dir,
@@ -491,6 +536,7 @@ def main() -> None:
         fixed_rx_for_tx_sweep=args.fixed_rx,
         fixed_tx_for_rx_sweep=args.fixed_tx,
         output_dir=args.output_dir,
+        link_adapt=args.link_adapt,
         scenarios=scenarios,
         )
 
