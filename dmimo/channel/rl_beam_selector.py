@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
+import itertools
 
 import numpy as np
 
@@ -67,6 +68,51 @@ def _tuple_to_list(struct):
             out.append(int(item))
     return out
 
+def _enumerate_beam_sets(N1, O1, N2, O2, L):
+    """
+    Enumerate all possible beam index sets allowed by Algorithm 1 (structure only).
+
+    Returns:
+        list of sorted tuples of beam indices
+    """
+
+    beam_sets = set()
+
+    # possible offsets
+    q1_vals = range(O1)
+    q2_vals = range(O2)
+
+    for q1 in q1_vals:
+        for q2 in q2_vals:
+
+            # possible coarse indices
+            n1_vals = range(N1)
+            n2_vals = range(N2)
+
+            # choose distinct n1's
+            for n1_sel in itertools.combinations(n1_vals, L):
+
+                if N2 == 1:
+                    # n2 is fixed
+                    n2_sel = [0] * L
+                    beams = [
+                        (O2 * 0 + q2) * (O1 * N1) + (O1 * n1 + q1)
+                        for n1 in n1_sel
+                    ]
+                    beam_sets.add(tuple(sorted(beams)))
+                else:
+                    # choose distinct n2's
+                    for n2_sel in itertools.permutations(n2_vals, L):
+                        if len(set(n2_sel)) < L:
+                            continue
+
+                        beams = [
+                            (O2 * n2 + q2) * (O1 * N1) + (O1 * n1 + q1)
+                            for n1, n2 in zip(n1_sel, n2_sel)
+                        ]
+                        beam_sets.add(tuple(sorted(beams)))
+
+    return sorted(beam_sets)
 
 def _ensure_1d_array(arr: Optional[np.ndarray], target_len: int) -> np.ndarray:
     if arr is None:
