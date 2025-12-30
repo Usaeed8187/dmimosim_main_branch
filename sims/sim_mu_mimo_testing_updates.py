@@ -5,6 +5,8 @@ Simulation of MU-MIMO scenario with ns-3 channels
 
 import sys
 import os
+import datetime
+import traceback
 import numpy as np
 from fractions import Fraction
 import matplotlib.pyplot as plt
@@ -79,6 +81,18 @@ csi_prediction = True
 channel_prediction_method = "weiner_filter" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 
+def log_error(exc: Exception) -> str:
+    os.makedirs("results/logs", exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join("results", "logs", f"sim_error_{timestamp}.log")
+
+    with open(log_path, "w", encoding="utf-8") as log_file:
+        log_file.write("Simulation halted due to an error:\n")
+        traceback.print_exception(exc, file=log_file)
+
+    print(f"Error encountered. Details written to {log_path}")
+    return log_path
+
 def _parse_bool(value):
     return str(value).lower() in ("true", "1", "yes")
 
@@ -88,59 +102,68 @@ def _parse_code_rate(value):
     except (ValueError, ZeroDivisionError):
         return float(value)
 
-if len(arguments) > 0:
-    mobility = arguments[0]
-    drop_idx = arguments[1]
-    rx_ues_arr = [arguments[2]]
-    rx_ues_arr = np.array(rx_ues_arr, dtype=int)
+def parse_arguments():
+    global mobility, drop_idx, rx_ues_arr
+    global modulation_order, code_rate, num_txue_sel
+    global perfect_csi, channel_prediction_setting
+    global csi_prediction, channel_prediction_method
+    global csi_quantization_on, link_adapt
 
-    if len(arguments) >= 4:
-        modulation_order = int(arguments[3])
+    if len(arguments) > 0:
+        mobility = arguments[0]
+        drop_idx = arguments[1]
+        rx_ues_arr = [arguments[2]]
+        rx_ues_arr = np.array(rx_ues_arr, dtype=int)
 
-    if len(arguments) >= 5:
-        code_rate = _parse_code_rate(arguments[4])
+        if len(arguments) >= 4:
+            modulation_order = int(arguments[3])
 
-    if len(arguments) >= 6:
-        num_txue_sel = int(arguments[5])
-    
-    if len(arguments) >= 7:
-        perfect_csi = _parse_bool(arguments[6])
+        if len(arguments) >= 5:
+            code_rate = _parse_code_rate(arguments[4])
+        
+        if len(arguments) >= 6:
+            num_txue_sel = int(arguments[5])
+        
+        if len(arguments) >= 7:
+            perfect_csi = _parse_bool(arguments[6])
+        
+        if len(arguments) >= 8:
+            channel_prediction_setting = arguments[7]
 
-    if len(arguments) >= 8:
-        channel_prediction_setting = arguments[7]
+        if len(arguments) >= 9:
+            csi_quantization_on = _parse_bool(arguments[8])
 
-    if len(arguments) >= 9:
-        csi_quantization_on = _parse_bool(arguments[8])
+        if len(arguments) >= 10:
+            link_adapt = _parse_bool(arguments[9])
 
-    if len(arguments) >= 10:
-        link_adapt = _parse_bool(arguments[9])
+        if str(channel_prediction_setting).lower() == "none":
+            csi_prediction = False
+            channel_prediction_method = None
+        else:
+            csi_prediction = True
+            channel_prediction_method = channel_prediction_setting
 
-    if str(channel_prediction_setting).lower() == "none":
-        csi_prediction = False
-        channel_prediction_method = None
-    else:
-        csi_prediction = True
-        channel_prediction_method = channel_prediction_setting
+        if perfect_csi:
+            csi_prediction = False
+            channel_prediction_method = None
 
-    if perfect_csi:
-        csi_prediction = False
-        channel_prediction_method = None
-    
-    print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
-    print("rx_ues_arr: ", rx_ues_arr)
-    print("rx_ues_arr[0]: ", rx_ues_arr[0])
-    print("Modulation order: {}".format(modulation_order))
-    print("Code rate: {}".format(code_rate))
-    print("num_txue_sel: {}".format(num_txue_sel))
-    print("perfect_csi: {}".format(perfect_csi))
-    print("channel_prediction_setting: {}".format(channel_prediction_setting))
-    print("csi_prediction: {}".format(csi_prediction))
-    print("csi_quantization_on: {}".format(csi_quantization_on))
-    print("channel_prediction_method: {}".format(channel_prediction_method))
-    print("link_adapt: {}".format(link_adapt))
+        print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
+        print("rx_ues_arr: ", rx_ues_arr)
+        print("rx_ues_arr[0]: ", rx_ues_arr[0])
+        print("Modulation order: {}".format(modulation_order))
+        print("Code rate: {}".format(code_rate))
+        print("num_txue_sel: {}".format(num_txue_sel))
+        print("perfect_csi: {}".format(perfect_csi))
+        print("channel_prediction_setting: {}".format(channel_prediction_setting))
+        print("csi_prediction: {}".format(csi_prediction))
+        print("csi_quantization_on: {}".format(csi_quantization_on))
+        print("channel_prediction_method: {}".format(channel_prediction_method))
+        print("link_adapt: {}".format(link_adapt))
+
 
 # Main function
-if __name__ == "__main__":
+def run_simulation():
+    parse_arguments()
 
     # Simulation settings
     cfg = SimConfig()
@@ -280,3 +303,11 @@ if __name__ == "__main__":
                     cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
                     nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], 
                     ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])
+
+
+if __name__ == "__main__":
+    try:
+        run_simulation()
+    except Exception as exc:  # noqa: BLE001
+        log_error(exc)
+        sys.exit(1)

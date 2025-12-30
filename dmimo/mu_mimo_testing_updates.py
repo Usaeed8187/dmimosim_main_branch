@@ -464,6 +464,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         # TODO: add support for quantized CSI feedback
         rank_feedback_report, n_var, mcs_feedback_report = \
             do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
+        
+    PMI_feedback_bits = None
 
     if cfg.csi_quantization_on:
         h_freq_csi = tf.reduce_mean(h_freq_csi, axis=0, keepdims=True)
