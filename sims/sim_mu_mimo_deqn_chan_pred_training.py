@@ -297,6 +297,12 @@ def run_simulation():
                         ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])
                 
         if shared_rl_selector is not None:
+            model_dir = os.path.join(
+                "results", "rl_models", mobility, f"drop_{drop_idx}"
+            )
+            shared_rl_selector.save_all(model_dir)
+            print(f"Saved DEQN models to {model_dir}")
+
             shared_rl_selector.reset_episode()
 
 
