@@ -298,6 +298,10 @@ class RLBeamSelector:
                 # Ensure we have storage for this Rx/Tx pair before accessing any state
                 self._ensure_pair_capacity(rx_idx, tx_idx)
 
+                normalized_w1 = self._canonical_action(tx_w1, L)
+                if normalized_w1 is None:
+                    normalized_w1 = tuple(range(min(L, self.num_beams)))
+
                 curr_w1_idx = self._register_action(rx_idx, tx_idx, normalized_w1, L)
                 state = self._build_state(
                     int(curr_w1_idx) if curr_w1_idx is not None else 0, sinr_vec
@@ -312,21 +316,17 @@ class RLBeamSelector:
                 agent = self.agents[rx_idx][tx_idx]
                 assert agent is not None
 
-                normalized_w1 = self._canonical_action(tx_w1, L)
-                if normalized_w1 is None:
-                    normalized_w1 = tuple(range(min(L, self.num_beams)))
-
                 prev_state = self.prev_states[rx_idx][tx_idx]
                 prev_action = self.prev_actions[rx_idx][tx_idx]
                 if prev_state is not None and prev_action is not None:
                     
                     if self.use_enumerated_actions:
                         match_bonus = int(
-                            target_w1_idx is not None
-                            and target_w1_idx == self.prev_actions[rx_idx][tx_idx]
+                            curr_w1_idx is not None
+                            and curr_w1_idx == self.prev_actions[rx_idx][tx_idx]
                         )
                     else:
-                        match_bonus = int(target_w1_idx is not None and target_w1_idx == normalized_w1)
+                        match_bonus = int(curr_w1_idx is not None and curr_w1_idx == normalized_w1)
 
                     if node_bler is not None and node_bler.size > rx_idx:
                         bler_contrib = 1.0 - float(np.mean(node_bler[rx_idx]))
