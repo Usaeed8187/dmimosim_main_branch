@@ -91,17 +91,16 @@ class RLBeamSelector:
         memory_size: int = 200,
         input_window_size: int = 3,
         output_window_size: int = 3,
-        O1: int = 4,
-        N1: int = 2,
-        O2: int = 1,
-        N2: int = 1,
     ):
-
-        self.O1 = int(O1)
-        self.N1 = int(N1)
-        self.O2 = int(O2)
-        self.N2 = int(N2)
-        self.num_beams = (self.O1 * self.N1) * (self.O2 * self.N2)
+        
+        self.O2 = 1
+        self.N2 = 1
+        self.O1 = 4
+        
+        self.max_actions = max_actions
+        self.memory_size = memory_size
+        self.input_window_size = input_window_size
+        self.output_window_size = output_window_size
 
         self.agents: List[List[Optional[DeepWESNQNetwork]]] = []
         self.action_maps: List[List[List[Tuple[int, ...]]]] = []
@@ -140,7 +139,6 @@ class RLBeamSelector:
                 nInternalUnits=64,
                 spectral_radius=0.3,
             )
-            self.state_dims[rx_idx] = state_dim
             self.state_dims[rx_idx][tx_idx] = state_dim
 
     def _canonical_action(self, beam_struct, L: int) -> Optional[Tuple[int, ...]]:
@@ -192,7 +190,6 @@ class RLBeamSelector:
         if action_idx is None:
             return None
         if rx_idx >= len(self.action_maps) or tx_idx >= len(self.action_maps[rx_idx]):
-
             return None
         if 0 <= action_idx < len(self.action_maps[rx_idx][tx_idx]):
             return self.action_maps[rx_idx][tx_idx][action_idx]
@@ -229,6 +226,13 @@ class RLBeamSelector:
             tx_entries = raw_w1 if isinstance(raw_w1, (list, tuple)) else [raw_w1]
 
             for tx_idx, tx_w1 in enumerate(tx_entries):
+
+                if tx_idx == 0:
+                    self.N1 = 4
+                else:
+                    self.N1 = 2
+                self.num_beams = (self.O1 * self.N1) * (self.O2 * self.N2)
+
                 w1_vec = _flatten_w1_indices(tx_w1)
                 L = len(w1_vec) if len(w1_vec) > 0 else 1
                 sinr_vec = sinr_array[rx_idx] if rx_idx < len(sinr_array) else None
