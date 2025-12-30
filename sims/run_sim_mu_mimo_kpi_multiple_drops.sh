@@ -20,9 +20,7 @@ if [[ "${link_adapt}" == "True" ]]; then
     code_rates=("${code_rates[0]}")
 fi
 
-PARALLEL_JOBS=${PARALLEL_JOBS:-4}
-PARALLEL_EXTRA_OPTS=${PARALLEL_EXTRA_OPTS:-}
-
+PARALLEL_JOBS=${PARALLEL_JOBS:-6}
 
 generate_args() {
     # Loop through the arrays
@@ -66,7 +64,44 @@ generate_args() {
     done
 }
 
-generate_args | parallel -j "${PARALLEL_JOBS}" ${PARALLEL_EXTRA_OPTS} --colsep ' ' python sims/sim_mu_mimo_testing_updates.py {1} {2} {3} {4} {5} {6} {7} {8} {9} {10}
+mapfile -t scenario_args < <(generate_args)
+
+total_scenarios=${#scenario_args[@]}
+running_jobs=0
+completed_jobs=0
+scenario_counter=0
+
+run_scenario() {
+    local args=("$@")
+    python sims/sim_mu_mimo_testing_updates.py "${args[@]}"
+}
+
+for scenario in "${scenario_args[@]}"; do
+    # Throttle concurrency to PARALLEL_JOBS
+    while (( running_jobs >= PARALLEL_JOBS )); do
+        wait -n
+        ((completed_jobs++))
+        echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
+        ((running_jobs--))
+    done
+
+    ((scenario_counter++))
+    echo "Launching scenario ${scenario_counter}/${total_scenarios}" >&2
+
+    # shellcheck disable=SC2086
+    run_scenario ${scenario} &
+    ((running_jobs++))
+done
+
+# Wait for any remaining background jobs
+while (( running_jobs > 0 )); do
+    wait -n
+    ((completed_jobs++))
+    echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
+    ((running_jobs--))
+done
+
+echo "All ${completed_jobs}/${total_scenarios} scenarios completed" >&2
 
 # Reference table
 # Perfect CSI |  Prediction | Quantization | Meaning
