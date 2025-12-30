@@ -315,28 +315,25 @@ class RLBeamSelector:
                 normalized_w1 = self._canonical_action(tx_w1, L)
                 if normalized_w1 is None:
                     normalized_w1 = tuple(range(min(L, self.num_beams)))
-                
-                current_action_idx = self._register_action(rx_idx, tx_idx, normalized_w1, L)
 
                 prev_state = self.prev_states[rx_idx][tx_idx]
                 prev_action = self.prev_actions[rx_idx][tx_idx]
                 if prev_state is not None and prev_action is not None:
-                    target_w1 = self._decode_action(rx_idx, tx_idx, prev_action)
+                    target_w1_idx = self._register_action(rx_idx, tx_idx, normalized_w1, L)
                     if self.use_enumerated_actions:
                         match_bonus = int(
-                            target_w1 is not None
-                            and tuple(sorted(target_w1)) == tuple(sorted(normalized_w1))
+                            target_w1_idx is not None
+                            and target_w1_idx == self.prev_actions[rx_idx][tx_idx]
                         )
                     else:
-                        match_bonus = int(target_w1 is not None and target_w1 == normalized_w1)
-
+                        match_bonus = int(target_w1_idx is not None and target_w1_idx == normalized_w1)
 
                     if node_bler is not None and node_bler.size > rx_idx:
-                        bler_val = 1.0 - float(np.mean(node_bler[rx_idx]))
+                        bler_contrib = 1.0 - float(np.mean(node_bler[rx_idx]))
                     else:
-                        bler_val = 1.0
+                        bler_contrib = 1.0
 
-                    reward = bler_val + match_bonus
+                    reward = bler_contrib + match_bonus
 
                     agent.store_transition(prev_state, prev_action, reward, state)
                     agent.activate_target_net(state)
@@ -353,7 +350,7 @@ class RLBeamSelector:
                 rx_overrides.append(_tuple_to_list(predicted_w1) if predicted_w1 is not None else None)
 
                 self.prev_states[rx_idx][tx_idx] = state
-                self.prev_actions[rx_idx][tx_idx] = current_action_idx if current_action_idx is not None else predicted_idx
+                self.prev_actions[rx_idx][tx_idx] = predicted_idx
 
             overrides.append(rx_overrides)
 
