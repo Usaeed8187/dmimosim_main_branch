@@ -137,6 +137,7 @@ class RLBeamSelector:
         memory_size: int = 200,
         input_window_size: int = 3,
         output_window_size: int = 3,
+        use_enumerated_actions: bool = True,
     ):
         
         self.O2 = 1
@@ -147,6 +148,7 @@ class RLBeamSelector:
         self.memory_size = memory_size
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
+        self.use_enumerated_actions = use_enumerated_actions
 
         self.agents: List[List[Optional[DeepWESNQNetwork]]] = []
         self.action_maps: List[List[List[Tuple[int, ...]]]] = []
@@ -222,6 +224,21 @@ class RLBeamSelector:
         
         existing = self.action_maps[rx_idx][tx_idx]
 
+        if self.use_enumerated_actions:
+            if not existing or len(existing[0]) != L:
+                self.action_maps[rx_idx][tx_idx] = _enumerate_beam_sets(
+                    self.N1, self.O1, self.N2, self.O2, L
+                )
+                existing = self.action_maps[rx_idx][tx_idx]
+
+            sorted_beam = tuple(sorted(beam_tuple))
+            for idx, saved in enumerate(existing):
+                if sorted_beam == saved:
+                    return idx
+
+            return 0 if existing else None
+
+
         for idx, saved in enumerate(existing):
             if saved == beam_tuple:
                 return idx
@@ -242,8 +259,10 @@ class RLBeamSelector:
 
         return None
 
-    def _build_state(self, w1_vec: np.ndarray, sinr_vec: np.ndarray) -> np.ndarray:
-        return np.concatenate([w1_vec.astype(np.float32), sinr_vec.astype(np.float32)])
+    def _build_state(self, prev_action_idx: int, sinr_vec: np.ndarray) -> np.ndarray:
+        prev_action_arr = np.array([prev_action_idx], dtype=np.float32)
+        return np.concatenate([prev_action_arr, sinr_vec.astype(np.float32)])
+
 
     def prepare_next_actions(
         self,
@@ -284,7 +303,11 @@ class RLBeamSelector:
                 sinr_vec = sinr_array[rx_idx] if rx_idx < len(sinr_array) else None
                 sinr_vec = _ensure_1d_array(sinr_vec, max(L, 1))
 
-                state = self._build_state(_ensure_1d_array(w1_vec, L), sinr_vec)
+                prev_action_value = self.prev_actions[rx_idx][tx_idx]
+                state = self._build_state(
+                    int(prev_action_value) if prev_action_value is not None else 0, sinr_vec
+                )
+
                 self._maybe_init_agent(rx_idx, tx_idx, state.shape[0])
 
                 agent = self.agents[rx_idx][tx_idx]
@@ -300,7 +323,14 @@ class RLBeamSelector:
                 prev_action = self.prev_actions[rx_idx][tx_idx]
                 if prev_state is not None and prev_action is not None:
                     target_w1 = self._decode_action(rx_idx, tx_idx, prev_action)
-                    match_bonus = int(target_w1 is not None and target_w1 == normalized_w1)
+                    if self.use_enumerated_actions:
+                        match_bonus = int(
+                            target_w1 is not None
+                            and tuple(sorted(target_w1)) == tuple(sorted(normalized_w1))
+                        )
+                    else:
+                        match_bonus = int(target_w1 is not None and target_w1 == normalized_w1)
+
 
                     if node_bler is not None and node_bler.size > rx_idx:
                         bler_val = float(np.mean(node_bler[rx_idx]))
