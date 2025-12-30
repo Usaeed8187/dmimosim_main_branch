@@ -71,10 +71,15 @@ arguments = sys.argv[1:]
 print(f"Script Name: {script_name}")
 print(f"Arguments: {arguments}")
 
+mobility = 'high_mobility'
+drop_idx = '2'
+rx_ues_arr = [4]
+num_txue_sel = 10
+
 modulation_order = 4
 code_rate = 1 / 2
 link_adapt = True
-num_txue_sel = 10
+
 perfect_csi = False
 channel_prediction_setting = "weiner_filter" # "None", "two_mode", "weiner_filter", "deqn"
 csi_prediction = True
@@ -163,6 +168,7 @@ def parse_arguments():
 
 # Main function
 def run_simulation():
+    global mobility, drop_idx, rx_ues_arr
     parse_arguments()
 
     # Simulation settings
@@ -178,10 +184,7 @@ def run_simulation():
     cfg.use_perfect_csi_history_for_prediction = False
     cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"
     cfg.enable_ue_selection = False
-    cfg.scheduling = False
-    if arguments == []:
-        mobility = 'high_mobility'
-        drop_idx = '2'
+    cfg.scheduling = False       
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     # cfg.ns3_folder = "ns3/channels/LowMobility/"
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
@@ -200,9 +203,7 @@ def run_simulation():
         MCS_string = "mod_order_{}_code_rate_{}".format(modulation_order, code_rate)
 
     # Select Number of TxSquad and RxSquad UEs to use.
-    ns3cfg.num_txue_sel = num_txue_sel
-    if arguments == []:
-        rx_ues_arr = [4]
+    ns3cfg.num_txue_sel = num_txue_sel        
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)
