@@ -1,7 +1,7 @@
 backup
 data
 ns3/channels*
-results
+results/*
 .conda
 .idea
 .vscode
