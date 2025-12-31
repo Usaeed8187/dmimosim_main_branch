@@ -375,7 +375,13 @@ class RLBeamSelector:
                         "training_start_threshold",
                         getattr(agent, "training_batch_size", getattr(agent, "nForgetPoints", 1)),
                     )
-                    if episode_len >= int(min_samples):
+                    can_train = episode_len >= int(min_samples)
+
+                    # print(
+                    #     "Training status rx=%s tx=%s: episode_len=%s, min_samples=%s, learn_new=%s"
+                    #     % (rx_idx, tx_idx, episode_len, int(min_samples), can_train)
+                    # )
+                    if can_train:
                         agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
                 
                 agent.update_epsilon(episode_len, epsilon_total_steps)
