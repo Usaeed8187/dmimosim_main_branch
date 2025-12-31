@@ -72,8 +72,8 @@ arguments = sys.argv[1:]
 mobility = 'high_mobility'
 drop_idx = '1,2,3,4,5'
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
-rx_ues_arr = [4]
-num_txue_sel = 10
+rx_ues_arr = [0]
+num_txue_sel = 0
 
 modulation_order = 4
 code_rate = 1 / 2
