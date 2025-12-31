@@ -25,6 +25,7 @@ class DeepWESNQNetwork:
             nInternalUnits = 64,
             reward_decay=0.9,
             e_greedy=0.9,
+            min_epsilon=0.2,
             lr=0.01,
             random_seed=1,
             spectral_radius = 0.30
@@ -37,9 +38,12 @@ class DeepWESNQNetwork:
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
         self.batch_size = memory_size
-        self.epsilon = e_greedy
+        self.max_epsilon = e_greedy
+        self.min_epsilon = min_epsilon
+        self.epsilon = self.min_epsilon
         self.spectral_radius = spectral_radius
         self.nInternalUnits = nInternalUnits
+
         # total learning step
         self.learn_step_counter = 0
 
@@ -128,6 +132,31 @@ class DeepWESNQNetwork:
             action = self.rng.randint(0, self.n_actions)
             #action = 2 * np.random.randint(0, int(self.n_actions/2))
         return action
+
+    def update_epsilon(self, current_step: int, total_steps: int) -> float:
+        """Linearly anneal epsilon from ``min_epsilon`` to ``max_epsilon``.
+
+        Args:
+            current_step: The current episode or iteration index (0-based).
+            total_steps: Total number of steps to complete the annealing schedule.
+
+        Returns:
+            The updated epsilon value.
+        """
+
+        if total_steps <= 0:
+            self.epsilon = self.max_epsilon
+            return self.epsilon
+
+        clamped_step = max(0, min(current_step, total_steps))
+        epsilon_span = self.max_epsilon - self.min_epsilon
+        if epsilon_span <= 0:
+            self.epsilon = self.max_epsilon
+            return self.epsilon
+
+        progress = clamped_step / float(total_steps)
+        self.epsilon = min(self.max_epsilon, self.min_epsilon + epsilon_span * progress)
+        return self.epsilon
 
     def activate_target_net(self, observation_):
         # to have batch dimension when feed into tf placeholder
@@ -234,7 +263,8 @@ class DeepWESNQNetwork:
             "n_layers": self.n_layers,
             "nInternalUnits": self.nInternalUnits,
             "reward_decay": self.gamma,
-            "e_greedy": self.epsilon,
+            "e_greedy": self.max_epsilon,
+            "min_epsilon": self.min_epsilon,
             "lr": self.lr,
             "random_seed": None,
             "spectral_radius": self.spectral_radius,
@@ -245,6 +275,8 @@ class DeepWESNQNetwork:
             "eval_net": self.eval_net,
             "target_net": self.target_net,
             "epsilon": self.epsilon,
+            "max_epsilon": self.max_epsilon,
+            "min_epsilon": self.min_epsilon,
             "memory": self.memory,
             "memory_counter": getattr(self, "memory_counter", 0),
             "learn_step_counter": self.learn_step_counter,
@@ -272,6 +304,8 @@ class DeepWESNQNetwork:
         obj.eval_net = data.get("eval_net")
         obj.target_net = data.get("target_net")
         obj.epsilon = data.get("epsilon", obj.epsilon)
+        obj.max_epsilon = data.get("max_epsilon", getattr(obj, "max_epsilon", obj.epsilon))
+        obj.min_epsilon = data.get("min_epsilon", getattr(obj, "min_epsilon", 0.2))
         obj.memory = data.get("memory", obj.memory)
         obj.memory_counter = data.get("memory_counter", getattr(obj, "memory_counter", 0))
         obj.learn_step_counter = data.get("learn_step_counter", obj.learn_step_counter)

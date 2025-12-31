@@ -305,6 +305,8 @@ class RLBeamSelector:
 
         overrides: List[List[Optional[np.ndarray]]] = []
 
+        epsilon_total_steps = 24
+
         for rx_idx, raw_w1 in enumerate(w1_structures):
             rx_overrides: List[Optional[np.ndarray]] = []
             tx_entries = raw_w1 if isinstance(raw_w1, (list, tuple)) else [raw_w1]
@@ -345,6 +347,7 @@ class RLBeamSelector:
 
                 prev_state = self.prev_states[rx_idx][tx_idx]
                 prev_action = self.prev_actions[rx_idx][tx_idx]
+                episode_len = getattr(agent, "memory_counter", 0)
                 if prev_state is not None and prev_action is not None:
                     
                     if self.use_enumerated_actions:
@@ -370,6 +373,7 @@ class RLBeamSelector:
                     if episode_len >= agent.nForgetPoints:
                         agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
                 
+                agent.update_epsilon(episode_len, epsilon_total_steps)
                 predicted_idx = agent.choose_action(state)
                 predicted_w1 = self._decode_action(rx_idx, tx_idx, predicted_idx)
                 if predicted_w1 is None:
