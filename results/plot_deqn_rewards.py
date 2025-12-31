@@ -1,7 +1,7 @@
 """Plot DEQN reward trends across drops and agent pairs.
 
 This utility scans the results directory for files named
-``deqn_rewards_drop_<drop>.npz`` (produced by
+``deqn_rewards_drop_<drop>[_rx_UE_<rx>_tx_UE_<tx>].npz`` (produced by
 ``sims/sim_mu_mimo_deqn_chan_pred_training.py``) and generates a line plot
 showing the average reward per (rx, tx) agent pair for each drop.
 """
@@ -11,29 +11,57 @@ from __future__ import annotations
 import argparse
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
-from typing import DefaultDict, Dict, Iterable, List, Tuple
+from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 
-REWARD_PATTERN = re.compile(r"deqn_rewards_drop_(\d+)\.npz$")
+REWARD_PATTERN = re.compile(
+    r"deqn_rewards_drop_(\d+)(?:_rx_UE_(\d+)_tx_UE_(\d+))?\.npz$"
+)
 
 
-def _find_reward_files(root: Path) -> List[Path]:
-    """Return all DEQN reward files under ``root``."""
 
-    return sorted(root.rglob("deqn_rewards_drop_*.npz"))
+@dataclass(frozen=True)
+class RewardFile:
+    path: Path
+    drop_id: int
+    rx_ue: Optional[int]
+    tx_ue: Optional[int]
 
 
-def _extract_drop_id(path: Path) -> int:
-    """Extract the numeric drop identifier from a reward file name."""
+def _extract_metadata(path: Path) -> RewardFile:
+    """Extract drop/rx/tx identifiers from a reward file name."""
+
 
     match = REWARD_PATTERN.search(path.name)
     if not match:
-        raise ValueError(f"Cannot parse drop id from {path}")
-    return int(match.group(1))
+        raise ValueError(f"Cannot parse metadata from {path}")
+    drop_id = int(match.group(1))
+    rx_ue = int(match.group(2)) if match.group(2) else None
+    tx_ue = int(match.group(3)) if match.group(3) else None
+    return RewardFile(path=path, drop_id=drop_id, rx_ue=rx_ue, tx_ue=tx_ue)
+
+
+def _find_reward_files(root: Path, rx_ue: int | None, tx_ue: int | None) -> List[RewardFile]:
+    """Return all DEQN reward files under ``root`` matching the filters."""
+
+    files: List[RewardFile] = []
+    for path in sorted(root.rglob("deqn_rewards_drop_*.npz")):
+        info = _extract_metadata(path)
+
+        if rx_ue is not None and info.rx_ue != rx_ue:
+            continue
+        if tx_ue is not None and info.tx_ue != tx_ue:
+            continue
+
+        files.append(info)
+
+    return files
+
 
 
 def _load_rewards(path: Path) -> np.ndarray:
@@ -55,7 +83,9 @@ def _load_rewards(path: Path) -> np.ndarray:
     return rewards[:, :3]
 
 
-def _aggregate_rewards(files: Iterable[Path]) -> Tuple[Dict[Tuple[int, int], List[Tuple[int, float]]], List[int]]:
+def _aggregate_rewards(
+    files: Iterable[RewardFile],
+) -> Tuple[Dict[Tuple[int, int], List[Tuple[int, float]]], List[int]]:
     """Compute per-drop average rewards for each (rx, tx) pair.
 
     Returns:
@@ -66,9 +96,9 @@ def _aggregate_rewards(files: Iterable[Path]) -> Tuple[Dict[Tuple[int, int], Lis
     pair_rewards: DefaultDict[Tuple[int, int], List[Tuple[int, float]]] = defaultdict(list)
     drop_ids: List[int] = []
 
-    for file_path in files:
-        drop_id = _extract_drop_id(file_path)
-        rewards = _load_rewards(file_path)
+    for file_info in files:
+        drop_id = file_info.drop_id
+        rewards = _load_rewards(file_info.path)
 
         drop_ids.append(drop_id)
         pair_to_values: DefaultDict[Tuple[int, int], List[float]] = defaultdict(list)
@@ -130,16 +160,30 @@ def main() -> None:
         help="Path to save the generated plot image.",
     )
     parser.add_argument(
+        "--rx-ue",
+        type=int,
+        default=0,
+        help="If provided, only plot rewards saved for this RX UE selection.",
+    )
+    parser.add_argument(
+        "--tx-ue",
+        type=int,
+        default=0,
+        help="If provided, only plot rewards saved for this TX UE selection.",
+    )
+
+    parser.add_argument(
         "--show",
         action="store_true",
         help="Display the plot window after saving.",
     )
     args = parser.parse_args()
 
-    reward_files = _find_reward_files(args.root)
+    reward_files = _find_reward_files(args.root, args.rx_ue, args.tx_ue)
     if not reward_files:
         raise SystemExit(
-            f"No reward files found under {args.root}. Expected files named deqn_rewards_drop_<id>.npz."
+            f"No reward files found under {args.root} matching the provided filters. "
+            "Expected files named deqn_rewards_drop_<id>[_rx_UE_<rx>_tx_UE_<tx>].npz."
         )
 
     pair_rewards, drop_ids = _aggregate_rewards(reward_files)

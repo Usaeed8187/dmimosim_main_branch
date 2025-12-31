@@ -70,7 +70,7 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 mobility = 'high_mobility'
-drop_idx = '1,2,3,4,5'
+drop_idx = '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24'
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [0]
 num_txue_sel = 0
@@ -242,9 +242,12 @@ def run_simulation():
         snr_dB = []
         phase_1_ue_ber = []
 
+        last_rx_ue_sel = None
+
         for ue_arr_idx in range(np.size(rx_ues_arr)):
 
             ns3cfg.num_rxue_sel = rx_ues_arr[ue_arr_idx]
+            last_rx_ue_sel = ns3cfg.num_rxue_sel
 
             assert cfg.rank_adapt == False, "Current MU-MIMO code assumes fixed rank transmission (single stream per RX UE)."
 
@@ -298,17 +301,25 @@ def run_simulation():
                         ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])
         
         if shared_rl_selector is not None:
+            if last_rx_ue_sel is None:
+                raise RuntimeError("RX UE selection was not set before saving rewards.")
+
             rewards = np.array(shared_rl_selector.get_reward_log(), dtype=np.float32)
             rewards_path = os.path.join(
                 folder_path,
-                f"deqn_rewards_drop_{drop_idx}.npz",
+                f"deqn_rewards_drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}.npz",
             )
             np.savez(rewards_path, rewards=rewards)
             print(f"Saved DEQN rewards to {rewards_path}")
 
         if shared_rl_selector is not None:
+            if last_rx_ue_sel is None:
+                raise RuntimeError("RX UE selection was not set before saving models.")
             model_dir = os.path.join(
-                "results", "rl_models", mobility, f"drop_{drop_idx}"
+                "results",
+                "rl_models",
+                mobility,
+                f"drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}",
             )
             shared_rl_selector.save_all(model_dir)
             print(f"Saved DEQN models to {model_dir}")
