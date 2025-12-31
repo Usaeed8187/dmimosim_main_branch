@@ -1,4 +1,4 @@
-"""Plot DEQN reward trends across drops and agent pairs.
+"""Plot DEQN reward and throughput trends across drops and agent pairs.
 
 This utility scans the results directory for files named
 ``deqn_rewards_drop_<drop>[_rx_UE_<rx>_tx_UE_<tx>].npz`` (produced by
@@ -23,7 +23,9 @@ REWARD_PATTERN = re.compile(
     r"deqn_rewards_drop_(\d+)(?:_rx_UE_(\d+)_tx_UE_(\d+))?\.npz$"
 )
 
-
+THROUGHPUT_PATTERN = re.compile(
+    r"mu_mimo_results_.*_rx_UE_(\d+)_tx_UE_(\d+).*.npz$"
+)
 
 @dataclass(frozen=True)
 class RewardFile:
@@ -31,6 +33,13 @@ class RewardFile:
     drop_id: int
     rx_ue: Optional[int]
     tx_ue: Optional[int]
+
+@dataclass(frozen=True)
+class ThroughputFile:
+    path: Path
+    drop_id: int
+    rx_ue: int
+    tx_ue: int
 
 
 def _extract_metadata(path: Path) -> RewardFile:
@@ -44,6 +53,33 @@ def _extract_metadata(path: Path) -> RewardFile:
     rx_ue = int(match.group(2)) if match.group(2) else None
     tx_ue = int(match.group(3)) if match.group(3) else None
     return RewardFile(path=path, drop_id=drop_id, rx_ue=rx_ue, tx_ue=tx_ue)
+
+def _infer_drop_id_from_path(path: Path) -> int:
+    """Infer a drop identifier from a path component.
+
+    The simulation results are stored under directories whose names contain
+    ``drop_<id>``; this helper walks up the directory tree to find that id.
+    """
+
+    for part in path.parts:
+        match = re.search(r"drop[_-]?(\d+)", part)
+        if match:
+            return int(match.group(1))
+    raise ValueError(f"Could not infer drop id from {path}")
+
+
+def _extract_throughput_metadata(path: Path) -> ThroughputFile:
+    """Extract drop/rx/tx identifiers from a throughput result filename."""
+
+    match = THROUGHPUT_PATTERN.search(path.name)
+    if not match:
+        raise ValueError(f"Cannot parse throughput metadata from {path}")
+
+    rx_ue = int(match.group(1))
+    tx_ue = int(match.group(2))
+    drop_id = _infer_drop_id_from_path(path)
+    return ThroughputFile(path=path, drop_id=drop_id, rx_ue=rx_ue, tx_ue=tx_ue)
+
 
 
 def _find_reward_files(root: Path, rx_ue: int | None, tx_ue: int | None) -> List[RewardFile]:
@@ -62,6 +98,23 @@ def _find_reward_files(root: Path, rx_ue: int | None, tx_ue: int | None) -> List
 
     return files
 
+def _find_throughput_files(
+    root: Path, rx_ue: int | None, tx_ue: int | None
+) -> List[ThroughputFile]:
+    """Return all throughput result files under ``root`` matching the filters."""
+
+    files: List[ThroughputFile] = []
+    for path in sorted(root.rglob("mu_mimo_results_*_rx_UE_*_tx_UE_*.npz")):
+        info = _extract_throughput_metadata(path)
+
+        if rx_ue is not None and info.rx_ue != rx_ue:
+            continue
+        if tx_ue is not None and info.tx_ue != tx_ue:
+            continue
+
+        files.append(info)
+
+    return files
 
 
 def _load_rewards(path: Path) -> np.ndarray:
@@ -116,6 +169,44 @@ def _aggregate_rewards(
 
     return pair_rewards, drop_ids
 
+def _load_throughput(path: Path) -> float:
+    """Load and average throughput values from a simulation result file."""
+
+    data = np.load(path, allow_pickle=True)
+    if "throughput" not in data:
+        raise ValueError(f"Throughput array missing from {path}")
+
+    throughput = np.asarray(data["throughput"], dtype=float)
+    throughput = throughput.ravel()
+    if throughput.size == 0:
+        raise ValueError(f"Empty throughput array in {path}")
+
+    return float(np.nanmean(throughput))
+
+
+def _aggregate_throughput(
+    files: Iterable[ThroughputFile],
+) -> Tuple[Dict[Tuple[int, int], List[Tuple[int, float]]], List[int]]:
+    """Compute per-drop average throughput for each (rx, tx) pair."""
+
+    pair_throughput: DefaultDict[Tuple[int, int], List[Tuple[int, float]]] = defaultdict(list)
+    drop_ids: List[int] = []
+
+    for file_info in files:
+        drop_id = file_info.drop_id
+        throughput_value = _load_throughput(file_info.path)
+
+        pair_throughput[(file_info.rx_ue, file_info.tx_ue)].append(
+            (drop_id, throughput_value)
+        )
+        drop_ids.append(drop_id)
+
+    drop_ids = sorted(set(drop_ids))
+    for series in pair_throughput.values():
+        series.sort(key=lambda item: item[0])
+
+    return pair_throughput, drop_ids
+
 
 def plot_rewards(
     pair_rewards: Dict[Tuple[int, int], List[Tuple[int, float]]],
@@ -145,6 +236,34 @@ def plot_rewards(
     plt.savefig(output, dpi=200)
     print(f"Saved reward plot to {output}")
 
+def plot_throughput(
+    pair_throughput: Dict[Tuple[int, int], List[Tuple[int, float]]],
+    drop_ids: List[int],
+    output: Path,
+    show: bool = False,
+) -> None:
+    """Plot mean throughput per (rx, tx) pair across drops."""
+
+    if not pair_throughput:
+        raise RuntimeError("No throughput data found to plot.")
+
+    plt.figure(figsize=(10, 6))
+    for (rx_idx, tx_idx), series in sorted(pair_throughput.items()):
+        drops, values = zip(*series)
+        plt.plot(drops, values, marker="s", label=f"rx{rx_idx}-tx{tx_idx}")
+
+    plt.xlabel("Drop")
+    plt.ylabel("Average throughput")
+    plt.title("DEQN per-agent throughput across drops")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.xticks(drop_ids)
+    plt.legend()
+    plt.tight_layout()
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output, dpi=200)
+    print(f"Saved throughput plot to {output}")
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot DEQN reward logs across drops.")
     parser.add_argument(
@@ -159,6 +278,13 @@ def main() -> None:
         default=Path("results") / "deqn_rewards.png",
         help="Path to save the generated plot image.",
     )
+    parser.add_argument(
+        "--throughput-output",
+        type=Path,
+        default=Path("results") / "deqn_throughput.png",
+        help="Path to save the generated throughput plot image.",
+    )
+
     parser.add_argument(
         "--rx-ue",
         type=int,
@@ -189,6 +315,22 @@ def main() -> None:
     pair_rewards, drop_ids = _aggregate_rewards(reward_files)
     plot_rewards(pair_rewards, drop_ids, args.output, show=args.show)
 
+    throughput_files = _find_throughput_files(args.root, args.rx_ue, args.tx_ue)
+    if throughput_files:
+        pair_throughput, tp_drop_ids = _aggregate_throughput(throughput_files)
+        if tp_drop_ids and set(tp_drop_ids) != set(drop_ids):
+            print(
+                "Warning: Drop ids for throughput and reward plots differ; "
+                "plots will include all available data."
+            )
+        plot_throughput(
+            pair_throughput,
+            tp_drop_ids or drop_ids,
+            args.throughput_output,
+            show=args.show,
+        )
+    else:
+        print("No throughput files found; skipping throughput plot.")
 
 if __name__ == "__main__":
     main()
