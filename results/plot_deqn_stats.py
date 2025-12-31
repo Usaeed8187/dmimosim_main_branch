@@ -4,6 +4,12 @@ This utility scans the results directory for files named
 ``deqn_rewards_drop_<drop>[_rx_UE_<rx>_tx_UE_<tx>].npz`` (produced by
 ``sims/sim_mu_mimo_deqn_chan_pred_training.py``) and generates a line plot
 showing the average reward per (rx, tx) agent pair for each drop.
+
+Throughput is loaded from files named
+``mu_mimo_results_link_adapt_rx_UE_<rx>_tx_UE_<tx>_prediction_deqn_pmi_quantization_True.npz``
+that live directly inside per-drop folders explicitly supplied on the
+command line.
+
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ REWARD_PATTERN = re.compile(
 )
 
 THROUGHPUT_PATTERN = re.compile(
-    r"mu_mimo_results_.*_rx_UE_(\d+)_tx_UE_(\d+).*.npz$"
+    r"mu_mimo_results_link_adapt_rx_UE_(\d+)_tx_UE_(\d+)_prediction_deqn_pmi_quantization_True\.npz$"
 )
 
 @dataclass(frozen=True)
@@ -54,30 +60,10 @@ def _extract_metadata(path: Path) -> RewardFile:
     tx_ue = int(match.group(3)) if match.group(3) else None
     return RewardFile(path=path, drop_id=drop_id, rx_ue=rx_ue, tx_ue=tx_ue)
 
-def _infer_drop_id_from_path(path: Path) -> int:
-    """Infer a drop identifier from a path component.
-
-    The simulation results are stored under directories whose names contain
-    ``drop_<id>``; this helper walks up the directory tree to find that id.
-    """
-
-    # Prefer explicit ``drop_<id>`` markers first.
-    for part in path.parent.parts:
-        match = re.search(r"drop[_-]?(\d+)", part)
-        if match:
-            return int(match.group(1))
-        
-    # Fallback: some result folders encode the drop as a trailing integer,
-    # e.g. ``channels_high_mobility_1``. Use the suffix if present.
-    for part in path.parent.parts:
-        match = re.search(r".*_(\d+)$", part)
-        if match:
-            return int(match.group(1))
-    raise ValueError(f"Could not infer drop id from {path}")
 
 
-def _extract_throughput_metadata(path: Path) -> ThroughputFile:
-    """Extract drop/rx/tx identifiers from a throughput result filename."""
+def _extract_throughput_metadata(path: Path, drop_id: int) -> ThroughputFile:
+    """Extract rx/tx identifiers from a throughput result filename."""
 
     match = THROUGHPUT_PATTERN.search(path.name)
     if not match:
@@ -85,17 +71,24 @@ def _extract_throughput_metadata(path: Path) -> ThroughputFile:
 
     rx_ue = int(match.group(1))
     tx_ue = int(match.group(2))
-    drop_id = _infer_drop_id_from_path(path)
     return ThroughputFile(path=path, drop_id=drop_id, rx_ue=rx_ue, tx_ue=tx_ue)
 
 
 
-def _find_reward_files(root: Path, rx_ue: int | None, tx_ue: int | None) -> List[RewardFile]:
+def _find_reward_files(
+    root: Path, drops: Iterable[int], rx_ue: int | None, tx_ue: int | None
+) -> List[RewardFile]:
+
     """Return all DEQN reward files under ``root`` matching the filters."""
+
+    drop_set = set(int(drop) for drop in drops)
 
     files: List[RewardFile] = []
     for path in sorted(root.rglob("deqn_rewards_drop_*.npz")):
         info = _extract_metadata(path)
+
+        if drop_set and info.drop_id not in drop_set:
+            continue
 
         if rx_ue is not None and info.rx_ue != rx_ue:
             continue
@@ -107,18 +100,23 @@ def _find_reward_files(root: Path, rx_ue: int | None, tx_ue: int | None) -> List
     return files
 
 def _find_throughput_files(
-    root: Path, rx_ue: int | None, tx_ue: int | None
+    root: Path, drops: Iterable[int], rx_ue: int, tx_ue: int
 ) -> List[ThroughputFile]:
-    """Return all throughput result files under ``root`` matching the filters."""
+    """Return throughput result files under ``root`` for specified drops."""
 
     files: List[ThroughputFile] = []
-    for path in sorted(root.rglob("mu_mimo_results_*_rx_UE_*_tx_UE_*.npz")):
-        info = _extract_throughput_metadata(path)
+    for drop in drops:
+        drop_path = root / f"channels_high_mobility_{drop}"
+        file_path = drop_path / (
+            f"mu_mimo_results_link_adapt_rx_UE_{rx_ue}_tx_UE_{tx_ue}_prediction_"
+            "deqn_pmi_quantization_True.npz"
+        )
 
-        if rx_ue is not None and info.rx_ue != rx_ue:
+
+        if not file_path.exists():
+            print(f"Warning: Throughput file not found for drop {drop}: {file_path}")
             continue
-        if tx_ue is not None and info.tx_ue != tx_ue:
-            continue
+        info = _extract_throughput_metadata(file_path, drop_id=int(drop))
 
         files.append(info)
 
@@ -281,6 +279,14 @@ def main() -> None:
         help="Root directory to scan for deqn_rewards_drop_*.npz files.",
     )
     parser.add_argument(
+        "--drops",
+        type=int,
+        nargs="+",
+        default=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        help="List of drop identifiers to include in the plots.",
+    )
+
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("results") / "deqn_rewards.png",
@@ -297,13 +303,13 @@ def main() -> None:
         "--rx-ue",
         type=int,
         default=2,
-        help="If provided, only plot rewards saved for this RX UE selection.",
+        help="RX UE selection to load reward and throughput files for.",
     )
     parser.add_argument(
         "--tx-ue",
         type=int,
         default=2,
-        help="If provided, only plot rewards saved for this TX UE selection.",
+        help="TX UE selection to load reward and throughput files for.",
     )
 
     parser.add_argument(
@@ -313,7 +319,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    reward_files = _find_reward_files(args.root, args.rx_ue, args.tx_ue)
+    reward_files = _find_reward_files(args.root, args.drops, args.rx_ue, args.tx_ue)
+
     if not reward_files:
         raise SystemExit(
             f"No reward files found under {args.root} matching the provided filters. "
@@ -323,7 +330,7 @@ def main() -> None:
     pair_rewards, drop_ids = _aggregate_rewards(reward_files)
     plot_rewards(pair_rewards, drop_ids, args.output, show=args.show)
 
-    throughput_files = _find_throughput_files(args.root, args.rx_ue, args.tx_ue)
+    throughput_files = _find_throughput_files(args.root, args.drops, args.rx_ue, args.tx_ue)
     if throughput_files:
         pair_throughput, tp_drop_ids = _aggregate_throughput(throughput_files)
         if tp_drop_ids and set(tp_drop_ids) != set(drop_ids):
