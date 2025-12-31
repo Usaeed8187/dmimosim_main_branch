@@ -7,6 +7,7 @@ import sys
 import os
 import datetime
 import traceback
+import math
 import numpy as np
 from fractions import Fraction
 import matplotlib.pyplot as plt
@@ -206,6 +207,14 @@ def run_simulation():
         cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT", "SLNR" for quantized CSI feedback
         cfg.csi_quantization_on = csi_quantization_on
         cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
+
+        if shared_rl_selector is not None:
+            time_steps_per_drop = math.ceil(
+                (cfg.total_slots - cfg.start_slot_idx)
+                / (cfg.num_slots_p1 + cfg.num_slots_p2)
+            )
+            epsilon_total_steps = len(drop_list) * time_steps_per_drop
+            shared_rl_selector.set_epsilon_total_steps(epsilon_total_steps)
 
         if cfg.perfect_csi:
             cfg.csi_prediction = False

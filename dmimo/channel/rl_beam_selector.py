@@ -131,6 +131,7 @@ class RLBeamSelector:
         input_window_size: int = 3,
         output_window_size: int = 3,
         use_enumerated_actions: bool = True,
+        epsilon_total_steps: Optional[int] = None,
     ):
         
         self.O2 = 1
@@ -142,6 +143,7 @@ class RLBeamSelector:
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
         self.use_enumerated_actions = use_enumerated_actions
+        self.epsilon_total_steps = epsilon_total_steps
 
         self.agents: List[List[Optional[DeepWESNQNetwork]]] = []
         self.action_maps: List[List[List[Tuple[int, ...]]]] = []
@@ -149,6 +151,11 @@ class RLBeamSelector:
         self.prev_actions: List[List[Optional[int]]] = []
         self.state_dims: List[List[Optional[int]]] = []
         self.reward_log: List[Tuple[int, int, float]] = []
+
+    def set_epsilon_total_steps(self, total_steps: Optional[int]) -> None:
+        """Update the epsilon decay horizon for all agents."""
+
+        self.epsilon_total_steps = total_steps
 
     def reset_episode(self):
         """Clear per-episode state without discarding learned experience."""
@@ -305,8 +312,6 @@ class RLBeamSelector:
 
         overrides: List[List[Optional[np.ndarray]]] = []
 
-        epsilon_total_steps = 24
-
         for rx_idx, raw_w1 in enumerate(w1_structures):
             rx_overrides: List[Optional[np.ndarray]] = []
             tx_entries = raw_w1 if isinstance(raw_w1, (list, tuple)) else [raw_w1]
@@ -384,6 +389,10 @@ class RLBeamSelector:
                     if can_train:
                         agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
                 
+                epsilon_total_steps = (
+                    self.epsilon_total_steps if self.epsilon_total_steps is not None else 400
+                )
+
                 agent.update_epsilon(episode_len, epsilon_total_steps)
                 predicted_idx = agent.choose_action(state)
                 predicted_w1 = self._decode_action(rx_idx, tx_idx, predicted_idx)
