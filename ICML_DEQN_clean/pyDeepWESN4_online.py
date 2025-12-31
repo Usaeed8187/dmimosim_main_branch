@@ -1,6 +1,9 @@
 import numpy as np
 import copy
 
+def identity(x):
+    """Identity activation function used as a safe default for pickling."""
+    return x
 
 def correct_dimensions(s, targetlength):
     """checks the dimensionality of some numeric argument s, broadcasts it
@@ -33,7 +36,7 @@ class WESN():
                  spectral_radius=0.95, sparsity=0, noise=0.001, lr=0.01,
                  input_shift=None, input_scaling=None,
                  teacher_scaling=None, teacher_shift=None, random_seed=1,
-                 out_activation=lambda x: x, inverse_out_activation=lambda x: x,
+                 out_activation=identity, inverse_out_activation=identity,
                  random_state=10):
         """
         Args:
