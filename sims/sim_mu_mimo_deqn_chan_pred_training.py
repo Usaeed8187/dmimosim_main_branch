@@ -70,7 +70,7 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 mobility = 'high_mobility'
-drop_idx = '1,2,3'
+drop_idx = '1,2,3,4,5'
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [4]
 num_txue_sel = 10
