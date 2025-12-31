@@ -220,6 +220,9 @@ def run_simulation():
         folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
         os.makedirs(os.path.join("results", folder_name), exist_ok=True)
 
+        folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
+        os.makedirs(folder_path, exist_ok=True)
+
         #############################################
         # Testing
         #############################################
@@ -273,9 +276,6 @@ def run_simulation():
             if rst_zf[12] is not None:
                 snr_dB.append(rst_zf[12])
 
-            folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
-            os.makedirs(folder_path, exist_ok=True)
-
             if cfg.csi_prediction:
 
                 if cfg.scheduling:
@@ -296,7 +296,16 @@ def run_simulation():
                         cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate,
                         nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7],
                         ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])
-                
+        
+        if shared_rl_selector is not None:
+            rewards = np.array(shared_rl_selector.get_reward_log(), dtype=np.float32)
+            rewards_path = os.path.join(
+                folder_path,
+                f"deqn_rewards_drop_{drop_idx}.npz",
+            )
+            np.savez(rewards_path, rewards=rewards)
+            print(f"Saved DEQN rewards to {rewards_path}")
+
         if shared_rl_selector is not None:
             model_dir = os.path.join(
                 "results", "rl_models", mobility, f"drop_{drop_idx}"

@@ -148,6 +148,7 @@ class RLBeamSelector:
         self.prev_states: List[List[Optional[np.ndarray]]] = []
         self.prev_actions: List[List[Optional[int]]] = []
         self.state_dims: List[List[Optional[int]]] = []
+        self.reward_log: List[Tuple[int, int, float]] = []
 
     def reset_episode(self):
         """Clear per-episode state without discarding learned experience."""
@@ -156,6 +157,24 @@ class RLBeamSelector:
             for tx_idx in range(len(self.prev_states[rx_idx])):
                 self.prev_states[rx_idx][tx_idx] = None
                 self.prev_actions[rx_idx][tx_idx] = None
+        
+        self.reward_log.clear()
+
+    def log_reward(self, rx_idx: int, tx_idx: int, reward: float) -> None:
+        """Record a reward emitted by the DEQN agent.
+
+        Args:
+            rx_idx: Receiver index associated with the reward.
+            tx_idx: Transmitter index associated with the reward.
+            reward: Reward value produced for the state/action pair.
+        """
+
+        self.reward_log.append((rx_idx, tx_idx, float(reward)))
+
+    def get_reward_log(self) -> List[Tuple[int, int, float]]:
+        """Return a copy of the reward log accumulated so far."""
+
+        return list(self.reward_log)
 
     def _ensure_pair_capacity(self, rx_idx: int, tx_idx: int):
         while len(self.agents) <= rx_idx:
@@ -344,6 +363,7 @@ class RLBeamSelector:
                     reward = bler_contrib + match_bonus
 
                     agent.store_transition(prev_state, prev_action, reward, state)
+                    self.log_reward(rx_idx, tx_idx, reward)
                     agent.activate_target_net(state)
 
                     episode_len = getattr(agent, "memory_counter", 0)
