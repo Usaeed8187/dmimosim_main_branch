@@ -28,7 +28,9 @@ class DeepWESNQNetwork:
             min_epsilon=0.2,
             lr=0.01,
             random_seed=1,
-            spectral_radius = 0.30
+            spectral_radius = 0.30,
+            training_batch_size = 40,
+            training_start_threshold=None
     ):
         self.n_actions = n_actions
         self.n_features = n_features
@@ -37,18 +39,28 @@ class DeepWESNQNetwork:
         self.memory_size = memory_size
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
-        self.batch_size = memory_size
         self.max_epsilon = e_greedy
         self.min_epsilon = min_epsilon
         self.epsilon = self.min_epsilon
         self.spectral_radius = spectral_radius
         self.nInternalUnits = nInternalUnits
+        self.training_batch_size = training_batch_size
+        self.training_iteration = 100
+        self.replace_target_iter = 25
+        self.training_start_threshold = (
+            training_start_threshold
+            if training_start_threshold is not None
+            else self.training_batch_size
+        )
 
         # total learning step
         self.learn_step_counter = 0
 
         # initialize learning rate
         self.lr = lr
+
+        # Batch size used by legacy code paths
+        self.batch_size = memory_size
 
         # initialize zero memory [s, a, r, s_]
         self.memory = np.zeros((self.memory_size, n_features * 2 + 2))
@@ -57,10 +69,6 @@ class DeepWESNQNetwork:
         self._build_net(random_seed)
 
         self.cost_his = []
-
-        self.training_batch_size = 40
-        self.training_iteration = 100
-        self.replace_target_iter = 25
 
         self.rng = np.random.RandomState(random_seed) # Line added by Ramin. Random number generator.
 
@@ -78,7 +86,7 @@ class DeepWESNQNetwork:
         #inputShift = 0 * np.ones(self.n_features)
         teacherScaling = 1 * np.ones(self.n_actions)
         teacherShift = 0 * np.ones(self.n_actions)
-        self.nForgetPoints = 1  # 50
+        self.nForgetPoints = max(1, int(self.training_start_threshold))  # 50
 
         # ------------------ build evaluate_net ------------------
         self.eval_net = WESN(n_inputs=self.n_features, n_outputs=self.n_actions, n_reservoir=nInternalUnits,
@@ -285,6 +293,8 @@ class DeepWESNQNetwork:
             "training_batch_size": self.training_batch_size,
             "training_iteration": self.training_iteration,
             "replace_target_iter": self.replace_target_iter,
+            "training_start_threshold": self.training_start_threshold,
+            "nForgetPoints": self.nForgetPoints,
         }
 
         with open(path, "wb") as f:
@@ -313,6 +323,10 @@ class DeepWESNQNetwork:
         obj.training_batch_size = data.get("training_batch_size", obj.training_batch_size)
         obj.training_iteration = data.get("training_iteration", obj.training_iteration)
         obj.replace_target_iter = data.get("replace_target_iter", obj.replace_target_iter)
+        obj.training_start_threshold = data.get(
+            "training_start_threshold", getattr(obj, "training_start_threshold", obj.training_batch_size)
+        )
+        obj.nForgetPoints = data.get("nForgetPoints", max(1, obj.training_start_threshold))
 
         rng_state = data.get("rng_state")
         if rng_state is not None:

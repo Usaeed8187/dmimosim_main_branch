@@ -370,7 +370,12 @@ class RLBeamSelector:
                     agent.activate_target_net(state)
 
                     episode_len = getattr(agent, "memory_counter", 0)
-                    if episode_len >= agent.nForgetPoints:
+                    min_samples = getattr(
+                        agent,
+                        "training_start_threshold",
+                        getattr(agent, "training_batch_size", getattr(agent, "nForgetPoints", 1)),
+                    )
+                    if episode_len >= int(min_samples):
                         agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
                 
                 agent.update_epsilon(episode_len, epsilon_total_steps)
