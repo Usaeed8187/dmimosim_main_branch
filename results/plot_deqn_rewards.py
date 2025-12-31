@@ -61,8 +61,16 @@ def _infer_drop_id_from_path(path: Path) -> int:
     ``drop_<id>``; this helper walks up the directory tree to find that id.
     """
 
-    for part in path.parts:
+    # Prefer explicit ``drop_<id>`` markers first.
+    for part in path.parent.parts:
         match = re.search(r"drop[_-]?(\d+)", part)
+        if match:
+            return int(match.group(1))
+        
+    # Fallback: some result folders encode the drop as a trailing integer,
+    # e.g. ``channels_high_mobility_1``. Use the suffix if present.
+    for part in path.parent.parts:
+        match = re.search(r".*_(\d+)$", part)
         if match:
             return int(match.group(1))
     raise ValueError(f"Could not infer drop id from {path}")
@@ -288,13 +296,13 @@ def main() -> None:
     parser.add_argument(
         "--rx-ue",
         type=int,
-        default=0,
+        default=2,
         help="If provided, only plot rewards saved for this RX UE selection.",
     )
     parser.add_argument(
         "--tx-ue",
         type=int,
-        default=0,
+        default=2,
         help="If provided, only plot rewards saved for this TX UE selection.",
     )
 
