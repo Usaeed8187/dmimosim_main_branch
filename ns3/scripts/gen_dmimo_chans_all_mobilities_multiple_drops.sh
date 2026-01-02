@@ -1,17 +1,17 @@
 #!/bin/bash
 
-curr_drop_idx=1
-num_drops=20
+curr_drop_idx=24
+num_drops=76
 num_subframes=100
-initial_seed=3007
+initial_seed=3031
 txsquad_ues=10
 rxsquad_ues=10
 
 squad1_direction=0.0
 squad2_direction=0.0
 
-squad1_speed_km_h=40.0
-squad2_speed_km_h=40.0
+squad1_speed_km_h=10.0
+squad2_speed_km_h=10.0
 
 # float math (10% of squad speed)
 intra_sq1_rw_speed_km_h=$(awk "BEGIN{print ${squad1_speed_km_h}/10}")
@@ -31,7 +31,7 @@ main_py_path="$ns3_project_dir/main.py"
 ns3_channel_dir_start="V2V-Urban_1narrow_NoExternalNodes_"
 dMIMO_project_dir="$HOME/dMIMO/dmimosim_main/"
 convert_ns3_channels_path="$dMIMO_project_dir/ns3/convert_ns3_channels.py"
-channel_saving_dir="$HOME/dMIMO/minor_revision_channels/"
+channel_saving_dir="$HOME/dMIMO/chan_pred_channels"
 
 # Build the directory suffix dynamically (must match main.py’s run_postfix order/format)
 # Layout matches:
@@ -52,6 +52,7 @@ for ((i=0; i<num_drops; i++)); do
     echo "Running iteration $((i+1)) with seed $seed"
 
     # High mobility run (your custom speeds/directions)
+    env LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}" \
     python "$main_py_path" \
         --seed "$seed" \
         --scenario V2V-Urban \
