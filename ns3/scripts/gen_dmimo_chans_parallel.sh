@@ -2,23 +2,23 @@
 set -euo pipefail
 
 # ======== Config ========
-curr_drop_idx=1
-num_drops=5
-num_subframes=200
-initial_seed=3007
+curr_drop_idx=40
+num_drops=61
+num_subframes=100
+initial_seed=3047
 txsquad_ues=10
 rxsquad_ues=10
 
 squad1_direction=0.0
 squad2_direction=0.0
 
-squad1_speed_km_h=20.0
-squad2_speed_km_h=20.0
+squad1_speed_km_h=10.0
+squad2_speed_km_h=10.0
 
 # Radii (meters) and inter-squad distance (meters)
-squad1_radius=10.0
-squad2_radius=10.0
-inter_squad_distance=100.0
+squad1_radius=100.0
+squad2_radius=100.0
+inter_squad_distance=1000.0
 
 # Float math (10% of squad speed)
 intra_sq1_rw_speed_km_h=$(awk "BEGIN{print ${squad1_speed_km_h}/10}")
@@ -30,7 +30,8 @@ main_py_path="$ns3_project_dir/main.py"
 ns3_channel_dir_start="V2V-Urban_1narrow_NoExternalNodes_"
 dMIMO_project_dir="$HOME/dMIMO/dmimosim_main"
 convert_ns3_channels_path="$dMIMO_project_dir/ns3/convert_ns3_channels.py"
-channel_saving_dir="$HOME/dMIMO/chan_pred_channels"
+# channel_saving_dir="$HOME/dMIMO/chan_pred_channels"
+channel_saving_dir="/run/media/wireless/Extreme SSD/chan_pred_channels"
 
 # Find GNU parallel (user-local install ok)
 PARALLEL_BIN="${PARALLEL_BIN:-$(command -v parallel || true)}"
@@ -94,7 +95,7 @@ printf "%s\n" "${pairs[@]}" \
     drop_idx={2}
 
     echo "[seed=$seed drop=$drop_idx] Starting…"
-
+    env LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}" \
     python "$main_py_path" \
       --seed "$seed" \
       --scenario V2V-Urban \
