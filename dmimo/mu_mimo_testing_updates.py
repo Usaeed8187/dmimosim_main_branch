@@ -500,7 +500,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                             rbs_per_subband=4,
                                                             snrdb=rx_snr_db)
             w1_override = getattr(cfg, "rl_w1_override", None)
-            h_freq_csi, PMI_feedback_bits = type_II_PMI_quantizer(
+            h_freq_csi, _ = type_II_PMI_quantizer(
                 h_freq_csi,
                 return_feedback_bits=True,
                 w1_beam_indices_override=w1_override,
