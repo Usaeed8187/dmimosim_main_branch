@@ -674,6 +674,7 @@ def sim_mu_mimo_all(
                 additional_KPIs[6],
                 additional_KPIs[4],
                 additional_KPIs[7],
+                cfg.modulation_order,
             )
 
 

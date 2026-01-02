@@ -295,6 +295,7 @@ class RLBeamSelector:
         pmi_feedback_bits,
         sinr_dB,
         node_wise_bler,
+        modulation_order: Optional[float] = None,
     ) -> Optional[List[List[Optional[np.ndarray]]]]:
         """Update all agents with the newest feedback and return predicted beams per Rx–Tx pair."""
 
@@ -368,7 +369,8 @@ class RLBeamSelector:
                     else:
                         bler_contrib = 1.0
 
-                    reward = bler_contrib + match_bonus
+                    modulation_scale = float(modulation_order) if modulation_order is not None else 1.0
+                    reward = (bler_contrib + match_bonus) * modulation_scale
 
                     agent.store_transition(prev_state, prev_action, reward, state)
                     self.log_reward(rx_idx, tx_idx, reward)
