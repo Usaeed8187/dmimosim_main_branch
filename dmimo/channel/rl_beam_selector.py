@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional, Tuple
 import itertools
 import pickle
 
@@ -132,12 +132,6 @@ class RLBeamSelector:
         output_window_size: int = 3,
         use_enumerated_actions: bool = True,
         epsilon_total_steps: Optional[int] = None,
-        imitation_steps: int = 0,
-        imitation_action_provider: Optional[
-            Callable[[int, int, Tuple[int, ...], np.ndarray], Optional[Tuple[int, ...]]]
-        ] = None,
-        imitation_reward_scale: float = 1.0,
-        freeze_epsilon_during_imitation: bool = True,
     ):
         
         self.O2 = 1
@@ -150,16 +144,11 @@ class RLBeamSelector:
         self.output_window_size = output_window_size
         self.use_enumerated_actions = use_enumerated_actions
         self.epsilon_total_steps = epsilon_total_steps
-        self.imitation_steps_remaining = max(0, int(imitation_steps))
-        self.imitation_action_provider = imitation_action_provider
-        self.imitation_reward_scale = float(imitation_reward_scale)
-        self.freeze_epsilon_during_imitation = bool(freeze_epsilon_during_imitation)
 
         self.agents: List[List[Optional[DeepWESNQNetwork]]] = []
         self.action_maps: List[List[List[Tuple[int, ...]]]] = []
         self.prev_states: List[List[Optional[np.ndarray]]] = []
         self.prev_actions: List[List[Optional[int]]] = []
-        self.prev_action_sources: List[List[Optional[str]]] = []
         self.state_dims: List[List[Optional[int]]] = []
         self.reward_log: List[Tuple[int, int, float]] = []
 
@@ -168,32 +157,6 @@ class RLBeamSelector:
 
         self.epsilon_total_steps = total_steps
 
-    def configure_imitation_warmup(
-        self,
-        steps: int,
-        action_provider: Callable[[int, int, Tuple[int, ...], np.ndarray], Optional[Tuple[int, ...]]],
-        reward_scale: float = 1.0,
-        freeze_epsilon: bool = True,
-    ) -> None:
-        """Enable an imitation-learning warmup period with externally supplied actions.
-
-        Args:
-            steps: Number of calls to :meth:`prepare_next_actions` that should use the
-                imitation policy before falling back to learned actions.
-            action_provider: Callable returning a beam tuple for ``(rx_idx, tx_idx)``
-                given the canonicalized ``w1`` tuple and SINR vector.
-            reward_scale: Multiplier applied to rewards collected from imitation-driven
-                transitions.
-            freeze_epsilon: Whether to pause epsilon annealing while imitation actions
-                are being injected.
-        """
-
-        self.imitation_steps_remaining = max(0, int(steps))
-        self.imitation_action_provider = action_provider
-        self.imitation_reward_scale = float(reward_scale)
-        self.freeze_epsilon_during_imitation = bool(freeze_epsilon)
-
-
     def reset_episode(self):
         """Clear per-episode state without discarding learned experience."""
 
@@ -201,7 +164,6 @@ class RLBeamSelector:
             for tx_idx in range(len(self.prev_states[rx_idx])):
                 self.prev_states[rx_idx][tx_idx] = None
                 self.prev_actions[rx_idx][tx_idx] = None
-                self.prev_action_sources[rx_idx][tx_idx] = None
         
         self.reward_log.clear()
 
@@ -227,7 +189,6 @@ class RLBeamSelector:
             self.action_maps.append([])
             self.prev_states.append([])
             self.prev_actions.append([])
-            self.prev_action_sources.append([])
             self.state_dims.append([])
 
         while len(self.agents[rx_idx]) <= tx_idx:
@@ -235,7 +196,6 @@ class RLBeamSelector:
             self.action_maps[rx_idx].append([])
             self.prev_states[rx_idx].append(None)
             self.prev_actions[rx_idx].append(None)
-            self.prev_action_sources[rx_idx].append(None)
             self.state_dims[rx_idx].append(None)
 
     def _maybe_init_agent(self, rx_idx: int, tx_idx: int, state_dim: int):
@@ -352,9 +312,6 @@ class RLBeamSelector:
         node_bler = np.asarray(node_wise_bler) if node_wise_bler is not None else None
 
         overrides: List[List[Optional[np.ndarray]]] = []
-        use_imitation_round = (
-            self.imitation_steps_remaining > 0 and self.imitation_action_provider is not None
-        )
 
         for rx_idx, raw_w1 in enumerate(w1_structures):
             rx_overrides: List[Optional[np.ndarray]] = []
@@ -396,7 +353,6 @@ class RLBeamSelector:
 
                 prev_state = self.prev_states[rx_idx][tx_idx]
                 prev_action = self.prev_actions[rx_idx][tx_idx]
-                prev_source = self.prev_action_sources[rx_idx][tx_idx]
                 episode_len = getattr(agent, "memory_counter", 0)
                 if prev_state is not None and prev_action is not None:
                     
@@ -415,9 +371,6 @@ class RLBeamSelector:
 
                     modulation_scale = float(modulation_order) if modulation_order is not None else 1.0
                     reward = (bler_contrib + match_bonus) * modulation_scale
-
-                    if prev_source == "imitation":
-                        reward *= self.imitation_reward_scale
 
                     agent.store_transition(prev_state, prev_action, reward, state)
                     self.log_reward(rx_idx, tx_idx, reward)
@@ -438,51 +391,22 @@ class RLBeamSelector:
                     if can_train:
                         agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
                 
-                imitation_idx = None
-                if use_imitation_round:
-                    imitation_beams = self.imitation_action_provider(
-                        rx_idx, tx_idx, normalized_w1, sinr_vec
-                    )
-                    if imitation_beams is not None:
-                        imitation_beams = self._canonical_action(imitation_beams, L)
-                        imitation_idx = self._register_action(
-                            rx_idx, tx_idx, imitation_beams if imitation_beams is not None else normalized_w1, L
-                        )
                 epsilon_total_steps = (
                     self.epsilon_total_steps if self.epsilon_total_steps is not None else 400
                 )
 
-                if not (
-                    use_imitation_round
-                    and self.freeze_epsilon_during_imitation
-                    and imitation_idx is not None
-                ):
-                    agent.update_epsilon(episode_len, epsilon_total_steps)
-
-                predicted_idx = imitation_idx
-                predicted_w1 = None
-                if predicted_idx is None:
-                    predicted_idx = agent.choose_action(state)
-                    predicted_w1 = self._decode_action(rx_idx, tx_idx, predicted_idx)
+                agent.update_epsilon(episode_len, epsilon_total_steps)
+                predicted_idx = agent.choose_action(state)
+                predicted_w1 = self._decode_action(rx_idx, tx_idx, predicted_idx)
                 if predicted_w1 is None:
-                    predicted_w1 = (
-                        self._decode_action(rx_idx, tx_idx, imitation_idx)
-                        if imitation_idx is not None
-                        else normalized_w1
-                    )
+                    predicted_w1 = normalized_w1
 
                 rx_overrides.append(_tuple_to_list(predicted_w1) if predicted_w1 is not None else None)
 
                 self.prev_states[rx_idx][tx_idx] = state
                 self.prev_actions[rx_idx][tx_idx] = predicted_idx
-                self.prev_action_sources[rx_idx][tx_idx] = (
-                    "imitation" if imitation_idx is not None else "policy"
-                )
 
             overrides.append(rx_overrides)
-        
-        if use_imitation_round:
-            self.imitation_steps_remaining = max(0, self.imitation_steps_remaining - 1)
 
         return overrides
 
@@ -510,7 +434,6 @@ class RLBeamSelector:
             "state_dims": self.state_dims,
             "prev_states": self.prev_states,
             "prev_actions": self.prev_actions,
-            "prev_action_sources": self.prev_action_sources,
             "num_beams": self.num_beams,
             "N1": self.N1,
             "N2": self.N2,
@@ -521,9 +444,6 @@ class RLBeamSelector:
             "input_window_size": self.input_window_size,
             "output_window_size": self.output_window_size,
             "use_enumerated_actions": self.use_enumerated_actions,
-            "imitation_steps_remaining": self.imitation_steps_remaining,
-            "imitation_reward_scale": self.imitation_reward_scale,
-            "freeze_epsilon_during_imitation": self.freeze_epsilon_during_imitation,
             "agent_files": agent_files,
         }
 
@@ -545,7 +465,6 @@ class RLBeamSelector:
         self.state_dims = metadata.get("state_dims", [])
         self.prev_states = metadata.get("prev_states", [])
         self.prev_actions = metadata.get("prev_actions", [])
-        self.prev_action_sources = metadata.get("prev_action_sources", [])
         self.num_beams = metadata.get("num_beams", self.num_beams)
         self.N1 = metadata.get("N1", self.N1)
         self.N2 = metadata.get("N2", self.N2)
@@ -556,11 +475,6 @@ class RLBeamSelector:
         self.input_window_size = metadata.get("input_window_size", self.input_window_size)
         self.output_window_size = metadata.get("output_window_size", self.output_window_size)
         self.use_enumerated_actions = metadata.get("use_enumerated_actions", self.use_enumerated_actions)
-        self.imitation_steps_remaining = metadata.get("imitation_steps_remaining", 0)
-        self.imitation_reward_scale = metadata.get("imitation_reward_scale", 1.0)
-        self.freeze_epsilon_during_imitation = metadata.get(
-            "freeze_epsilon_during_imitation", self.freeze_epsilon_during_imitation
-        )
 
         agent_files: List[List[Optional[str]]] = metadata.get("agent_files", [])
         self.agents = []
