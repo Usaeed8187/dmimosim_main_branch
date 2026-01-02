@@ -338,7 +338,7 @@ class quantized_CSI_feedback(Layer):
             if return_feedback_bits:
                 PMI_feedback_report = (h_est_quant, feedback_bits)
             else:
-                PMI_feedback_report = h_est_quant
+                PMI_feedback_report = (h_est_quant, None)
             
 
         elif self.method == '5G' and self.architecture == 'dMIMO_phase1':

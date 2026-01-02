@@ -86,6 +86,8 @@ channel_prediction_setting = "deqn" # "None", "two_mode", "weiner_filter", "deqn
 csi_prediction = True
 channel_prediction_method = "deqn" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
+imitation_method = "none"
+imitation_drop_count = 0
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -114,6 +116,7 @@ def parse_arguments():
     global perfect_csi, channel_prediction_setting
     global csi_prediction, channel_prediction_method
     global csi_quantization_on, link_adapt
+    global imitation_method, imitation_drop_count
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -141,6 +144,12 @@ def parse_arguments():
 
         if len(arguments) >= 10:
             link_adapt = _parse_bool(arguments[9])
+
+        if len(arguments) >= 11:
+            imitation_method = str(arguments[10]).lower()
+
+        if len(arguments) >= 12:
+            imitation_drop_count = int(arguments[11])
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -208,6 +217,7 @@ def run_simulation():
         cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT", "SLNR" for quantized CSI feedback
         cfg.csi_quantization_on = csi_quantization_on
         cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
+        cfg.imitation_method = imitation_method
 
         if shared_rl_selector is not None:
             time_steps_per_drop = math.ceil(

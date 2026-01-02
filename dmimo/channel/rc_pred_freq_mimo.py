@@ -8,14 +8,15 @@ from dmimo.channel import lmmse_channel_estimation
 
 class standard_rc_pred_freq_mimo:
 
-    def __init__(self, architecture, num_rx_ant=8, ns3cfg=None):
+    def __init__(self, architecture, num_rx_ant=8, rc_config=None, ns3cfg=None):
         
         if ns3cfg is None:
             ns3_config = Ns3Config()
         else:
             ns3_config = ns3cfg
         self.ns3_config = ns3_config
-        rc_config = RCConfig()
+        if rc_config is None:
+            rc_config = RCConfig()
 
         self.nfft = 512  # TODO: remove hardcoded param value
         self.num_rx_ant = num_rx_ant  # TODO: use node selection mask

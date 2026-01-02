@@ -397,8 +397,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                                      batch_size=cfg.num_slots_p2)
     elif cfg.csi_prediction is True:
         rc_predictor = getattr(cfg, "rc_predictor", None)
+
+        if cfg.channel_prediction_method == "deqn":
+            rc_config.history_len = 2
+
         if rc_predictor is None:
-            rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, ns3cfg)
+            rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, rc_config, ns3cfg)
             cfg.rc_predictor = rc_predictor
         if cfg.first_slot_idx == cfg.start_slot_idx:
             rc_predictor.reset_csi_history()
@@ -410,17 +414,27 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             h_freq_csi_history = rc_predictor.get_ideal_csi_history(cfg.first_slot_idx, cfg.csi_delay,
                                                           dmimo_chans)
         else:
-            h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
-                                                            rg_csi, dmimo_chans, 
-                                                            cfo_vals=cfg.random_cfo_vals,
-                                                            sto_vals=cfg.random_sto_vals,
-                                                            estimated_channels_dir=cfg.estimated_channels_dir)
+            if cfg.channel_prediction_method == "deqn":
+                h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx + cfg.num_slots_p1 + cfg.num_slots_p2, cfg.csi_delay,
+                                                                rg_csi, dmimo_chans, 
+                                                                cfo_vals=cfg.random_cfo_vals,
+                                                                sto_vals=cfg.random_sto_vals,
+                                                                estimated_channels_dir=cfg.estimated_channels_dir)
+                h_freq_csi = h_freq_csi_history[0, ...] # h_freq_csi_t0
+                h_freq_csi_t1 = h_freq_csi_history[1, ...]
+            else:
+                h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
+                                                                rg_csi, dmimo_chans, 
+                                                                cfo_vals=cfg.random_cfo_vals,
+                                                                sto_vals=cfg.random_sto_vals,
+                                                                estimated_channels_dir=cfg.estimated_channels_dir)
+                
         end_time = time.time()
         # print("Total time for channel history gathering: ", end_time - start_time)
         
-        if "two_mode" in cfg.channel_prediction_method:
+        if "two_mode" in cfg.channel_prediction_method or (cfg.channel_prediction_method == "deqn" and "two_mode" in cfg.imitation_method):
 
-            if cfg.channel_prediction_method == "two_mode_tf":
+            if cfg.channel_prediction_method == "two_mode_tf" or cfg.imitation_method == "two_mode_tf":
 
                 start_time_all_loops = time.time()
 
@@ -439,12 +453,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
         elif cfg.channel_prediction_method == "old":
             h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
-        elif cfg.channel_prediction_method == "weiner_filter":
+        elif cfg.channel_prediction_method == "weiner_filter" or (cfg.channel_prediction_method == "deqn" and cfg.imitation_method == "weiner_filter"):
             # Weiner Filter based prediction (MIMO) (per_tx_rx_node_pair)
             weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
             h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len-1))
         elif cfg.channel_prediction_method == "deqn":
-            h_freq_csi = h_freq_csi_history[-1]
+            pass
         else:
             raise ValueError("Channel prediction method not implemented here.")
     else:
@@ -453,8 +467,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                            cfo_vals=cfg.random_cfo_vals,
                                                            sto_vals=cfg.random_sto_vals)
-    _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                batch_size=cfg.num_slots_p2)
+    if cfg.channel_prediction_method == "deqn":
+        _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
+                                                    batch_size=cfg.num_slots_p2)
+    else:
+        _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+                                                    batch_size=cfg.num_slots_p2)
     
     # Pick the selected UE's channels
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)
@@ -481,22 +499,20 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                             architecture=cfg.PMI_feedback_architecture,
                                                             rbs_per_subband=4,
                                                             snrdb=rx_snr_db)
-            return_feedback_bits = True
             w1_override = getattr(cfg, "rl_w1_override", None)
-            PMI_feedback_report = type_II_PMI_quantizer(
+            h_freq_csi, PMI_feedback_bits = type_II_PMI_quantizer(
                 h_freq_csi,
-                return_feedback_bits=return_feedback_bits,
+                return_feedback_bits=True,
                 w1_beam_indices_override=w1_override,
             )
-            PMI_feedback_report_without_override = type_II_PMI_quantizer(
-                h_freq_csi,
-                return_feedback_bits=return_feedback_bits,
-            )
-            if return_feedback_bits:
-                h_freq_csi = PMI_feedback_report[0]
-                PMI_feedback_bits = PMI_feedback_report_without_override[1]
-            else:
-                h_freq_csi = PMI_feedback_report
+
+            if cfg.csi_prediction is True and cfg.channel_prediction_method == "deqn":
+                h_freq_csi_t1 = tf.reduce_mean(h_freq_csi_t1, axis=0, keepdims=True)
+                _, PMI_feedback_bits = type_II_PMI_quantizer(
+                    h_freq_csi_t1,
+                    return_feedback_bits=True,
+                )
+                
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
         
     if cfg.rank_adapt:
