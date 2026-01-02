@@ -490,7 +490,7 @@ def main() -> None:
     parser.add_argument(
         "--fixed-rx",
         type=int,
-        default=4,
+        default=2,
         help="UE count to hold fixed when sweeping RUs.",
     )
     parser.add_argument(
