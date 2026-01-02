@@ -213,6 +213,39 @@ def _aggregate_throughput(
 
     return pair_throughput, drop_ids
 
+def _apply_rolling_mean(
+    pair_series: Dict[Tuple[int, int], List[Tuple[int, float]]], window: int
+) -> Tuple[Dict[Tuple[int, int], List[Tuple[int, float]]], List[int]]:
+    """Apply a trailing rolling mean across drop-series for each pair.
+
+    The resulting drop id for each averaged point corresponds to the end of the
+    window (i.e., drop ``window - 1`` uses drops ``0..window-1`` from the
+    original sequence).
+    """
+
+    if window <= 1:
+        return pair_series, sorted({drop for series in pair_series.values() for drop, _ in series})
+
+    rolled: Dict[Tuple[int, int], List[Tuple[int, float]]] = {}
+    all_drops: List[int] = []
+
+    for pair, series in pair_series.items():
+        drops, values = zip(*series)
+
+        if len(series) < window:
+            rolled[pair] = list(series)
+            all_drops.extend(drops)
+            continue
+
+        kernel = np.ones(window, dtype=float) / float(window)
+        smoothed = np.convolve(np.asarray(values, dtype=float), kernel, mode="valid")
+        new_drops = drops[window - 1 :]
+        rolled_series = list(zip(new_drops, smoothed.tolist()))
+        rolled[pair] = rolled_series
+        all_drops.extend(new_drops)
+
+    return rolled, sorted(set(all_drops))
+
 
 def plot_rewards(
     pair_rewards: Dict[Tuple[int, int], List[Tuple[int, float]]],
@@ -283,7 +316,7 @@ def main() -> None:
         type=int,
         nargs="+",
         # default=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24],
-        default=list(range(1, 66)),
+        default=list(range(1, 89)),
         help="List of drop identifiers to include in the plots.",
     )
 
@@ -318,6 +351,16 @@ def main() -> None:
         action="store_true",
         help="Display the plot window after saving.",
     )
+    parser.add_argument(
+        "--rolling-window",
+        type=int,
+        default=25,
+        help=(
+            "Rolling window length (in drops) to average reward/throughput curves "
+            "before plotting."
+        ),
+    )
+
     args = parser.parse_args()
 
     reward_files = _find_reward_files(args.root, args.drops, args.rx_ue, args.tx_ue)
@@ -329,11 +372,15 @@ def main() -> None:
         )
 
     pair_rewards, drop_ids = _aggregate_rewards(reward_files)
+    pair_rewards, drop_ids = _apply_rolling_mean(pair_rewards, args.rolling_window)
     plot_rewards(pair_rewards, drop_ids, args.output, show=args.show)
 
     throughput_files = _find_throughput_files(args.root, args.drops, args.rx_ue, args.tx_ue)
     if throughput_files:
         pair_throughput, tp_drop_ids = _aggregate_throughput(throughput_files)
+        pair_throughput, tp_drop_ids = _apply_rolling_mean(
+            pair_throughput, args.rolling_window
+        )
         if tp_drop_ids and set(tp_drop_ids) != set(drop_ids):
             print(
                 "Warning: Drop ids for throughput and reward plots differ; "
