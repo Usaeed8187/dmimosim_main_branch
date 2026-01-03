@@ -316,7 +316,7 @@ def main() -> None:
         type=int,
         nargs="+",
         # default=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24],
-        default=list(range(1, 85)),
+        default=list(range(1, 101)),
         help="List of drop identifiers to include in the plots.",
     )
 
@@ -354,7 +354,7 @@ def main() -> None:
     parser.add_argument(
         "--rolling-window",
         type=int,
-        default=1,
+        default=25,
         help=(
             "Rolling window length (in drops) to average reward/throughput curves "
             "before plotting."

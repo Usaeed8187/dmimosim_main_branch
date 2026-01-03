@@ -11,6 +11,7 @@ import numpy as np
 from fractions import Fraction
 import matplotlib.pyplot as plt
 from typing import List
+import time
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
@@ -29,6 +30,10 @@ if gpus and gpu_num != "":
     except RuntimeError as e:
         print(e)
 tf.get_logger().setLevel('ERROR')
+
+from sionna.ofdm import ResourceGrid
+
+from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
 from dmimo.mu_mimo_testing_updates import sim_mu_mimo_all
@@ -80,9 +85,9 @@ code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "deqn" # "None", "two_mode", "weiner_filter", "deqn"
+channel_prediction_setting = "weiner_filter" # "None", "two_mode", "weiner_filter", "deqn"
 csi_prediction = True
-channel_prediction_method = "deqn" # None, "two_mode", "weiner_filter", "deqn"
+channel_prediction_method = "weiner_filter" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 
 def log_error(exc: Exception) -> str:
@@ -192,6 +197,7 @@ def run_simulation():
     cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT", "SLNR" for quantized CSI feedback
     cfg.csi_quantization_on = csi_quantization_on
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
+    cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
 
     if cfg.perfect_csi:
         cfg.csi_prediction = False
@@ -212,7 +218,44 @@ def run_simulation():
     rc_config.enable_window = True
     rc_config.window_length = 3
     rc_config.num_neurons = 16
-    rc_config.history_len = 8    
+    rc_config.history_len = 8
+
+    # Precompute LMMSE resources once per drop when needed
+    start_time = time.time()
+    if not cfg.perfect_csi:
+        num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
+
+        csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
+        csi_guard_carriers_1 = (cfg.fft_size - csi_effective_subcarriers) // 2
+        csi_guard_carriers_2 = (cfg.fft_size - csi_effective_subcarriers) - csi_guard_carriers_1
+
+        rg_csi = ResourceGrid(
+            num_ofdm_symbols=14,
+            fft_size=cfg.fft_size,
+            subcarrier_spacing=cfg.subcarrier_spacing,
+            num_tx=1,
+            num_streams_per_tx=num_txs_ant,
+            cyclic_prefix_length=cfg.cyclic_prefix_len,
+            num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
+            dc_null=False,
+            pilot_pattern="kronecker",
+            pilot_ofdm_symbol_indices=[2, 11],
+        )
+
+        dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+        slot_idx = cfg.start_slot_idx - cfg.csi_delay
+        cache_slots = cfg.lmmse_cov_est_slots if slot_idx >= cfg.lmmse_cov_est_slots else slot_idx
+        start_slot = slot_idx - cache_slots + 1
+
+        freq_cov_mat = estimate_freq_cov(
+            dmimo_chans, rg_csi, start_slot=start_slot, total_slots=cache_slots
+        )
+        lmmse_interpolator = LMMSELinearInterp(rg_csi.pilot_pattern, freq_cov_mat)
+
+        cfg.freq_cov_mat = freq_cov_mat
+        cfg.lmmse_interpolator = lmmse_interpolator
+    end_time = time.time()
+    print("Time taken for pre-computing LMMSE resources: ", end_time - start_time)
 
     #############################################
     # Testing

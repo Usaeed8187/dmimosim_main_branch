@@ -18,7 +18,7 @@ from sionna.utils import BinarySource, flatten_dims, matrix_inv, matrix_pinv
 from sionna.utils.metrics import compute_ber, compute_bler
 
 from dmimo.config import Ns3Config, SimConfig, RCConfig
-from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
+from dmimo.channel import dMIMOChannels, lmmse_channel_estimation, estimate_freq_cov, LMMSELinearInterp
 from dmimo.channel import standard_rc_pred_freq_mimo
 from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
@@ -389,6 +389,10 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                           dc_null=False,
                           pilot_pattern="kronecker",
                           pilot_ofdm_symbol_indices=[2, 11])
+    
+    # Cacheable LMMSE resources for the current drop
+    freq_cov_mat = getattr(cfg, "freq_cov_mat", None)
+    lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
 
     # Channel CSI estimation using channels in previous frames/slots
     if cfg.perfect_csi is True:
@@ -419,7 +423,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                                 rg_csi, dmimo_chans, 
                                                                 cfo_vals=cfg.random_cfo_vals,
                                                                 sto_vals=cfg.random_sto_vals,
-                                                                estimated_channels_dir=cfg.estimated_channels_dir)
+                                                                estimated_channels_dir=cfg.estimated_channels_dir,
+                                                                freq_cov_mat=freq_cov_mat,
+                                                                lmmse_interpolator=lmmse_interpolator)
                 h_freq_csi = h_freq_csi_history[0, ...] # h_freq_csi_t0
                 h_freq_csi_t1 = h_freq_csi_history[1, ...]
             else:
@@ -427,7 +433,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                                 rg_csi, dmimo_chans, 
                                                                 cfo_vals=cfg.random_cfo_vals,
                                                                 sto_vals=cfg.random_sto_vals,
-                                                                estimated_channels_dir=cfg.estimated_channels_dir)
+                                                                estimated_channels_dir=cfg.estimated_channels_dir,
+                                                                freq_cov_mat=freq_cov_mat,
+                                                                lmmse_interpolator=lmmse_interpolator)
                 
         end_time = time.time()
         # print("Total time for channel history gathering: ", end_time - start_time)
@@ -466,7 +474,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi,
                                                            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                            cfo_vals=cfg.random_cfo_vals,
-                                                           sto_vals=cfg.random_sto_vals)
+                                                           sto_vals=cfg.random_sto_vals,
+                                                           freq_cov_mat=freq_cov_mat,
+                                                           lmmse_interpolator=lmmse_interpolator)
     if cfg.channel_prediction_method == "deqn":
         _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
                                                     batch_size=cfg.num_slots_p2)
@@ -668,7 +678,7 @@ def sim_mu_mimo_all(
         start_time = time.time()
         bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config)
         end_time = time.time()
-        # print("Cycle time: ", end_time - start_time, " seconds\n")
+        print("Cycle time: ", end_time - start_time, " seconds\n")
         
         uncoded_ber += bers[0]
         ldpc_ber += bers[1]
@@ -704,8 +714,6 @@ def sim_mu_mimo_all(
             # )
 
             hold = 1
-
-
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps

@@ -107,7 +107,7 @@ class standard_rc_pred_freq_mimo:
         self.csi_history_buffer = None
         self.csi_history_slots = None
 
-    def _load_or_estimate_channel(self, slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir):
+    def _load_or_estimate_channel(self, slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator):
         """Load a single channel estimate from disk or run LMMSE estimation."""
 
         folder_path = estimated_channels_dir + "_rx_{}_tx_{}".format(
@@ -127,6 +127,8 @@ class standard_rc_pred_freq_mimo:
                 slot_idx=slot_idx,
                 cfo_vals=cfo_vals,
                 sto_vals=sto_vals,
+                freq_cov_mat=freq_cov_mat,
+                lmmse_interpolator=lmmse_interpolator
             )
             os.makedirs(folder_path, exist_ok=True)
             np.savez(file_path, h_freq_csi=h_freq_csi)
@@ -136,7 +138,7 @@ class standard_rc_pred_freq_mimo:
             
 
 
-    def get_csi_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None):
+    def get_csi_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None, freq_cov_mat=None, lmmse_interpolator=None):
 
         first_csi_history_idx = first_slot_idx - (csi_delay * self.history_len)
         channel_history_slots = np.arange(first_csi_history_idx, first_slot_idx, csi_delay)
@@ -149,7 +151,7 @@ class standard_rc_pred_freq_mimo:
         ):
             h_freq_csi_list = [
                 self._load_or_estimate_channel(
-                    slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir
+                    slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator
                 )
                 for slot_idx in channel_history_slots
             ]
@@ -165,7 +167,7 @@ class standard_rc_pred_freq_mimo:
         if np.array_equal(self.csi_history_slots[1:], channel_history_slots[:-1]):
             newest_slot_idx = channel_history_slots[-1]
             new_entry = self._load_or_estimate_channel(
-                newest_slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir
+                newest_slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator
             )
             self.csi_history_buffer = np.concatenate([self.csi_history_buffer[1:], new_entry], axis=0)
             self.csi_history_slots = channel_history_slots
