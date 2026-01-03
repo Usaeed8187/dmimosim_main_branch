@@ -130,7 +130,6 @@ class RLBeamSelector:
         memory_size: int = 200,
         input_window_size: int = 3,
         output_window_size: int = 3,
-        use_enumerated_actions: bool = True,
         epsilon_total_steps: Optional[int] = None,
     ):
         
@@ -142,7 +141,6 @@ class RLBeamSelector:
         self.memory_size = memory_size
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
-        self.use_enumerated_actions = use_enumerated_actions
         self.epsilon_total_steps = epsilon_total_steps
 
         self.agents: List[List[Optional[DeepWESNQNetwork]]] = []
@@ -215,65 +213,29 @@ class RLBeamSelector:
             )
             self.state_dims[rx_idx][tx_idx] = state_dim
 
-    def _canonical_action(self, beam_struct, L: int) -> Optional[Tuple[int, ...]]:
-        beams = _flatten_w1_indices(beam_struct).astype(int)
-
-        unique_beams: List[int] = []
-        seen = set()
-
-        for beam in beams.flatten():
-            if len(unique_beams) >= L:
-                break
-            if not 0 <= int(beam) < self.num_beams:
-                continue
-            if int(beam) in seen:
-                continue
-            unique_beams.append(int(beam))
-            seen.add(int(beam))
-
-        candidate = 0
-        while len(unique_beams) < L and self.num_beams > 0:
-            if candidate not in seen and 0 <= candidate < self.num_beams:
-                unique_beams.append(candidate)
-                seen.add(candidate)
-            candidate += 1
-
-        if len(unique_beams) < L:
-            return None
-
-        return tuple(unique_beams[:L])
 
     def _register_action(self, rx_idx: int, tx_idx: int, beam_struct, L: int) -> Optional[int]:
-        beam_tuple = self._canonical_action(beam_struct, L)
-        if beam_tuple is None:
-            return None
         
         existing = self.action_maps[rx_idx][tx_idx]
 
-        if self.use_enumerated_actions:
-            if not existing or len(existing[0]) != L:
-                self.action_maps[rx_idx][tx_idx] = _enumerate_beam_sets(
-                    self.N1, self.O1, self.N2, self.O2, L
-                )
-                existing = self.action_maps[rx_idx][tx_idx]
+        if not existing or len(existing[0]) != L:
+            self.action_maps[rx_idx][tx_idx] = _enumerate_beam_sets(
+                self.N1, self.O1, self.N2, self.O2, L
+            )
+            existing = self.action_maps[rx_idx][tx_idx]
 
-            sorted_beam = tuple(sorted(beam_tuple))
-            for idx, saved in enumerate(existing):
-                if sorted_beam == saved:
-                    return idx
-
+        beams = _flatten_w1_indices(beam_struct).astype(int)
+        
+        if beams.size < L:
             return 0 if existing else None
 
-
+        beam_tuple = tuple(sorted(beams[:L]))
+        
         for idx, saved in enumerate(existing):
-            if saved == beam_tuple:
+            if beam_tuple == saved:
                 return idx
 
-        if len(existing) < self.max_actions:
-            self.action_maps[rx_idx][tx_idx].append(beam_tuple)
-            return len(existing)
-
-        return 0
+        return 0 if existing else None
 
     def _decode_action(self, rx_idx: int, tx_idx: int, action_idx: int) -> Optional[Tuple[int, ...]]:
         if action_idx is None:
@@ -333,18 +295,14 @@ class RLBeamSelector:
                 # Ensure we have storage for this Rx/Tx pair before accessing any state
                 self._ensure_pair_capacity(rx_idx, tx_idx)
 
-                normalized_w1 = self._canonical_action(tx_w1, L)
-                if normalized_w1 is None:
-                    normalized_w1 = tuple(range(min(L, self.num_beams)))
+                curr_w1_idx = self._register_action(rx_idx, tx_idx, tx_w1, L)
 
-                curr_w1_idx = self._register_action(rx_idx, tx_idx, normalized_w1, L)
                 state = self._build_state(
                     int(curr_w1_idx) if curr_w1_idx is not None else 0, sinr_vec
                 )
 
-                if self.use_enumerated_actions:
-                    beam_sets = _enumerate_beam_sets(self.N1, self.O1, self.N2, self.O2, L)
-                    self.max_actions = len(beam_sets)
+                beam_sets = _enumerate_beam_sets(self.N1, self.O1, self.N2, self.O2, L)
+                self.max_actions = len(beam_sets)
 
                 self._maybe_init_agent(rx_idx, tx_idx, state.shape[0])
 
@@ -356,13 +314,10 @@ class RLBeamSelector:
                 episode_len = getattr(agent, "memory_counter", 0)
                 if prev_state is not None and prev_action is not None:
                     
-                    if self.use_enumerated_actions:
-                        match_bonus = int(
-                            curr_w1_idx is not None
-                            and curr_w1_idx == self.prev_actions[rx_idx][tx_idx]
-                        )
-                    else:
-                        match_bonus = int(curr_w1_idx is not None and curr_w1_idx == normalized_w1)
+                    match_bonus = int(
+                        curr_w1_idx is not None
+                        and curr_w1_idx == self.prev_actions[rx_idx][tx_idx]
+                    )
 
                     if node_bler is not None and node_bler.size > rx_idx:
                         bler_contrib = 1.0 - float(np.mean(node_bler[rx_idx]))
@@ -398,8 +353,6 @@ class RLBeamSelector:
                 agent.update_epsilon(episode_len, epsilon_total_steps)
                 predicted_idx = agent.choose_action(state)
                 predicted_w1 = self._decode_action(rx_idx, tx_idx, predicted_idx)
-                if predicted_w1 is None:
-                    predicted_w1 = normalized_w1
 
                 rx_overrides.append(_tuple_to_list(predicted_w1) if predicted_w1 is not None else None)
 
@@ -443,7 +396,6 @@ class RLBeamSelector:
             "memory_size": self.memory_size,
             "input_window_size": self.input_window_size,
             "output_window_size": self.output_window_size,
-            "use_enumerated_actions": self.use_enumerated_actions,
             "agent_files": agent_files,
         }
 
@@ -474,7 +426,6 @@ class RLBeamSelector:
         self.memory_size = metadata.get("memory_size", self.memory_size)
         self.input_window_size = metadata.get("input_window_size", self.input_window_size)
         self.output_window_size = metadata.get("output_window_size", self.output_window_size)
-        self.use_enumerated_actions = metadata.get("use_enumerated_actions", self.use_enumerated_actions)
 
         agent_files: List[List[Optional[str]]] = metadata.get("agent_files", [])
         self.agents = []
