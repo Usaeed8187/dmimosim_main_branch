@@ -34,6 +34,29 @@ from dmimo.utils import add_frequency_offset, add_timing_offset, compute_UE_wise
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
 
+def _extract_w1_override(pmi_feedback_bits):
+    """Return the w1_beam_indices structure from PMI feedback bits."""
+
+    if pmi_feedback_bits is None:
+        return None
+
+    overrides = []
+    pmi_entries = pmi_feedback_bits if isinstance(pmi_feedback_bits, list) else [pmi_feedback_bits]
+    for rx_entry in pmi_entries:
+        if isinstance(rx_entry, dict):
+            overrides.append(rx_entry.get("w1_beam_indices"))
+        elif isinstance(rx_entry, (list, tuple)):
+            tx_list = []
+            for tx_entry in rx_entry:
+                if isinstance(tx_entry, dict):
+                    tx_list.append(tx_entry.get("w1_beam_indices"))
+                else:
+                    tx_list.append(None)
+            overrides.append(tx_list)
+        else:
+            overrides.append(None)
+
+    return overrides if overrides else None
 
 class MU_MIMO(Model):
 
@@ -666,6 +689,7 @@ def sim_mu_mimo_all(
     if rl_selector is None and cfg.channel_prediction_method == "deqn":
         rl_selector = RLBeamSelector()
     pending_overrides = None
+    use_imitation_override = getattr(cfg, "use_imitation_override", False)
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
@@ -678,7 +702,7 @@ def sim_mu_mimo_all(
         start_time = time.time()
         bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config)
         end_time = time.time()
-        print("Cycle time: ", end_time - start_time, " seconds\n")
+        # print("Cycle time: ", end_time - start_time, " seconds\n")
         
         uncoded_ber += bers[0]
         ldpc_ber += bers[1]
@@ -699,12 +723,17 @@ def sim_mu_mimo_all(
         nodewise_bler_list.append(additional_KPIs[7])
 
         if rl_selector is not None:
-            pending_overrides = rl_selector.prepare_next_actions(
+            predicted_overrides = rl_selector.prepare_next_actions(
                 additional_KPIs[6],
                 additional_KPIs[4],
                 additional_KPIs[7],
                 cfg.modulation_order,
             )
+
+            if use_imitation_override:
+                pending_overrides = _extract_w1_override(additional_KPIs[6])
+            else:
+                pending_overrides = predicted_overrides
 
             # wrong_overrides = rl_selector_2.prepare_next_actions(
             #     additional_KPIs[8],

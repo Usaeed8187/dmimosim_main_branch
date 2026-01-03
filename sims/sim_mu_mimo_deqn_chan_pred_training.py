@@ -88,7 +88,7 @@ channel_prediction_setting = "deqn" # "None", "two_mode", "weiner_filter", "deqn
 csi_prediction = True
 channel_prediction_method = "deqn" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
-imitation_method = "none"
+imitation_method = "weiner_filter"
 imitation_drop_count = 0
 
 def log_error(exc: Exception) -> str:
@@ -201,7 +201,7 @@ def run_simulation():
         RLBeamSelector() if channel_prediction_method == "deqn" else None
     )
 
-    for drop_idx in drop_list:
+    for drop_number, drop_idx in enumerate(drop_list, start=1):
         # Simulation settings
         cfg = SimConfig()
         cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
@@ -223,7 +223,14 @@ def run_simulation():
         cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT", "SLNR" for quantized CSI feedback
         cfg.csi_quantization_on = csi_quantization_on
         cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
-        cfg.imitation_method = imitation_method
+        cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
+        warm_start_active = (
+            channel_prediction_method == "deqn"
+            and imitation_method != "none"
+            and drop_number <= imitation_drop_count
+        )
+        cfg.imitation_method = imitation_method if warm_start_active else "none"
+        cfg.use_imitation_override = warm_start_active
 
         if shared_rl_selector is not None:
             time_steps_per_drop = math.ceil(
