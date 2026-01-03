@@ -3,8 +3,12 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 import itertools
 import pickle
+from dmimo.channel import weiner_filter_pred
+from dmimo.channel.twomode_wesn_pred import predict_all_links
 
 import numpy as np
+
+from dmimo.mimo.quantized_CSI_feedback import quantized_CSI_feedback
 
 # Make the ICML_DEQN_clean folder importable
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -132,6 +136,7 @@ class RLBeamSelector:
         output_window_size: int = 3,
         epsilon_total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
+        imitation_method: Optional[str] = "none",
     ):
         
         self.O2 = 1
@@ -143,6 +148,8 @@ class RLBeamSelector:
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
         self.epsilon_total_steps = epsilon_total_steps
+        
+        self.imitation_method = imitation_method
 
         self.seed_sequence = np.random.SeedSequence(random_seed) if random_seed is not None else None
         self.agent_seeds: List[List[Optional[int]]] = []
@@ -263,6 +270,11 @@ class RLBeamSelector:
         sinr_dB,
         node_wise_bler,
         modulation_order: Optional[float] = None,
+        use_imitation_override: bool = False,
+        chan_history: Optional[np.ndarray] = None,
+        rc_config = None,
+        ns3cfg = None,
+        num_tx_streams: int = 1,
     ) -> Optional[List[List[Optional[np.ndarray]]]]:
         """Update all agents with the newest feedback and return predicted beams per Rx–Tx pair."""
 
@@ -277,6 +289,13 @@ class RLBeamSelector:
             sinr_array = [np.array(s, dtype=np.float32) for s in sinr_dB]
 
         node_bler = np.asarray(node_wise_bler) if node_wise_bler is not None else None
+
+        if use_imitation_override:
+            if chan_history is not None:
+                PMI_feedback_bits = self.pred(chan_history, rc_config, ns3cfg, num_tx_streams)
+                w1_structures_to_immitate = self.extract_w1_override(PMI_feedback_bits)
+            else:
+                raise ValueError("Channel history must be provided for imitation override")
 
         overrides: List[List[Optional[np.ndarray]]] = []
 
@@ -369,8 +388,13 @@ class RLBeamSelector:
                 )
 
                 agent.update_epsilon(episode_len, epsilon_total_steps)
-                predicted_idx = agent.choose_action(state)
-                predicted_w1 = self._decode_action(rx_idx, tx_idx, predicted_idx)
+                
+                if use_imitation_override:
+                    predicted_idx = action_map.index(tuple(sorted(w1_structures_to_immitate[rx_idx][tx_idx])))
+                    predicted_w1 = self._decode_action(rx_idx, tx_idx, predicted_idx)
+                else:
+                    predicted_idx = agent.choose_action(state)
+                    predicted_w1 = self._decode_action(rx_idx, tx_idx, predicted_idx)
 
                 rx_overrides.append(_tuple_to_list(predicted_w1) if predicted_w1 is not None else None)
 
@@ -380,6 +404,55 @@ class RLBeamSelector:
             overrides.append(rx_overrides)
 
         return overrides
+
+    def pred(self, h_freq_csi_history, rc_config, ns3cfg, num_tx_streams):
+        
+        # Predicting using the CSI method to immitate
+        if self.imitation_method == "two_mode":
+
+            h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg, max_workers=8)
+        elif self.imitation_method == "weiner_filter":
+
+            weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
+            h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len-1))
+
+        # Quantizing the predicted CSI
+        type_II_PMI_quantizer = quantized_CSI_feedback(method='5G', 
+                                                            codebook_selection_method=None,
+                                                            num_tx_streams=num_tx_streams,
+                                                            architecture='dMIMO_phase2_type_II_CB2',
+                                                            rbs_per_subband=4,
+                                                            snrdb=10)
+        _, PMI_feedback_bits = type_II_PMI_quantizer(
+            h_freq_csi,
+            return_feedback_bits=True,
+        )
+
+        return PMI_feedback_bits
+
+    def extract_w1_override(self, pmi_feedback_bits):
+        """Return the w1_beam_indices structure from PMI feedback bits."""
+
+        if pmi_feedback_bits is None:
+            return None
+
+        overrides = []
+        pmi_entries = pmi_feedback_bits if isinstance(pmi_feedback_bits, list) else [pmi_feedback_bits]
+        for rx_entry in pmi_entries:
+            if isinstance(rx_entry, dict):
+                overrides.append(rx_entry.get("w1_beam_indices"))
+            elif isinstance(rx_entry, (list, tuple)):
+                tx_list = []
+                for tx_entry in rx_entry:
+                    if isinstance(tx_entry, dict):
+                        tx_list.append(tx_entry.get("w1_beam_indices"))
+                    else:
+                        tx_list.append(None)
+                overrides.append(tx_list)
+            else:
+                overrides.append(None)
+
+        return overrides if overrides else None
 
     def save_all(self, base_path) -> None:
         """Persist all agents and associated metadata to disk."""

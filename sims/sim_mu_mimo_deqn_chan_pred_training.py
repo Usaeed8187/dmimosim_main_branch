@@ -89,7 +89,7 @@ csi_prediction = True
 channel_prediction_method = "deqn" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 imitation_method = "weiner_filter"
-imitation_drop_count = 0
+imitation_drop_count = 10
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -194,11 +194,11 @@ def run_simulation():
     rc_config.history_len = 8
 
     shared_rl_selector = (
-        RLBeamSelector() if channel_prediction_method == "deqn" else None
+        RLBeamSelector(imitation_method=imitation_method) if channel_prediction_method == "deqn" else None
     )
 
     shared_rl_selector_2 = (
-        RLBeamSelector() if channel_prediction_method == "deqn" else None
+        RLBeamSelector(imitation_method=imitation_method) if channel_prediction_method == "deqn" else None
     )
 
     for drop_number, drop_idx in enumerate(drop_list, start=1):

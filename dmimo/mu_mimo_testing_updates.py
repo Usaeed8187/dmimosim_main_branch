@@ -34,30 +34,6 @@ from dmimo.utils import add_frequency_offset, add_timing_offset, compute_UE_wise
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
 
-def _extract_w1_override(pmi_feedback_bits):
-    """Return the w1_beam_indices structure from PMI feedback bits."""
-
-    if pmi_feedback_bits is None:
-        return None
-
-    overrides = []
-    pmi_entries = pmi_feedback_bits if isinstance(pmi_feedback_bits, list) else [pmi_feedback_bits]
-    for rx_entry in pmi_entries:
-        if isinstance(rx_entry, dict):
-            overrides.append(rx_entry.get("w1_beam_indices"))
-        elif isinstance(rx_entry, (list, tuple)):
-            tx_list = []
-            for tx_entry in rx_entry:
-                if isinstance(tx_entry, dict):
-                    tx_list.append(tx_entry.get("w1_beam_indices"))
-                else:
-                    tx_list.append(None)
-            overrides.append(tx_list)
-        else:
-            overrides.append(None)
-
-    return overrides if overrides else None
-
 class MU_MIMO(Model):
 
     def __init__(self, cfg: SimConfig, rg_csi: ResourceGrid, **kwargs):
@@ -426,7 +402,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         rc_predictor = getattr(cfg, "rc_predictor", None)
 
         if cfg.channel_prediction_method == "deqn":
-            rc_config.history_len = 2
+            use_imitation_override = getattr(cfg, "use_imitation_override", False)
+            if not use_imitation_override:
+                rc_config.history_len = 2
 
         if rc_predictor is None:
             rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, rc_config, ns3cfg)
@@ -449,8 +427,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                                 estimated_channels_dir=cfg.estimated_channels_dir,
                                                                 freq_cov_mat=freq_cov_mat,
                                                                 lmmse_interpolator=lmmse_interpolator)
-                h_freq_csi = h_freq_csi_history[0, ...] # h_freq_csi_t0
-                h_freq_csi_t1 = h_freq_csi_history[1, ...]
+                h_freq_csi = h_freq_csi_history[-2, ...] # h_freq_csi_t0
+                h_freq_csi_t1 = h_freq_csi_history[-1, ...]
             else:
                 h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
                                                                 rg_csi, dmimo_chans, 
@@ -463,9 +441,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         end_time = time.time()
         # print("Total time for channel history gathering: ", end_time - start_time)
         
-        if "two_mode" in cfg.channel_prediction_method or (cfg.channel_prediction_method == "deqn" and "two_mode" in cfg.imitation_method):
+        if "two_mode" in cfg.channel_prediction_method:
 
-            if cfg.channel_prediction_method == "two_mode_tf" or cfg.imitation_method == "two_mode_tf":
+            if cfg.channel_prediction_method == "two_mode_tf":
 
                 start_time_all_loops = time.time()
 
@@ -484,7 +462,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
         elif cfg.channel_prediction_method == "old":
             h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
-        elif cfg.channel_prediction_method == "weiner_filter" or (cfg.channel_prediction_method == "deqn" and cfg.imitation_method == "weiner_filter"):
+        elif cfg.channel_prediction_method == "weiner_filter":
             # Weiner Filter based prediction (MIMO) (per_tx_rx_node_pair)
             weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
             h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len-1))
@@ -654,7 +632,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, wrong_PMI_feedback_bits]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, h_freq_csi_history]
 
 
 def sim_mu_mimo_all(
@@ -723,24 +701,21 @@ def sim_mu_mimo_all(
         nodewise_bler_list.append(additional_KPIs[7])
 
         if rl_selector is not None:
+            if use_imitation_override:
+                chan_history = additional_KPIs[8]
+            else:
+                chan_history = None
             predicted_overrides = rl_selector.prepare_next_actions(
                 additional_KPIs[6],
                 additional_KPIs[4],
                 additional_KPIs[7],
                 cfg.modulation_order,
+                use_imitation_override,
+                chan_history,
+                rc_config,
+                ns3cfg,
+                cfg.num_tx_streams
             )
-
-            if use_imitation_override:
-                pending_overrides = _extract_w1_override(additional_KPIs[6])
-            else:
-                pending_overrides = predicted_overrides
-
-            # wrong_overrides = rl_selector_2.prepare_next_actions(
-            #     additional_KPIs[8],
-            #     additional_KPIs[4],
-            #     additional_KPIs[7],
-            #     cfg.modulation_order,
-            # )
 
             hold = 1
 
