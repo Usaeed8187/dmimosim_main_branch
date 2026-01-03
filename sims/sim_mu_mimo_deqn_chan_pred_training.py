@@ -34,6 +34,8 @@ tf.get_logger().setLevel('ERROR')
 from dmimo.config import SimConfig, Ns3Config, RCConfig
 from dmimo.mu_mimo_testing_updates import sim_mu_mimo_all
 from dmimo.channel.rl_beam_selector import RLBeamSelector
+from sionna.ofdm import ResourceGrid
+from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
 
 # Add system path for the dmimo library
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
@@ -247,6 +249,38 @@ def run_simulation():
 
         folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
         os.makedirs(folder_path, exist_ok=True)
+
+        # Precompute LMMSE resources once per drop when needed
+        if not cfg.perfect_csi:
+            num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
+
+            csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
+            csi_guard_carriers_1 = (cfg.fft_size - csi_effective_subcarriers) // 2
+            csi_guard_carriers_2 = (cfg.fft_size - csi_effective_subcarriers) - csi_guard_carriers_1
+
+            rg_csi = ResourceGrid(
+                num_ofdm_symbols=14,
+                fft_size=cfg.fft_size,
+                subcarrier_spacing=cfg.subcarrier_spacing,
+                num_tx=1,
+                num_streams_per_tx=num_txs_ant,
+                cyclic_prefix_length=cfg.cyclic_prefix_len,
+                num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
+                dc_null=False,
+                pilot_pattern="kronecker",
+                pilot_ofdm_symbol_indices=[2, 11],
+            )
+
+            dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+            slot_idx = cfg.start_slot_idx - cfg.csi_delay
+            cache_slots = (cfg.lmmse_cov_est_slots if slot_idx >= cfg.lmmse_cov_est_slots else slot_idx)
+            start_slot = slot_idx - cache_slots + 1
+
+            freq_cov_mat = estimate_freq_cov(dmimo_chans, rg_csi, start_slot=start_slot, total_slots=cache_slots)
+            lmmse_interpolator = LMMSELinearInterp(rg_csi.pilot_pattern, freq_cov_mat)
+
+            cfg.freq_cov_mat = freq_cov_mat
+            cfg.lmmse_interpolator = lmmse_interpolator
 
         #############################################
         # Testing
