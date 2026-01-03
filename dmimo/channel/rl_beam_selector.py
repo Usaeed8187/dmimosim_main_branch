@@ -212,9 +212,10 @@ class RLBeamSelector:
                 spectral_radius=0.3,
             )
             self.state_dims[rx_idx][tx_idx] = state_dim
+    
+    def _init_action_map(self, rx_idx: int, tx_idx: int, L: int) -> List[Tuple[int, ...]]:
 
-
-    def _register_action(self, rx_idx: int, tx_idx: int, beam_struct, L: int) -> Optional[int]:
+        self._ensure_pair_capacity(rx_idx, tx_idx)
         
         existing = self.action_maps[rx_idx][tx_idx]
 
@@ -222,20 +223,8 @@ class RLBeamSelector:
             self.action_maps[rx_idx][tx_idx] = _enumerate_beam_sets(
                 self.N1, self.O1, self.N2, self.O2, L
             )
-            existing = self.action_maps[rx_idx][tx_idx]
 
-        beams = _flatten_w1_indices(beam_struct).astype(int)
-        
-        if beams.size < L:
-            return 0 if existing else None
-
-        beam_tuple = tuple(sorted(beams[:L]))
-        
-        for idx, saved in enumerate(existing):
-            if beam_tuple == saved:
-                return idx
-
-        return 0 if existing else None
+        return self.action_maps[rx_idx][tx_idx]
 
     def _decode_action(self, rx_idx: int, tx_idx: int, action_idx: int) -> Optional[Tuple[int, ...]]:
         if action_idx is None:
@@ -295,14 +284,23 @@ class RLBeamSelector:
                 # Ensure we have storage for this Rx/Tx pair before accessing any state
                 self._ensure_pair_capacity(rx_idx, tx_idx)
 
-                curr_w1_idx = self._register_action(rx_idx, tx_idx, tx_w1, L)
+                action_map = self._init_action_map(rx_idx, tx_idx, L)
+
+                beams = _flatten_w1_indices(tx_w1).astype(int)
+                curr_w1_idx: Optional[int] = 0 if action_map else None
+
+                if beams.size >= L:
+                    beam_tuple = tuple(sorted(beams[:L]))
+                    for idx, saved in enumerate(action_map):
+                        if beam_tuple == saved:
+                            curr_w1_idx = idx
+                            break
 
                 state = self._build_state(
                     int(curr_w1_idx) if curr_w1_idx is not None else 0, sinr_vec
                 )
 
-                beam_sets = _enumerate_beam_sets(self.N1, self.O1, self.N2, self.O2, L)
-                self.max_actions = len(beam_sets)
+                self.max_actions = len(action_map)
 
                 self._maybe_init_agent(rx_idx, tx_idx, state.shape[0])
 
