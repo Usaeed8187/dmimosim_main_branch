@@ -723,6 +723,8 @@ def sim_mu_mimo_all(
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
+    print("Average throughput: {:.2f} Mbps".format(throughput))
+
     nodewise_goodput = np.concatenate(nodewise_goodput) / (slot_time * 1e6) * overhead  # Mbps
     nodewise_throughput = np.concatenate(nodewise_throughput) / (slot_time * 1e6) * overhead  # Mbps
     nodewise_bitrate = np.concatenate(nodewise_bitrate) / (slot_time * 1e6) * overhead  # Mbps

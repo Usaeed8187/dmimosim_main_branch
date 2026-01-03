@@ -12,6 +12,7 @@ import numpy as np
 from fractions import Fraction
 import matplotlib.pyplot as plt
 from typing import List
+import time
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
@@ -202,6 +203,7 @@ def run_simulation():
     )
 
     for drop_number, drop_idx in enumerate(drop_list, start=1):
+        start_time = time.time()
         # Simulation settings
         cfg = SimConfig()
         cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
@@ -391,6 +393,8 @@ def run_simulation():
             print(f"Saved DEQN models to {model_dir}")
 
             shared_rl_selector.reset_episode()
+        end_time = time.time()
+        print("Drop {} simulation time: {} seconds".format(drop_idx, end_time - start_time))
 
 
 if __name__ == "__main__":
