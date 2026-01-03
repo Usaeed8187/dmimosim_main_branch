@@ -79,23 +79,39 @@ def _find_reward_files(
     root: Path, drops: Iterable[int], rx_ue: int | None, tx_ue: int | None
 ) -> List[RewardFile]:
 
-    """Return all DEQN reward files under ``root`` matching the filters."""
-
-    drop_set = set(int(drop) for drop in drops)
+    """Return one DEQN reward file per drop under ``root`` matching the filters."""
 
     files: List[RewardFile] = []
-    for path in sorted(root.rglob("deqn_rewards_drop_*.npz")):
-        info = _extract_metadata(path)
-
-        if drop_set and info.drop_id not in drop_set:
+    for drop in drops:
+        drop_path = root / f"channels_high_mobility_{drop}"
+        if not drop_path.exists():
+            print(f"Warning: Drop directory not found: {drop_path}")
             continue
 
-        if rx_ue is not None and info.rx_ue != rx_ue:
-            continue
-        if tx_ue is not None and info.tx_ue != tx_ue:
+        candidates: List[RewardFile] = []
+        for path in sorted(drop_path.glob("deqn_rewards_drop_*.npz")):
+            info = _extract_metadata(path)
+
+            if info.drop_id != int(drop):
+                continue
+            if rx_ue is not None and info.rx_ue != rx_ue:
+                continue
+            if tx_ue is not None and info.tx_ue != tx_ue:
+                continue
+
+            candidates.append(info)
+
+        if not candidates:
+            print(f"Warning: No reward file found for drop {drop} under {drop_path}")
             continue
 
-        files.append(info)
+        if len(candidates) > 1:
+            print(
+                "Warning: Multiple reward files found for drop "
+                f"{drop}; using {candidates[0].path}"
+            )
+
+        files.append(candidates[0])
 
     return files
 
@@ -316,7 +332,7 @@ def main() -> None:
         type=int,
         nargs="+",
         # default=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24],
-        default=list(range(1, 37)),
+        default=list(range(1, 11)),
         help="List of drop identifiers to include in the plots.",
     )
 
