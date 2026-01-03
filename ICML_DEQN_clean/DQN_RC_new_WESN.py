@@ -35,8 +35,9 @@ class DeepWESNQNetwork:
         self.random_seed = (
             random_seed
             if random_seed is not None
-            else int(np.random.SeedSequence().entropy)
+            else np.random.default_rng().integers(0, 1000, dtype=np.uint32).item()
         )
+
 
         self.n_actions = n_actions
         self.n_features = n_features

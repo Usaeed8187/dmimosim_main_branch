@@ -204,9 +204,9 @@ class RLBeamSelector:
 
     def _next_seed(self) -> int:
         if self.seed_sequence is not None:
-            return int(self.seed_sequence.spawn(1)[0].entropy)
+            return int(self.seed_sequence.spawn(1)[0].entropy % 10000)
 
-        return int(np.random.SeedSequence().entropy)
+        return int(np.random.SeedSequence().entropy % 10000)
 
     def _maybe_init_agent(self, rx_idx: int, tx_idx: int, state_dim: int):
         self._ensure_pair_capacity(rx_idx, tx_idx)
