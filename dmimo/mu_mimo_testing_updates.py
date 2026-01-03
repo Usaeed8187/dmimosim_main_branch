@@ -669,6 +669,15 @@ def sim_mu_mimo_all(
     pending_overrides = None
     use_imitation_override = getattr(cfg, "use_imitation_override", False)
 
+    imitation_description = None
+    imitation_method = getattr(cfg, "imitation_method", "none")
+    imitation_drop_count = getattr(cfg, "imitation_drop_count", 0)
+    if imitation_method != "none" and imitation_drop_count > 0:
+        imitation_description = (
+            "imitation learning enabled "
+            f"(method={imitation_method}, drop_count={imitation_drop_count})"
+        )
+
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
         # print("first_slot_idx: ", first_slot_idx)
@@ -741,6 +750,20 @@ def sim_mu_mimo_all(
 
     if rl_selector is not None:
         checkpoint_dir = Path("results") / "deqn_checkpoints" / Path(cfg.ns3_folder.rstrip("/")).name
-        rl_selector.save_all(checkpoint_dir)
+        rl_selector.save_all(checkpoint_dir, imitation_info=imitation_description)
 
-    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate, nodewise_goodput, nodewise_throughput, nodewise_bitrate, ranks, uncoded_ber_list, ldpc_ber_list, sinr_dB, snr_dB]
+    return [
+        uncoded_ber / total_cycles,
+        ldpc_ber / total_cycles,
+        goodput,
+        throughput,
+        bitrate,
+        nodewise_goodput,
+        nodewise_throughput,
+        nodewise_bitrate,
+        ranks,
+        uncoded_ber_list,
+        ldpc_ber_list,
+        sinr_dB,
+        snr_dB,
+    ]

@@ -11,7 +11,7 @@ import math
 import numpy as np
 from fractions import Fraction
 import matplotlib.pyplot as plt
-from typing import List
+from typing import List, Optional
 import time
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
@@ -91,6 +91,15 @@ channel_prediction_method = "deqn" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 imitation_method = "weiner_filter"
 imitation_drop_count = 10
+
+def _build_imitation_info() -> Optional[str]:
+    if imitation_method == "none" or imitation_drop_count <= 0:
+        return None
+
+    return (
+        "imitation learning enabled "
+        f"(method={imitation_method}, drop_count={imitation_drop_count})"
+    )
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -188,6 +197,8 @@ def run_simulation():
     global mobility, drop_idx, rx_ues_arr, drop_list
     parse_arguments()
 
+    imitation_info = _build_imitation_info()
+
     rc_config = RCConfig()
     rc_config.enable_window = True
     rc_config.window_length = 3
@@ -233,6 +244,7 @@ def run_simulation():
         )
         cfg.imitation_method = imitation_method if warm_start_active else "none"
         cfg.use_imitation_override = warm_start_active
+        cfg.imitation_drop_count = imitation_drop_count
 
         if shared_rl_selector is not None:
             time_steps_per_drop = math.ceil(
@@ -353,20 +365,56 @@ def run_simulation():
                     file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
                 else:
                     file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
-                np.savez(file_path,
-                        cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
-                        nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
-                        ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])
+                npz_payload = {
+                    "cfg": cfg,
+                    "ns3cfg": ns3cfg,
+                    "ber": ber,
+                    "ldpc_ber": ldpc_ber,
+                    "goodput": goodput,
+                    "throughput": throughput,
+                    "bitrate": bitrate,
+                    "nodewise_goodput": rst_zf[5],
+                    "nodewise_throughput": rst_zf[6],
+                    "nodewise_bitrate": rst_zf[7],
+                    "ranks": rst_zf[8],
+                    "uncoded_ber_list": rst_zf[9],
+                    "ldpc_ber_list": rst_zf[10],
+                    "sinr_dB": rst_zf[11],
+                    "snr_dB": rst_zf[12],
+                }
+
+                if imitation_info:
+                    npz_payload["imitation_info"] = imitation_info
+
+                np.savez(file_path, **npz_payload)
             else:
                 if cfg.scheduling:
                     file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
                 else:
                     file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
                 
-                np.savez(file_path,
-                        cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate,
-                        nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7],
-                        ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])
+                npz_payload = {
+                    "cfg": cfg,
+                    "ns3cfg": ns3cfg,
+                    "ber": ber,
+                    "ldpc_ber": ldpc_ber,
+                    "goodput": goodput,
+                    "throughput": throughput,
+                    "bitrate": bitrate,
+                    "nodewise_goodput": rst_zf[5],
+                    "nodewise_throughput": rst_zf[6],
+                    "nodewise_bitrate": rst_zf[7],
+                    "ranks": rst_zf[8],
+                    "uncoded_ber_list": rst_zf[9],
+                    "ldpc_ber_list": rst_zf[10],
+                    "sinr_dB": rst_zf[11],
+                    "snr_dB": rst_zf[12],
+                }
+
+                if imitation_info:
+                    npz_payload["imitation_info"] = imitation_info
+
+                np.savez(file_path, **npz_payload)
         
         if shared_rl_selector is not None:
             if last_rx_ue_sel is None:
@@ -377,7 +425,11 @@ def run_simulation():
                 folder_path,
                 f"deqn_rewards_drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}.npz",
             )
-            np.savez(rewards_path, rewards=rewards)
+            rewards_payload = {"rewards": rewards}
+            if imitation_info:
+                rewards_payload["imitation_info"] = imitation_info
+
+            np.savez(rewards_path, **rewards_payload)
             print(f"Saved DEQN rewards to {rewards_path}")
 
             actions = np.array(shared_rl_selector.get_action_log(), dtype=np.int64)
@@ -385,7 +437,11 @@ def run_simulation():
                 folder_path,
                 f"deqn_actions_drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}.npz",
             )
-            np.savez(actions_path, actions=actions)
+            actions_payload = {"actions": actions}
+            if imitation_info:
+                actions_payload["imitation_info"] = imitation_info
+
+            np.savez(actions_path, **actions_payload)
             print(f"Saved DEQN actions to {actions_path}")
 
         if shared_rl_selector is not None:
@@ -397,7 +453,7 @@ def run_simulation():
                 mobility,
                 f"drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}",
             )
-            shared_rl_selector.save_all(model_dir)
+            shared_rl_selector.save_all(model_dir, imitation_info=imitation_info)
             print(f"Saved DEQN models to {model_dir}")
 
             shared_rl_selector.reset_episode()

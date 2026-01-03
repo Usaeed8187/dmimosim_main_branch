@@ -472,8 +472,14 @@ class RLBeamSelector:
 
         return overrides if overrides else None
 
-    def save_all(self, base_path) -> None:
-        """Persist all agents and associated metadata to disk."""
+    def save_all(self, base_path, imitation_info: Optional[str] = None) -> None:
+        """Persist all agents and associated metadata to disk.
+
+        Args:
+            base_path: Directory where model files will be written.
+            imitation_info: Optional description of imitation-learning settings
+                used during training.
+        """
 
         base = Path(base_path)
         base.mkdir(parents=True, exist_ok=True)
@@ -508,6 +514,9 @@ class RLBeamSelector:
             "agent_files": agent_files,
             "agent_seeds": self.agent_seeds,
         }
+
+        if imitation_info:
+            metadata["imitation_info"] = imitation_info
 
         with open(base / "metadata.pkl", "wb") as f:
             pickle.dump(metadata, f)

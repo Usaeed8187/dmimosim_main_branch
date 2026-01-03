@@ -236,6 +236,24 @@ def _load_actions(path: Path) -> np.ndarray:
 
     return actions[:, :4]
 
+def _load_imitation_label(paths: Iterable[Path]) -> Optional[str]:
+    """Return the first imitation info string found in the provided NPZ files."""
+
+    for path in paths:
+        try:
+            data = np.load(path, allow_pickle=True)
+        except Exception:
+            continue
+
+        if "imitation_info" in data:
+            try:
+                value = data["imitation_info"]
+                return str(value.item()) if hasattr(value, "item") else str(value)
+            except Exception:
+                continue
+
+    return None
+
 def _aggregate_actions(
     files: Iterable[ActionFile],
 ) -> Tuple[Dict[Tuple[int, int], List[Tuple[int, int]]], int]:
@@ -313,6 +331,7 @@ def plot_actions(
     max_step: int,
     output: Path,
     show: bool = False,
+    imitation_label: Optional[str] = None,
 ) -> None:
     """Plot chosen action indices per step for each (rx, tx) pair."""
 
@@ -326,7 +345,10 @@ def plot_actions(
 
     plt.xlabel("Step")
     plt.ylabel("Action index")
-    plt.title("DEQN per-agent actions across steps")
+    title = "DEQN per-agent actions across steps"
+    if imitation_label:
+        title += f"\n{imitation_label}"
+    plt.title(title)
     plt.grid(True, linestyle="--", alpha=0.6)
     if max_step > 0:
         plt.xlim(1, max_step)
@@ -399,6 +421,7 @@ def plot_rewards(
     drop_ids: List[int],
     output: Path,
     show: bool = False,
+    imitation_label: Optional[str] = None,
 ) -> None:
     """Plot mean rewards per (rx, tx) pair across drops."""
 
@@ -412,7 +435,10 @@ def plot_rewards(
 
     plt.xlabel("Drop")
     plt.ylabel("Average reward")
-    plt.title("DEQN per-agent rewards across drops")
+    title = "DEQN per-agent rewards across drops"
+    if imitation_label:
+        title += f"\n{imitation_label}"
+    plt.title(title)
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.xticks(drop_ids)
     plt.legend()
@@ -427,6 +453,7 @@ def plot_throughput(
     drop_ids: List[int],
     output: Path,
     show: bool = False,
+    imitation_label: Optional[str] = None,
 ) -> None:
     """Plot mean throughput per (rx, tx) pair across drops."""
 
@@ -440,7 +467,10 @@ def plot_throughput(
 
     plt.xlabel("Drop")
     plt.ylabel("Average throughput")
-    plt.title("DEQN per-agent throughput across drops")
+    title = "DEQN per-agent throughput across drops"
+    if imitation_label:
+        title += f"\n{imitation_label}"
+    plt.title(title)
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.xticks(drop_ids)
     plt.legend()
@@ -524,15 +554,25 @@ def main() -> None:
             f"No reward files found under {args.root} matching the provided filters. "
             "Expected files named deqn_rewards_drop_<id>[_rx_UE_<rx>_tx_UE_<tx>].npz."
         )
+    
+    imitation_label = _load_imitation_label([info.path for info in reward_files])
 
     pair_rewards, drop_ids = _aggregate_rewards(reward_files)
     pair_rewards, drop_ids = _apply_rolling_mean(pair_rewards, args.rolling_window)
-    plot_rewards(pair_rewards, drop_ids, args.output, show=args.show)
+    plot_rewards(
+        pair_rewards, drop_ids, args.output, show=args.show, imitation_label=imitation_label
+    )
 
     action_files = _find_action_files(args.root, args.drops, args.rx_ue, args.tx_ue)
     if action_files:
         pair_actions, max_step = _aggregate_actions(action_files)
-        plot_actions(pair_actions, max_step, args.actions_output, show=args.show)
+        plot_actions(
+            pair_actions,
+            max_step,
+            args.actions_output,
+            show=args.show,
+            imitation_label=imitation_label,
+        )
     else:
         print("No action files found; skipping action plot.")
 
@@ -547,11 +587,14 @@ def main() -> None:
                 "Warning: Drop ids for throughput and reward plots differ; "
                 "plots will include all available data."
             )
+        if imitation_label is None:
+            imitation_label = _load_imitation_label([info.path for info in throughput_files])
         plot_throughput(
             pair_throughput,
             tp_drop_ids or drop_ids,
             args.throughput_output,
             show=args.show,
+            imitation_label=imitation_label,
         )
     else:
         print("No throughput files found; skipping throughput plot.")
