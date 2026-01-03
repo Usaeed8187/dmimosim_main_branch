@@ -160,6 +160,8 @@ class RLBeamSelector:
         self.prev_actions: List[List[Optional[int]]] = []
         self.state_dims: List[List[Optional[int]]] = []
         self.reward_log: List[Tuple[int, int, float]] = []
+        self.action_log: List[Tuple[int, int, int, int]] = []
+        self.step_counter: int = 0
 
     def set_epsilon_total_steps(self, total_steps: Optional[int]) -> None:
         """Update the epsilon decay horizon for all agents."""
@@ -175,6 +177,8 @@ class RLBeamSelector:
                 self.prev_actions[rx_idx][tx_idx] = None
         
         self.reward_log.clear()
+        self.action_log.clear()
+        self.step_counter = 0
 
     def log_reward(self, rx_idx: int, tx_idx: int, reward: float) -> None:
         """Record a reward emitted by the DEQN agent.
@@ -191,6 +195,16 @@ class RLBeamSelector:
         """Return a copy of the reward log accumulated so far."""
 
         return list(self.reward_log)
+    
+    def log_action(self, step: int, rx_idx: int, tx_idx: int, action_idx: Optional[int]) -> None:
+        """Record the chosen action index for a given step and agent pair."""
+
+        self.action_log.append((int(step), int(rx_idx), int(tx_idx), int(action_idx) if action_idx is not None else -1))
+
+    def get_action_log(self) -> List[Tuple[int, int, int, int]]:
+        """Return a copy of the action log accumulated so far."""
+
+        return list(self.action_log)
 
     def _ensure_pair_capacity(self, rx_idx: int, tx_idx: int):
         while len(self.agents) <= rx_idx:
@@ -281,6 +295,8 @@ class RLBeamSelector:
         w1_structures = _extract_w1_from_feedback(pmi_feedback_bits)
         if len(w1_structures) == 0:
             return None
+        
+        self.step_counter += 1
 
         sinr_array = []
         if sinr_dB is None:
@@ -397,6 +413,8 @@ class RLBeamSelector:
                     predicted_w1 = self._decode_action(rx_idx, tx_idx, predicted_idx)
 
                 rx_overrides.append(_tuple_to_list(predicted_w1) if predicted_w1 is not None else None)
+
+                self.log_action(self.step_counter, rx_idx, tx_idx, predicted_idx)
 
                 self.prev_states[rx_idx][tx_idx] = state
                 self.prev_actions[rx_idx][tx_idx] = predicted_idx

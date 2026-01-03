@@ -380,6 +380,14 @@ def run_simulation():
             np.savez(rewards_path, rewards=rewards)
             print(f"Saved DEQN rewards to {rewards_path}")
 
+            actions = np.array(shared_rl_selector.get_action_log(), dtype=np.int64)
+            actions_path = os.path.join(
+                folder_path,
+                f"deqn_actions_drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}.npz",
+            )
+            np.savez(actions_path, actions=actions)
+            print(f"Saved DEQN actions to {actions_path}")
+
         if shared_rl_selector is not None:
             if last_rx_ue_sel is None:
                 raise RuntimeError("RX UE selection was not set before saving models.")
