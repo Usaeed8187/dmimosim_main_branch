@@ -705,7 +705,7 @@ def sim_mu_mimo_all(
                 chan_history = additional_KPIs[8]
             else:
                 chan_history = None
-            predicted_overrides = rl_selector.prepare_next_actions(
+            pending_overrides = rl_selector.prepare_next_actions(
                 additional_KPIs[6],
                 additional_KPIs[4],
                 additional_KPIs[7],
