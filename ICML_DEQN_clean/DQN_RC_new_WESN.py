@@ -27,11 +27,17 @@ class DeepWESNQNetwork:
             e_greedy=0.9,
             min_epsilon=0.2,
             lr=0.01,
-            random_seed=1,
+            random_seed=None,
             spectral_radius = 0.30,
             training_batch_size = 40,
             training_start_threshold=None
     ):
+        self.random_seed = (
+            random_seed
+            if random_seed is not None
+            else int(np.random.SeedSequence().entropy)
+        )
+
         self.n_actions = n_actions
         self.n_features = n_features
         self.n_layers = n_layers
@@ -66,11 +72,11 @@ class DeepWESNQNetwork:
         self.memory = np.zeros((self.memory_size, n_features * 2 + 2))
 
         # build net
-        self._build_net(random_seed)
+        self._build_net(self.random_seed)
 
         self.cost_his = []
 
-        self.rng = np.random.RandomState(random_seed) # Line added by Ramin. Random number generator.
+        self.rng = np.random.RandomState(self.random_seed) # Line added by Ramin. Random number generator.
 
         
 
@@ -274,7 +280,7 @@ class DeepWESNQNetwork:
             "e_greedy": self.max_epsilon,
             "min_epsilon": self.min_epsilon,
             "lr": self.lr,
-            "random_seed": None,
+            "random_seed": self.random_seed,
             "spectral_radius": self.spectral_radius,
         }
 
@@ -313,6 +319,9 @@ class DeepWESNQNetwork:
 
         obj.eval_net = data.get("eval_net")
         obj.target_net = data.get("target_net")
+        obj.random_seed = data.get("init_kwargs", {}).get(
+            "random_seed", getattr(obj, "random_seed", None)
+        )
         obj.epsilon = data.get("epsilon", obj.epsilon)
         obj.max_epsilon = data.get("max_epsilon", getattr(obj, "max_epsilon", obj.epsilon))
         obj.min_epsilon = data.get("min_epsilon", getattr(obj, "min_epsilon", 0.2))

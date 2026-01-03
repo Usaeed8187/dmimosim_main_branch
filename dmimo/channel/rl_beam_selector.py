@@ -131,6 +131,7 @@ class RLBeamSelector:
         input_window_size: int = 3,
         output_window_size: int = 3,
         epsilon_total_steps: Optional[int] = None,
+        random_seed: Optional[int] = None,
     ):
         
         self.O2 = 1
@@ -142,6 +143,9 @@ class RLBeamSelector:
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
         self.epsilon_total_steps = epsilon_total_steps
+
+        self.seed_sequence = np.random.SeedSequence(random_seed) if random_seed is not None else None
+        self.agent_seeds: List[List[Optional[int]]] = []
 
         self.agents: List[List[Optional[DeepWESNQNetwork]]] = []
         self.action_maps: List[List[List[Tuple[int, ...]]]] = []
@@ -188,6 +192,7 @@ class RLBeamSelector:
             self.prev_states.append([])
             self.prev_actions.append([])
             self.state_dims.append([])
+            self.agent_seeds.append([])
 
         while len(self.agents[rx_idx]) <= tx_idx:
             self.agents[rx_idx].append(None)
@@ -195,11 +200,21 @@ class RLBeamSelector:
             self.prev_states[rx_idx].append(None)
             self.prev_actions[rx_idx].append(None)
             self.state_dims[rx_idx].append(None)
+            self.agent_seeds[rx_idx].append(None)
+
+    def _next_seed(self) -> int:
+        if self.seed_sequence is not None:
+            return int(self.seed_sequence.spawn(1)[0].entropy)
+
+        return int(np.random.SeedSequence().entropy)
 
     def _maybe_init_agent(self, rx_idx: int, tx_idx: int, state_dim: int):
         self._ensure_pair_capacity(rx_idx, tx_idx)
 
         if self.agents[rx_idx][tx_idx] is None:
+
+            if self.agent_seeds[rx_idx][tx_idx] is None:
+                self.agent_seeds[rx_idx][tx_idx] = self._next_seed()
             
             self.agents[rx_idx][tx_idx] = DeepWESNQNetwork(
                 self.max_actions,
@@ -210,6 +225,7 @@ class RLBeamSelector:
                 n_layers=1,
                 nInternalUnits=64,
                 spectral_radius=0.3,
+                random_seed=self.agent_seeds[rx_idx][tx_idx],
             )
             self.state_dims[rx_idx][tx_idx] = state_dim
     
@@ -399,6 +415,7 @@ class RLBeamSelector:
             "input_window_size": self.input_window_size,
             "output_window_size": self.output_window_size,
             "agent_files": agent_files,
+            "agent_seeds": self.agent_seeds,
         }
 
         with open(base / "metadata.pkl", "wb") as f:
@@ -428,6 +445,7 @@ class RLBeamSelector:
         self.memory_size = metadata.get("memory_size", self.memory_size)
         self.input_window_size = metadata.get("input_window_size", self.input_window_size)
         self.output_window_size = metadata.get("output_window_size", self.output_window_size)
+        self.agent_seeds = metadata.get("agent_seeds", [])
 
         agent_files: List[List[Optional[str]]] = metadata.get("agent_files", [])
         self.agents = []
@@ -446,3 +464,15 @@ class RLBeamSelector:
         for rx_idx, tx_row in enumerate(self.action_maps):
             for tx_idx, _ in enumerate(tx_row):
                 self._ensure_pair_capacity(rx_idx, tx_idx)
+
+        # Backfill any missing seeds for restored agents
+        for rx_idx, tx_row in enumerate(self.agents):
+            if len(self.agent_seeds) <= rx_idx:
+                self.agent_seeds.append([])
+
+            while len(self.agent_seeds[rx_idx]) < len(tx_row):
+                self.agent_seeds[rx_idx].append(None)
+
+            for tx_idx, agent in enumerate(tx_row):
+                if self.agent_seeds[rx_idx][tx_idx] is None and agent is not None:
+                    self.agent_seeds[rx_idx][tx_idx] = getattr(agent, "random_seed", None)
