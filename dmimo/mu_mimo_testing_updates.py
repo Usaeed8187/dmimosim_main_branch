@@ -500,7 +500,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                             rbs_per_subband=4,
                                                             snrdb=rx_snr_db)
             w1_override = getattr(cfg, "rl_w1_override", None)
-            h_freq_csi, _ = type_II_PMI_quantizer(
+            h_freq_csi, wrong_PMI_feedback_bits = type_II_PMI_quantizer(
                 h_freq_csi,
                 return_feedback_bits=True,
                 w1_beam_indices_override=w1_override,
@@ -508,10 +508,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
             if cfg.csi_prediction is True and cfg.channel_prediction_method == "deqn":
                 h_freq_csi_t1 = tf.reduce_mean(h_freq_csi_t1, axis=0, keepdims=True)
-                _, PMI_feedback_bits = type_II_PMI_quantizer(
+                tmp_2, PMI_feedback_bits = type_II_PMI_quantizer(
                     h_freq_csi_t1,
                     return_feedback_bits=True,
                 )
+            # print("wrong_PMI_feedback_bits[0]['w1_beam_indices']: ", wrong_PMI_feedback_bits[0]['w1_beam_indices'])
+            # print("PMI_feedback_bits[0]['w1_beam_indices']: ", PMI_feedback_bits[0]['w1_beam_indices'])
                 
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
         
@@ -619,7 +621,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, wrong_PMI_feedback_bits]
 
 
 def sim_mu_mimo_all(
@@ -653,6 +655,7 @@ def sim_mu_mimo_all(
     if rl_selector is None and cfg.channel_prediction_method == "deqn":
         rl_selector = RLBeamSelector()
     pending_overrides = None
+    rl_selector_2 = RLBeamSelector()
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
@@ -692,6 +695,16 @@ def sim_mu_mimo_all(
                 additional_KPIs[7],
                 cfg.modulation_order,
             )
+
+            wrong_overrides = rl_selector_2.prepare_next_actions(
+                additional_KPIs[8],
+                additional_KPIs[4],
+                additional_KPIs[7],
+                cfg.modulation_order,
+            )
+
+            hold = 1
+
 
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
