@@ -195,6 +195,10 @@ def run_simulation():
         RLBeamSelector() if channel_prediction_method == "deqn" else None
     )
 
+    shared_rl_selector_2 = (
+        RLBeamSelector() if channel_prediction_method == "deqn" else None
+    )
+
     for drop_idx in drop_list:
         # Simulation settings
         cfg = SimConfig()
@@ -223,9 +227,10 @@ def run_simulation():
             time_steps_per_drop = math.ceil(
                 (cfg.total_slots - cfg.start_slot_idx)
                 / (cfg.num_slots_p1 + cfg.num_slots_p2)
-            )
+            ) - 1
             epsilon_total_steps = len(drop_list) * time_steps_per_drop
             shared_rl_selector.set_epsilon_total_steps(epsilon_total_steps)
+            shared_rl_selector_2.set_epsilon_total_steps(epsilon_total_steps)
 
         if cfg.perfect_csi:
             cfg.csi_prediction = False
@@ -281,7 +286,7 @@ def run_simulation():
 
             cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
-            rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config, rl_selector=shared_rl_selector)
+            rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config, rl_selector=shared_rl_selector, rl_selector_2=shared_rl_selector_2)
             ber[ue_arr_idx] = rst_zf[0]
             ldpc_ber[ue_arr_idx] = rst_zf[1]
             goodput[ue_arr_idx] = rst_zf[2]

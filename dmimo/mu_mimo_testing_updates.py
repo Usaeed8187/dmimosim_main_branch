@@ -629,6 +629,7 @@ def sim_mu_mimo_all(
     ns3cfg: Ns3Config,
     rc_config:RCConfig,
     rl_selector: Optional[RLBeamSelector] = None,
+    rl_selector_2: Optional[RLBeamSelector] = None,
 ):
     """"
     Simulation of MU-MIMO scenario according to the frame structure
@@ -655,7 +656,6 @@ def sim_mu_mimo_all(
     if rl_selector is None and cfg.channel_prediction_method == "deqn":
         rl_selector = RLBeamSelector()
     pending_overrides = None
-    rl_selector_2 = RLBeamSelector()
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
@@ -696,12 +696,12 @@ def sim_mu_mimo_all(
                 cfg.modulation_order,
             )
 
-            wrong_overrides = rl_selector_2.prepare_next_actions(
-                additional_KPIs[8],
-                additional_KPIs[4],
-                additional_KPIs[7],
-                cfg.modulation_order,
-            )
+            # wrong_overrides = rl_selector_2.prepare_next_actions(
+            #     additional_KPIs[8],
+            #     additional_KPIs[4],
+            #     additional_KPIs[7],
+            #     cfg.modulation_order,
+            # )
 
             hold = 1
 

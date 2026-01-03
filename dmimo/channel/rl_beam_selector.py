@@ -287,7 +287,7 @@ class RLBeamSelector:
                 action_map = self._init_action_map(rx_idx, tx_idx, L)
 
                 beams = _flatten_w1_indices(tx_w1).astype(int)
-                curr_w1_idx: Optional[int] = 0 if action_map else None
+                curr_w1_idx = None
 
                 if beams.size >= L:
                     beam_tuple = tuple(sorted(beams[:L]))
@@ -295,6 +295,10 @@ class RLBeamSelector:
                         if beam_tuple == saved:
                             curr_w1_idx = idx
                             break
+                if curr_w1_idx is None:
+                    raise ValueError(
+                        f"Current w1 beams {beam_tuple} not found in action map for Rx {rx_idx} Tx {tx_idx}"
+                    )
 
                 state = self._build_state(
                     int(curr_w1_idx) if curr_w1_idx is not None else 0, sinr_vec
