@@ -226,29 +226,6 @@ def _build_model_dir(drop_label: str, rx_ue_sel: int, imitation_tag: str) -> str
         f"drop_{drop_label}_rx_UE_{rx_ue_sel}_tx_UE_{num_txue_sel}_{imitation_tag}",
     )
 
-def _try_resume_from_checkpoint(
-    rl_selector: Optional[RLBeamSelector], rx_ue_sel: int, imitation_tag: str
-) -> None:
-    if rl_selector is None:
-        return
-
-    try:
-        first_drop = int(drop_list[0]) if drop_list else None
-    except ValueError:
-        first_drop = None
-
-    if first_drop is None or first_drop <= 1:
-        return
-
-    for candidate in range(first_drop - 1, 0, -1):
-        model_dir = _build_model_dir(str(candidate), rx_ue_sel, imitation_tag)
-        if os.path.isdir(model_dir):
-            print(f"Loading DEQN checkpoint from {model_dir}")
-            rl_selector.load_all(model_dir)
-            return
-
-    print("No earlier DEQN checkpoint found. Starting fresh training session.")
-
 # Main function
 def run_simulation():
     global mobility, drop_idx, rx_ues_arr, drop_list
@@ -270,9 +247,6 @@ def run_simulation():
     shared_rl_selector_2 = (
         RLBeamSelector(imitation_method=imitation_method) if channel_prediction_method == "deqn" else None
     )
-
-    _try_resume_from_checkpoint(shared_rl_selector, int(rx_ues_arr[0]), imitation_tag)
-    _try_resume_from_checkpoint(shared_rl_selector_2, int(rx_ues_arr[0]), imitation_tag)
 
     for drop_number, drop_idx in enumerate(drop_list, start=1):
         start_time = time.time()
