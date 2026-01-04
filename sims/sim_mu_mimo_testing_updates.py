@@ -64,8 +64,13 @@ for root, dirs, files in os.walk(source_dir):
         destination_file = os.path.join(destination_subdir, file)
 
         # If the symlink already exists, remove it
-        if os.path.exists(destination_file):
-            os.remove(destination_file)
+        if os.path.lexists(destination_file):
+            try:
+                os.remove(destination_file)
+            except FileNotFoundError:
+                # Another process may have removed the file after the existence
+                # check when running in parallel. Treat this as benign.
+                pass
 
         # Create the symlink. When multiple processes are linking in
         # parallel, another process might create the same link after the
