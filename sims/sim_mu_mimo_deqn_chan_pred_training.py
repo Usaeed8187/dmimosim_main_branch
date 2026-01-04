@@ -66,8 +66,13 @@ for root, dirs, files in os.walk(source_dir):
         if os.path.exists(destination_file):
             os.remove(destination_file)
 
-        # Create the symlink
-        os.symlink(source_file, destination_file)
+        # Create the symlink. When multiple processes are linking in
+        # parallel, another process might create the same link after the
+        # existence check above. Treat that as benign and continue.
+        try:
+            os.symlink(source_file, destination_file)
+        except FileExistsError:
+            pass
         # print(f"Symlink created for {source_file} -> {destination_file}")
 
 script_name = sys.argv[0]
