@@ -28,16 +28,24 @@ import numpy as np
 
 
 REWARD_PATTERN = re.compile(
-    r"deqn_rewards_drop_(\d+)(?:_rx_UE_(\d+)_tx_UE_(\d+))?(?:_imitation_([A-Za-z0-9]+)_steps_(\d+))?\.npz$"
+    r"deqn_rewards_drop_(\d+)"
+    r"(?:_rx_UE_(\d+)_tx_UE_(\d+))?"
+    r"_imitation_([A-Za-z0-9_]+)_steps_(\d+)\.npz$"
 )
 
 ACTION_PATTERN = re.compile(
-    r"deqn_actions_drop_(\d+)(?:_rx_UE_(\d+)_tx_UE_(\d+))?(?:_imitation_([A-Za-z0-9]+)_steps_(\d+))?\.npz$"
+    r"deqn_actions_drop_(\d+)"
+    r"(?:_rx_UE_(\d+)_tx_UE_(\d+))?"
+    r"_imitation_([A-Za-z0-9_]+)_steps_(\d+)\.npz$"
 )
 
+
 THROUGHPUT_PATTERN = re.compile(
-    r"mu_mimo_results_link_adapt_rx_UE_(\d+)_tx_UE_(\d+)_prediction_deqn_pmi_quantization_True(?:_imitation_([A-Za-z0-9]+)_steps_(\d+))?\.npz$"
+    r"mu_mimo_results_link_adapt_rx_UE_(\d+)_tx_UE_(\d+)"
+    r"_prediction_deqn_pmi_quantization_True"
+    r"_imitation_([A-Za-z0-9_]+)_steps_(\d+)\.npz$"
 )
+
 
 @dataclass(frozen=True)
 class RewardFile:
@@ -151,7 +159,7 @@ def _find_reward_files(
             continue
 
         candidates: List[RewardFile] = []
-        for path in sorted(drop_path.glob("deqn_rewards_drop_*.npz")):
+        for path in sorted(drop_path.glob("deqn_rewards_drop_*_imitation_*_steps_*.npz")):
             info = _extract_metadata(path)
 
             if info.drop_id != int(drop):
@@ -169,11 +177,11 @@ def _find_reward_files(
 
         if len(candidates) > 1:
             print(
-                "Warning: Multiple reward files found for drop "
-                f"{drop}; using {candidates[0].path}"
+                "Info: Multiple reward files found for drop "
+                f"{drop}; using ALL {len(candidates)} matches"
             )
 
-        files.append(candidates[0])
+        files.extend(candidates)
 
     return files
 
@@ -190,7 +198,7 @@ def _find_action_files(
             continue
 
         candidates: List[ActionFile] = []
-        for path in sorted(drop_path.glob("deqn_actions_drop_*.npz")):
+        for path in sorted(drop_path.glob("deqn_actions_drop_*_imitation_*_steps_*.npz")):
             info = _extract_action_metadata(path)
 
             if info.drop_id != int(drop):
@@ -208,11 +216,11 @@ def _find_action_files(
 
         if len(candidates) > 1:
             print(
-                "Warning: Multiple action files found for drop "
-                f"{drop}; using {candidates[0].path}"
+                "Info: Multiple action files found for drop "
+                f"{drop}; using ALL {len(candidates)} matches"
             )
 
-        files.append(candidates[0])
+        files.extend(candidates)
 
     return files
 
@@ -231,7 +239,7 @@ def _find_throughput_files(
         candidates: List[ThroughputFile] = []
         for path in sorted(
             drop_path.glob(
-                "mu_mimo_results_link_adapt_rx_UE_*_tx_UE_*_prediction_deqn_pmi_quantization_True*.npz"
+                "mu_mimo_results_link_adapt_rx_UE_*_tx_UE_*_prediction_deqn_pmi_quantization_True_imitation_*_steps_*.npz"
             )
         ):
             try:
@@ -252,10 +260,10 @@ def _find_throughput_files(
             continue
         if len(candidates) > 1:
             print(
-                "Warning: Multiple throughput files found for drop "
-                f"{drop}; using {candidates[0].path}"
+                "Info: Multiple throughput files found for drop "
+                f"{drop}; using ALL {len(candidates)} matches"
             )
-        files.append(candidates[0])
+        files.extend(candidates)
 
     return files
 
@@ -332,6 +340,16 @@ def _slugify_label(label: str) -> str:
 
     safe = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_")
     return safe or "run"
+
+
+def _group_by_imitation(files):
+    """Group RewardFile/ActionFile/ThroughputFile by (method, steps)."""
+    groups = defaultdict(list)
+    for f in files:
+        key = (getattr(f, "imitation_method", None), getattr(f, "imitation_steps", None))
+        groups[key].append(f)
+    return groups
+
 
 def _aggregate_actions(
     files: Iterable[ActionFile],
@@ -698,36 +716,49 @@ def main() -> None:
 
     runs: List[RunData] = []
     for idx, root in enumerate(args.root):
-        reward_files = _find_reward_files(root, args.drops, args.rx_ue, args.tx_ue)
+        reward_files_all = _find_reward_files(root, args.drops, args.rx_ue, args.tx_ue)
 
-        if not reward_files:
+        if not reward_files_all:
             print(
                 "Warning: No reward files found under "
                 f"{root} matching the provided filters."
             )
             continue
 
-        action_files = _find_action_files(root, args.drops, args.rx_ue, args.tx_ue)
-        throughput_files = _find_throughput_files(root, args.drops, args.rx_ue, args.tx_ue)
+        action_files_all = _find_action_files(root, args.drops, args.rx_ue, args.tx_ue)
+        throughput_files_all = _find_throughput_files(root, args.drops, args.rx_ue, args.tx_ue)
 
-        label: Optional[str] = None
+        # Group by imitation setting so we plot multiple curves on the same plots
+        rewards_by_key = _group_by_imitation(reward_files_all)
+        actions_by_key = _group_by_imitation(action_files_all)
+        tp_by_key = _group_by_imitation(throughput_files_all)
+
+        # Base label per root (optional)
+        base_label: Optional[str] = None
         if args.labels and idx < len(args.labels):
-            label = args.labels[idx]
-        if label is None:
-            label = _load_imitation_label([info.path for info in reward_files])
-        if label is None:
-            label = _imitation_label_from_files(reward_files)
-        if label is None:
-            label = root.name
+            base_label = args.labels[idx]
+        if base_label is None:
+            base_label = root.name
 
-        runs.append(
-            RunData(
-                label=label,
-                reward_files=reward_files,
-                action_files=action_files,
-                throughput_files=throughput_files,
+        # Create one RunData per imitation setting
+        for (method, steps), reward_files in sorted(rewards_by_key.items()):
+            action_files = actions_by_key.get((method, steps), [])
+            throughput_files = tp_by_key.get((method, steps), [])
+
+            # Nice label like: "<root> | imitation_two_mode_steps_10"
+            if method is None or steps is None:
+                run_label = base_label
+            else:
+                run_label = f"{base_label} | imitation_{method}_steps_{steps}"
+
+            runs.append(
+                RunData(
+                    label=run_label,
+                    reward_files=reward_files,
+                    action_files=action_files,
+                    throughput_files=throughput_files,
+                )
             )
-        )
 
     if not runs:
         raise SystemExit(
