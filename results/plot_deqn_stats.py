@@ -8,7 +8,7 @@ showing the average reward per (rx, tx) agent pair for each drop, as well as
 the action indices chosen at every time step.
 
 Throughput is loaded from files named
-``mu_mimo_results_link_adapt_rx_UE_<rx>_tx_UE_<tx>_prediction_deqn_pmi_quantization_True.npz``
+``mu_mimo_results_link_adapt_rx_UE_<rx>_tx_UE_<tx>_prediction_deqn_pmi_quantization_True[_imitation_<method>_steps_<steps>].npz``
 that live directly inside per-drop folders explicitly supplied on the
 command line.
 
@@ -21,22 +21,22 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import DefaultDict, Dict, Iterable, List, Optional, Tuple
+from typing import DefaultDict, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 
 REWARD_PATTERN = re.compile(
-    r"deqn_rewards_drop_(\d+)(?:_rx_UE_(\d+)_tx_UE_(\d+))?\.npz$"
+    r"deqn_rewards_drop_(\d+)(?:_rx_UE_(\d+)_tx_UE_(\d+))?(?:_imitation_([A-Za-z0-9]+)_steps_(\d+))?\.npz$"
 )
 
 ACTION_PATTERN = re.compile(
-    r"deqn_actions_drop_(\d+)(?:_rx_UE_(\d+)_tx_UE_(\d+))?\.npz$"
+    r"deqn_actions_drop_(\d+)(?:_rx_UE_(\d+)_tx_UE_(\d+))?(?:_imitation_([A-Za-z0-9]+)_steps_(\d+))?\.npz$"
 )
 
 THROUGHPUT_PATTERN = re.compile(
-    r"mu_mimo_results_link_adapt_rx_UE_(\d+)_tx_UE_(\d+)_prediction_deqn_pmi_quantization_True\.npz$"
+    r"mu_mimo_results_link_adapt_rx_UE_(\d+)_tx_UE_(\d+)_prediction_deqn_pmi_quantization_True(?:_imitation_([A-Za-z0-9]+)_steps_(\d+))?\.npz$"
 )
 
 @dataclass(frozen=True)
@@ -45,6 +45,9 @@ class RewardFile:
     drop_id: int
     rx_ue: Optional[int]
     tx_ue: Optional[int]
+    imitation_method: Optional[str]
+    imitation_steps: Optional[int]
+    
 
 @dataclass(frozen=True)
 class ActionFile:
@@ -52,6 +55,8 @@ class ActionFile:
     drop_id: int
     rx_ue: Optional[int]
     tx_ue: Optional[int]
+    imitation_method: Optional[str]
+    imitation_steps: Optional[int]
 
 @dataclass(frozen=True)
 class ThroughputFile:
@@ -59,7 +64,15 @@ class ThroughputFile:
     drop_id: int
     rx_ue: int
     tx_ue: int
+    imitation_method: Optional[str] | None = None
+    imitation_steps: Optional[int] | None = None
 
+@dataclass
+class RunData:
+    label: str
+    reward_files: List[RewardFile]
+    action_files: List[ActionFile]
+    throughput_files: List[ThroughputFile]
 
 def _extract_metadata(path: Path) -> RewardFile:
     """Extract drop/rx/tx identifiers from a reward file name."""
@@ -71,7 +84,16 @@ def _extract_metadata(path: Path) -> RewardFile:
     drop_id = int(match.group(1))
     rx_ue = int(match.group(2)) if match.group(2) else None
     tx_ue = int(match.group(3)) if match.group(3) else None
-    return RewardFile(path=path, drop_id=drop_id, rx_ue=rx_ue, tx_ue=tx_ue)
+    imitation_method = match.group(4) if match.group(4) else None
+    imitation_steps = int(match.group(5)) if match.group(5) else None
+    return RewardFile(
+        path=path,
+        drop_id=drop_id,
+        rx_ue=rx_ue,
+        tx_ue=tx_ue,
+        imitation_method=imitation_method,
+        imitation_steps=imitation_steps,
+    )
 
 def _extract_action_metadata(path: Path) -> ActionFile:
     """Extract drop/rx/tx identifiers from an action log file name."""
@@ -82,10 +104,19 @@ def _extract_action_metadata(path: Path) -> ActionFile:
     drop_id = int(match.group(1))
     rx_ue = int(match.group(2)) if match.group(2) else None
     tx_ue = int(match.group(3)) if match.group(3) else None
-    return ActionFile(path=path, drop_id=drop_id, rx_ue=rx_ue, tx_ue=tx_ue)
+    imitation_method = match.group(4) if match.group(4) else None
+    imitation_steps = int(match.group(5)) if match.group(5) else None
+    return ActionFile(
+        path=path,
+        drop_id=drop_id,
+        rx_ue=rx_ue,
+        tx_ue=tx_ue,
+        imitation_method=imitation_method,
+        imitation_steps=imitation_steps,
+    )
 
 def _extract_throughput_metadata(path: Path, drop_id: int) -> ThroughputFile:
-    """Extract rx/tx identifiers from a throughput result filename."""
+    """Extract rx/tx/optional imitation identifiers from a throughput filename."""
 
     match = THROUGHPUT_PATTERN.search(path.name)
     if not match:
@@ -93,7 +124,16 @@ def _extract_throughput_metadata(path: Path, drop_id: int) -> ThroughputFile:
 
     rx_ue = int(match.group(1))
     tx_ue = int(match.group(2))
-    return ThroughputFile(path=path, drop_id=drop_id, rx_ue=rx_ue, tx_ue=tx_ue)
+    imitation_method = match.group(3) if match.group(3) else None
+    imitation_steps = int(match.group(4)) if match.group(4) else None
+    return ThroughputFile(
+        path=path,
+        drop_id=drop_id,
+        rx_ue=rx_ue,
+        tx_ue=tx_ue,
+        imitation_method=imitation_method,
+        imitation_steps=imitation_steps,
+    )
 
 
 
@@ -184,18 +224,38 @@ def _find_throughput_files(
     files: List[ThroughputFile] = []
     for drop in drops:
         drop_path = root / f"channels_high_mobility_{drop}"
-        file_path = drop_path / (
-            f"mu_mimo_results_link_adapt_rx_UE_{rx_ue}_tx_UE_{tx_ue}_prediction_"
-            "deqn_pmi_quantization_True.npz"
-        )
-
-
-        if not file_path.exists():
-            print(f"Warning: Throughput file not found for drop {drop}: {file_path}")
+        if not drop_path.exists():
+            print(f"Warning: Drop directory not found: {drop_path}")
             continue
-        info = _extract_throughput_metadata(file_path, drop_id=int(drop))
 
-        files.append(info)
+        candidates: List[ThroughputFile] = []
+        for path in sorted(
+            drop_path.glob(
+                "mu_mimo_results_link_adapt_rx_UE_*_tx_UE_*_prediction_deqn_pmi_quantization_True*.npz"
+            )
+        ):
+            try:
+                info = _extract_throughput_metadata(path, drop_id=int(drop))
+            except ValueError:
+                continue
+
+            if info.rx_ue != rx_ue or info.tx_ue != tx_ue:
+                continue
+            candidates.append(info)
+
+
+        if not candidates:
+            print(
+                "Warning: Throughput file not found for drop "
+                f"{drop}: expected rx {rx_ue}, tx {tx_ue} under {drop_path}"
+            )
+            continue
+        if len(candidates) > 1:
+            print(
+                "Warning: Multiple throughput files found for drop "
+                f"{drop}; using {candidates[0].path}"
+            )
+        files.append(candidates[0])
 
     return files
 
@@ -254,6 +314,25 @@ def _load_imitation_label(paths: Iterable[Path]) -> Optional[str]:
 
     return None
 
+def _imitation_label_from_files(files: Iterable[RewardFile | ActionFile]) -> Optional[str]:
+    """Generate an imitation label from filename metadata if present."""
+
+    for file_info in files:
+        if getattr(file_info, "imitation_method", None) is not None:
+            steps = getattr(file_info, "imitation_steps", None)
+            method = getattr(file_info, "imitation_method")
+            if steps is None:
+                return f"Imitation: {method}"
+            return f"Imitation: {method} ({steps} steps)"
+    return None
+
+
+def _slugify_label(label: str) -> str:
+    """Create a filename-safe suffix from the provided label."""
+
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", label).strip("_")
+    return safe or "run"
+
 def _aggregate_actions(
     files: Iterable[ActionFile],
 ) -> Tuple[Dict[Tuple[int, int], List[Tuple[int, int]]], int]:
@@ -311,6 +390,23 @@ def _aggregate_rewards(
         series.sort(key=lambda item: item[0])
 
     return pair_rewards, drop_ids
+
+def _compute_average_reward(
+    pair_rewards: Dict[Tuple[int, int], List[Tuple[int, float]]]
+) -> List[Tuple[int, float]]:
+    """Compute average reward across all agents for each drop."""
+
+    drop_to_values: DefaultDict[int, List[float]] = defaultdict(list)
+    for series in pair_rewards.values():
+        for drop, value in series:
+            drop_to_values[drop].append(value)
+
+    averaged: List[Tuple[int, float]] = []
+    for drop, values in drop_to_values.items():
+        averaged.append((drop, float(np.mean(values))))
+
+    averaged.sort(key=lambda item: item[0])
+    return averaged
 
 def _load_throughput(path: Path) -> float:
     """Load and average throughput values from a simulation result file."""
@@ -417,28 +513,30 @@ def _apply_rolling_mean(
 
 
 def plot_rewards(
-    pair_rewards: Dict[Tuple[int, int], List[Tuple[int, float]]],
+    series_by_run: Sequence[Tuple[str, Dict[Tuple[int, int], List[Tuple[int, float]]]]],
     drop_ids: List[int],
     output: Path,
     show: bool = False,
-    imitation_label: Optional[str] = None,
 ) -> None:
-    """Plot mean rewards per (rx, tx) pair across drops."""
+    """Plot mean rewards per (rx, tx) pair across drops for all runs."""
 
-    if not pair_rewards:
+    if not series_by_run:
         raise RuntimeError("No reward data found to plot.")
 
     plt.figure(figsize=(10, 6))
-    for (rx_idx, tx_idx), series in sorted(pair_rewards.items()):
-        drops, values = zip(*series)
-        plt.plot(drops, values, marker="o", label=f"rx{rx_idx}-tx{tx_idx}")
+    for run_label, pair_rewards in series_by_run:
+        for (rx_idx, tx_idx), series in sorted(pair_rewards.items()):
+            drops, values = zip(*series)
+            plt.plot(
+                drops,
+                values,
+                marker="o",
+                label=f"{run_label} rx{rx_idx}-tx{tx_idx}",
+            )
 
     plt.xlabel("Drop")
     plt.ylabel("Average reward")
-    title = "DEQN per-agent rewards across drops"
-    if imitation_label:
-        title += f"\n{imitation_label}"
-    plt.title(title)
+    plt.title("DEQN per-agent rewards across drops")
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.xticks(drop_ids)
     plt.legend()
@@ -448,29 +546,59 @@ def plot_rewards(
     plt.savefig(output, dpi=200)
     print(f"Saved reward plot to {output}")
 
-def plot_throughput(
-    pair_throughput: Dict[Tuple[int, int], List[Tuple[int, float]]],
+def plot_average_rewards(
+    series_by_run: Sequence[Tuple[str, List[Tuple[int, float]]]],
     drop_ids: List[int],
     output: Path,
     show: bool = False,
-    imitation_label: Optional[str] = None,
 ) -> None:
-    """Plot mean throughput per (rx, tx) pair across drops."""
+    """Plot average reward across all agents for each run."""
 
-    if not pair_throughput:
+    if not series_by_run:
+        raise RuntimeError("No average reward data found to plot.")
+
+    plt.figure(figsize=(10, 6))
+    for run_label, series in series_by_run:
+        drops, values = zip(*series)
+        plt.plot(drops, values, marker="o", label=run_label)
+
+    plt.xlabel("Drop")
+    plt.ylabel("Average reward across agents")
+    plt.title("DEQN average rewards across drops")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.xticks(drop_ids)
+    plt.legend()
+    plt.tight_layout()
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output, dpi=200)
+    print(f"Saved average reward plot to {output}")
+
+def plot_throughput(
+    series_by_run: Sequence[Tuple[str, Dict[Tuple[int, int], List[Tuple[int, float]]]]],
+    drop_ids: List[int],
+    output: Path,
+    show: bool = False,
+) -> None:
+    """Plot mean throughput per (rx, tx) pair across drops for all runs."""
+
+    if not series_by_run:
         raise RuntimeError("No throughput data found to plot.")
 
     plt.figure(figsize=(10, 6))
-    for (rx_idx, tx_idx), series in sorted(pair_throughput.items()):
-        drops, values = zip(*series)
-        plt.plot(drops, values, marker="s", label=f"rx{rx_idx}-tx{tx_idx}")
+    for run_label, pair_throughput in series_by_run:
+        for (rx_idx, tx_idx), series in sorted(pair_throughput.items()):
+            drops, values = zip(*series)
+            plt.plot(
+                drops,
+                values,
+                marker="s",
+                label=f"{run_label} rx{rx_idx}-tx{tx_idx}",
+            )
 
     plt.xlabel("Drop")
     plt.ylabel("Average throughput")
-    title = "DEQN per-agent throughput across drops"
-    if imitation_label:
-        title += f"\n{imitation_label}"
-    plt.title(title)
+    plt.title("DEQN per-agent throughput across drops")
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.xticks(drop_ids)
     plt.legend()
@@ -485,15 +613,16 @@ def main() -> None:
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path("results") / "channels_multiple_mu_mimo",
-        help="Root directory to scan for deqn_rewards_drop_*.npz files.",
+        nargs="+",
+        default=[Path("results") / "channels_multiple_mu_mimo"],
+        help="Root directory/directories to scan for deqn_rewards_drop_*.npz files.",
     )
     parser.add_argument(
         "--drops",
         type=int,
         nargs="+",
         # default=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24],
-        default=list(range(1, 33)),
+        default=list(range(1, 31)),
         help="List of drop identifiers to include in the plots.",
     )
 
@@ -510,6 +639,14 @@ def main() -> None:
         default=Path("results") / "deqn_actions.png",
         help="Path to save the generated action plot image.",
     )
+
+    parser.add_argument(
+        "--average-reward-output",
+        type=Path,
+        default=Path("results") / "deqn_average_rewards.png",
+        help="Path to save the generated average reward plot image.",
+    )
+
     parser.add_argument(
         "--throughput-output",
         type=Path,
@@ -545,57 +682,116 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--labels",
+        type=str,
+        nargs="+",
+        help=(
+            "Optional labels to use for each root directory; must align with order of --root."
+        ),
+    )
+
     args = parser.parse_args()
 
-    reward_files = _find_reward_files(args.root, args.drops, args.rx_ue, args.tx_ue)
+    if args.labels and len(args.labels) != len(args.root):
+        raise SystemExit("--labels must match the number of provided --root entries.")
 
-    if not reward_files:
+    runs: List[RunData] = []
+    for idx, root in enumerate(args.root):
+        reward_files = _find_reward_files(root, args.drops, args.rx_ue, args.tx_ue)
+
+        if not reward_files:
+            print(
+                "Warning: No reward files found under "
+                f"{root} matching the provided filters."
+            )
+            continue
+
+        action_files = _find_action_files(root, args.drops, args.rx_ue, args.tx_ue)
+        throughput_files = _find_throughput_files(root, args.drops, args.rx_ue, args.tx_ue)
+
+        label: Optional[str] = None
+        if args.labels and idx < len(args.labels):
+            label = args.labels[idx]
+        if label is None:
+            label = _load_imitation_label([info.path for info in reward_files])
+        if label is None:
+            label = _imitation_label_from_files(reward_files)
+        if label is None:
+            label = root.name
+
+        runs.append(
+            RunData(
+                label=label,
+                reward_files=reward_files,
+                action_files=action_files,
+                throughput_files=throughput_files,
+            )
+        )
+
+    if not runs:
         raise SystemExit(
-            f"No reward files found under {args.root} matching the provided filters. "
+            "No reward files found in the provided roots. "
             "Expected files named deqn_rewards_drop_<id>[_rx_UE_<rx>_tx_UE_<tx>].npz."
         )
     
-    imitation_label = _load_imitation_label([info.path for info in reward_files])
+    reward_series: List[Tuple[str, Dict[Tuple[int, int], List[Tuple[int, float]]]]] = []
+    avg_reward_series: List[Tuple[str, List[Tuple[int, float]]]] = []
+    drop_union: set[int] = set()
+    
+    for run in runs:
+        pair_rewards, drop_ids = _aggregate_rewards(run.reward_files)
+        pair_rewards, drop_ids = _apply_rolling_mean(pair_rewards, args.rolling_window)
+        if not pair_rewards:
+            print(f"Warning: No reward data found for run {run.label}")
+            continue
+        reward_series.append((run.label, pair_rewards))
+        avg_reward_series.append((run.label, _compute_average_reward(pair_rewards)))
+        drop_union.update(drop_ids)
 
-    pair_rewards, drop_ids = _aggregate_rewards(reward_files)
-    pair_rewards, drop_ids = _apply_rolling_mean(pair_rewards, args.rolling_window)
-    plot_rewards(
-        pair_rewards, drop_ids, args.output, show=args.show, imitation_label=imitation_label
-    )
+    if reward_series:
+        drop_ids_sorted = sorted(drop_union)
+        plot_rewards(reward_series, drop_ids_sorted, args.output, show=args.show)
+        plot_average_rewards(
+            avg_reward_series, drop_ids_sorted, args.average_reward_output, show=args.show
+        )
+    else:
+        print("No reward data aggregated; skipping reward plots.")
 
-    action_files = _find_action_files(args.root, args.drops, args.rx_ue, args.tx_ue)
-    if action_files:
-        pair_actions, max_step = _aggregate_actions(action_files)
+    for run in runs:
+        if not run.action_files:
+            continue
+        pair_actions, max_step = _aggregate_actions(run.action_files)
+        if not pair_actions:
+            continue
+        action_output = args.actions_output
+        if len(runs) > 1:
+            stem = args.actions_output.stem
+            action_output = args.actions_output.with_name(
+                f"{stem}_{_slugify_label(run.label)}{args.actions_output.suffix}"
+            )
         plot_actions(
             pair_actions,
             max_step,
-            args.actions_output,
+            action_output,
             show=args.show,
-            imitation_label=imitation_label,
+            imitation_label=run.label,
         )
-    else:
-        print("No action files found; skipping action plot.")
-
-    throughput_files = _find_throughput_files(args.root, args.drops, args.rx_ue, args.tx_ue)
-    if throughput_files:
-        pair_throughput, tp_drop_ids = _aggregate_throughput(throughput_files)
+    throughput_series: List[Tuple[str, Dict[Tuple[int, int], List[Tuple[int, float]]]]] = []
+    tp_drop_union: set[int] = set()
+    for run in runs:
+        if not run.throughput_files:
+            continue
+        pair_throughput, tp_drop_ids = _aggregate_throughput(run.throughput_files)
         pair_throughput, tp_drop_ids = _apply_rolling_mean(
             pair_throughput, args.rolling_window
         )
-        if tp_drop_ids and set(tp_drop_ids) != set(drop_ids):
-            print(
-                "Warning: Drop ids for throughput and reward plots differ; "
-                "plots will include all available data."
-            )
-        if imitation_label is None:
-            imitation_label = _load_imitation_label([info.path for info in throughput_files])
-        plot_throughput(
-            pair_throughput,
-            tp_drop_ids or drop_ids,
-            args.throughput_output,
-            show=args.show,
-            imitation_label=imitation_label,
-        )
+        throughput_series.append((run.label, pair_throughput))
+        tp_drop_union.update(tp_drop_ids)
+
+    if throughput_series:
+        drop_ids_sorted = sorted(tp_drop_union or drop_union)
+        plot_throughput(throughput_series, drop_ids_sorted, args.throughput_output, show=args.show)
     else:
         print("No throughput files found; skipping throughput plot.")
 

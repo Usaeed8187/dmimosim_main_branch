@@ -128,6 +128,26 @@ def _parse_code_rate(value):
         return float(Fraction(value))
     except (ValueError, ZeroDivisionError):
         return float(value)
+    
+def _parse_drop_indices(raw_drop_value: str) -> List[str]:
+    """Parse drop strings that may include comma-separated lists or ranges."""
+
+    values: List[str] = []
+    for part in str(raw_drop_value).split(','):
+        part = part.strip()
+        if not part:
+            continue
+
+        if '-' in part:
+            start_str, end_str = part.split('-', maxsplit=1)
+            start = int(start_str)
+            end = int(end_str)
+            step = 1 if end >= start else -1
+            values.extend(str(i) for i in range(start, end + step, step))
+        else:
+            values.append(part)
+
+    return values
 
 def parse_arguments():
     global mobility, drop_idx, rx_ues_arr, drop_list
@@ -181,7 +201,7 @@ def parse_arguments():
             csi_prediction = False
             channel_prediction_method = None
 
-        drop_list = [item.strip() for item in str(drop_idx).split(",") if item.strip()]
+        drop_list = _parse_drop_indices(drop_idx)
 
         print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
         # print("rx_ues_arr: ", rx_ues_arr)
@@ -196,8 +216,38 @@ def parse_arguments():
         # print("channel_prediction_method: {}".format(channel_prediction_method))
         # print("link_adapt: {}".format(link_adapt))
     else:
-        drop_list = [item.strip() for item in str(drop_idx).split(",") if item.strip()]
+        drop_list = _parse_drop_indices(drop_idx)
 
+def _build_model_dir(drop_label: str, rx_ue_sel: int, imitation_tag: str) -> str:
+    return os.path.join(
+        "results",
+        "rl_models",
+        mobility,
+        f"drop_{drop_label}_rx_UE_{rx_ue_sel}_tx_UE_{num_txue_sel}_{imitation_tag}",
+    )
+
+def _try_resume_from_checkpoint(
+    rl_selector: Optional[RLBeamSelector], rx_ue_sel: int, imitation_tag: str
+) -> None:
+    if rl_selector is None:
+        return
+
+    try:
+        first_drop = int(drop_list[0]) if drop_list else None
+    except ValueError:
+        first_drop = None
+
+    if first_drop is None or first_drop <= 1:
+        return
+
+    for candidate in range(first_drop - 1, 0, -1):
+        model_dir = _build_model_dir(str(candidate), rx_ue_sel, imitation_tag)
+        if os.path.isdir(model_dir):
+            print(f"Loading DEQN checkpoint from {model_dir}")
+            rl_selector.load_all(model_dir)
+            return
+
+    print("No earlier DEQN checkpoint found. Starting fresh training session.")
 
 # Main function
 def run_simulation():
@@ -220,6 +270,9 @@ def run_simulation():
     shared_rl_selector_2 = (
         RLBeamSelector(imitation_method=imitation_method) if channel_prediction_method == "deqn" else None
     )
+
+    _try_resume_from_checkpoint(shared_rl_selector, int(rx_ues_arr[0]), imitation_tag)
+    _try_resume_from_checkpoint(shared_rl_selector_2, int(rx_ues_arr[0]), imitation_tag)
 
     for drop_number, drop_idx in enumerate(drop_list, start=1):
         start_time = time.time()
@@ -455,12 +508,7 @@ def run_simulation():
         if shared_rl_selector is not None:
             if last_rx_ue_sel is None:
                 raise RuntimeError("RX UE selection was not set before saving models.")
-            model_dir = os.path.join(
-                "results",
-                "rl_models",
-                mobility,
-                f"drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}_{imitation_tag}",
-            )
+            model_dir = _build_model_dir(drop_idx, last_rx_ue_sel, imitation_tag)
             shared_rl_selector.save_all(model_dir, imitation_info=imitation_info)
             print(f"Saved DEQN models to {model_dir}")
 

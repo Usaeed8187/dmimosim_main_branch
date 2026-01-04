@@ -18,24 +18,22 @@ TEST_DROP_START=${TEST_DROP_START:-$((TRAIN_DROP_START + TRAIN_DROP_COUNT))}
 TEST_DROP_COUNT=${TEST_DROP_COUNT:-2}
 
 TRAIN_END_DROP=$((TRAIN_DROP_START + TRAIN_DROP_COUNT - 1))
+TRAIN_DROPS=$(seq -s, ${TRAIN_DROP_START} ${TRAIN_END_DROP})
 
 CHECKPOINT_DIR="results/rl_models/${MOBILITY}/drop_${TRAIN_END_DROP}_rx_UE_${RX_UES}_tx_UE_${NUM_TXUE_SEL}_imitation_none_steps_0"
 
-echo "Training DEQN model for ${TRAIN_DROP_COUNT} drops (${TRAIN_DROP_START}-${TRAIN_END_DROP})"
-for drop in $(seq ${TRAIN_DROP_START} ${TRAIN_END_DROP}); do
-    echo "Running training drop ${drop}"
-    python sims/sim_mu_mimo_deqn_chan_pred_training.py \
-        "${MOBILITY}" \
-        "${drop}" \
-        "${RX_UES}" \
-        "${MODULATION_ORDER}" \
-        "${CODE_RATE}" \
-        "${NUM_TXUE_SEL}" \
-        "${PERFECT_CSI}" \
-        "deqn" \
-        "${CSI_QUANTIZATION}" \
-        "${LINK_ADAPT}"
-done
+echo "Training DEQN model for ${TRAIN_DROP_COUNT} drops (${TRAIN_DROP_START}-${TRAIN_END_DROP}) in a single run"
+python sims/sim_mu_mimo_deqn_chan_pred_training.py \
+    "${MOBILITY}" \
+    "${TRAIN_DROPS}" \
+    "${RX_UES}" \
+    "${MODULATION_ORDER}" \
+    "${CODE_RATE}" \
+    "${NUM_TXUE_SEL}" \
+    "${PERFECT_CSI}" \
+    "deqn" \
+    "${CSI_QUANTIZATION}" \
+    "${LINK_ADAPT}"
 
 if [[ ! -d "${CHECKPOINT_DIR}" ]]; then
     echo "Expected checkpoint directory not found: ${CHECKPOINT_DIR}" >&2
