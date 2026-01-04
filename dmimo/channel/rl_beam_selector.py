@@ -162,11 +162,17 @@ class RLBeamSelector:
         self.reward_log: List[Tuple[int, int, float]] = []
         self.action_log: List[Tuple[int, int, int, int]] = []
         self.step_counter: int = 0
+        self.evaluation_only: bool = False
 
     def set_epsilon_total_steps(self, total_steps: Optional[int]) -> None:
         """Update the epsilon decay horizon for all agents."""
 
         self.epsilon_total_steps = total_steps
+
+    def set_evaluation_mode(self, evaluation_only: bool) -> None:
+        """Enable or disable training during beam selection."""
+
+        self.evaluation_only = evaluation_only
 
     def reset_episode(self):
         """Clear per-episode state without discarding learned experience."""
@@ -365,7 +371,7 @@ class RLBeamSelector:
                 prev_state = self.prev_states[rx_idx][tx_idx]
                 prev_action = self.prev_actions[rx_idx][tx_idx]
                 episode_len = getattr(agent, "memory_counter", 0)
-                if prev_state is not None and prev_action is not None:
+                if not self.evaluation_only and prev_state is not None and prev_action is not None:
                     
                     match_bonus = int(
                         curr_w1_idx is not None
@@ -399,11 +405,12 @@ class RLBeamSelector:
                     if can_train:
                         agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
                 
-                epsilon_total_steps = (
-                    self.epsilon_total_steps if self.epsilon_total_steps is not None else 400
-                )
+                if not self.evaluation_only:
+                    epsilon_total_steps = (
+                        self.epsilon_total_steps if self.epsilon_total_steps is not None else 400
+                    )
 
-                agent.update_epsilon(episode_len, epsilon_total_steps)
+                    agent.update_epsilon(episode_len, epsilon_total_steps)
                 
                 if use_imitation_override:
                     predicted_idx = action_map.index(tuple(sorted(w1_structures_to_immitate[rx_idx][tx_idx])))

@@ -666,6 +666,10 @@ def sim_mu_mimo_all(
     nodewise_bler_list = []
     if rl_selector is None and cfg.channel_prediction_method == "deqn":
         rl_selector = RLBeamSelector()
+        checkpoint = getattr(cfg, "rl_checkpoint", None)
+        if checkpoint:
+            rl_selector.load_all(Path(checkpoint))
+        rl_selector.set_evaluation_mode(bool(getattr(cfg, "rl_evaluation_only", False)))
     pending_overrides = None
     use_imitation_override = getattr(cfg, "use_imitation_override", False)
 

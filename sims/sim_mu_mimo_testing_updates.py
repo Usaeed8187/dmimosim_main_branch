@@ -89,6 +89,8 @@ channel_prediction_setting = "weiner_filter" # "None", "two_mode", "weiner_filte
 csi_prediction = True
 channel_prediction_method = "weiner_filter" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
+rl_checkpoint = None
+rl_evaluation_only = False
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -117,6 +119,7 @@ def parse_arguments():
     global perfect_csi, channel_prediction_setting
     global csi_prediction, channel_prediction_method
     global csi_quantization_on, link_adapt
+    global rl_checkpoint, rl_evaluation_only
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -144,6 +147,12 @@ def parse_arguments():
 
         if len(arguments) >= 10:
             link_adapt = _parse_bool(arguments[9])
+
+        if len(arguments) >= 11:
+            rl_checkpoint = arguments[10]
+
+        if len(arguments) >= 12:
+            rl_evaluation_only = _parse_bool(arguments[11])
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -188,7 +197,7 @@ def run_simulation():
     cfg.use_perfect_csi_history_for_prediction = False
     cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"
     cfg.enable_ue_selection = False
-    cfg.scheduling = False       
+    cfg.scheduling = False
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     # cfg.ns3_folder = "ns3/channels/LowMobility/"
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
@@ -219,6 +228,9 @@ def run_simulation():
     rc_config.window_length = 3
     rc_config.num_neurons = 16
     rc_config.history_len = 8
+
+    cfg.rl_checkpoint = rl_checkpoint
+    cfg.rl_evaluation_only = rl_evaluation_only
 
     # Precompute LMMSE resources once per drop when needed
     start_time = time.time()
