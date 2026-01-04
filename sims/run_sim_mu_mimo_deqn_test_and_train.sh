@@ -85,24 +85,24 @@ scenario_counter=0
 for scenario in "${scenario_args[@]}"; do
     while (( running_jobs >= PARALLEL_JOBS )); do
         wait -n
-        ((completed_jobs++))
+        ((completed_jobs+=1))
         echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
-        ((running_jobs--))
+        ((running_jobs-=1))
     done
 
-    ((scenario_counter++))
+    ((scenario_counter+=1))
     echo "Launching scenario ${scenario_counter}/${total_scenarios}: ${scenario}" >&2
 
     # shellcheck disable=SC2086
     run_scenario ${scenario} &
-    ((running_jobs++))
+    ((running_jobs+=1))
 done
 
 while (( running_jobs > 0 )); do
     wait -n
-    ((completed_jobs++))
+    ((completed_jobs+=1))
     echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
-    ((running_jobs--))
+    ((running_jobs-=1))
 done
 
 echo "Training and testing complete for all RX/TX UE combinations."
