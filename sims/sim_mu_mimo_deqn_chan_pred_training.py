@@ -89,8 +89,8 @@ channel_prediction_setting = "deqn" # "None", "two_mode", "weiner_filter", "deqn
 csi_prediction = True
 channel_prediction_method = "deqn" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
-imitation_method = "weiner_filter"
-imitation_drop_count = 10
+imitation_method = "none"
+imitation_drop_count = 0
 
 def _build_imitation_info() -> Optional[str]:
     if imitation_method == "none" or imitation_drop_count <= 0:
@@ -100,6 +100,13 @@ def _build_imitation_info() -> Optional[str]:
         "imitation learning enabled "
         f"(method={imitation_method}, drop_count={imitation_drop_count})"
     )
+
+def _build_imitation_tag() -> str:
+    """Return a filesystem-safe tag describing the imitation configuration."""
+
+    method = (imitation_method or "none").replace(" ", "_").lower()
+    steps = max(imitation_drop_count, 0)
+    return f"imitation_{method}_steps_{steps}"
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -198,6 +205,7 @@ def run_simulation():
     parse_arguments()
 
     imitation_info = _build_imitation_info()
+    imitation_tag = _build_imitation_tag()
 
     rc_config = RCConfig()
     rc_config.enable_window = True
@@ -362,9 +370,9 @@ def run_simulation():
             if cfg.csi_prediction:
 
                 if cfg.scheduling:
-                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
+                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}_{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, imitation_tag))
                 else:
-                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
+                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, imitation_tag))
                 npz_payload = {
                     "cfg": cfg,
                     "ns3cfg": ns3cfg,
@@ -389,9 +397,9 @@ def run_simulation():
                 np.savez(file_path, **npz_payload)
             else:
                 if cfg.scheduling:
-                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
+                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, imitation_tag))
                 else:
-                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
+                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, imitation_tag))
                 
                 npz_payload = {
                     "cfg": cfg,
@@ -423,7 +431,7 @@ def run_simulation():
             rewards = np.array(shared_rl_selector.get_reward_log(), dtype=np.float32)
             rewards_path = os.path.join(
                 folder_path,
-                f"deqn_rewards_drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}.npz",
+                f"deqn_rewards_drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}_{imitation_tag}.npz",
             )
             rewards_payload = {"rewards": rewards}
             if imitation_info:
@@ -435,7 +443,7 @@ def run_simulation():
             actions = np.array(shared_rl_selector.get_action_log(), dtype=np.int64)
             actions_path = os.path.join(
                 folder_path,
-                f"deqn_actions_drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}.npz",
+                f"deqn_actions_drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}_{imitation_tag}.npz",
             )
             actions_payload = {"actions": actions}
             if imitation_info:
@@ -451,7 +459,7 @@ def run_simulation():
                 "results",
                 "rl_models",
                 mobility,
-                f"drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}",
+                f"drop_{drop_idx}_rx_UE_{last_rx_ue_sel}_tx_UE_{num_txue_sel}_{imitation_tag}",
             )
             shared_rl_selector.save_all(model_dir, imitation_info=imitation_info)
             print(f"Saved DEQN models to {model_dir}")
