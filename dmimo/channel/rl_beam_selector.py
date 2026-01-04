@@ -142,6 +142,10 @@ class RLBeamSelector:
         self.O2 = 1
         self.N2 = 1
         self.O1 = 4
+
+        # Default values to ensure checkpoint loading works before any actions are prepared
+        self.N1 = 1
+        self.num_beams = (self.O1 * self.N1) * (self.O2 * self.N2)
         
         self.max_actions = max_actions
         self.memory_size = memory_size
