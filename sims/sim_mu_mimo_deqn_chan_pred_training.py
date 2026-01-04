@@ -89,8 +89,8 @@ channel_prediction_setting = "deqn" # "None", "two_mode", "weiner_filter", "deqn
 csi_prediction = True
 channel_prediction_method = "deqn" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
-imitation_method = "two_mode" # "none", "weiner_filter", "two_mode"
-imitation_drop_count = 10
+imitation_method = "none" # "none", "weiner_filter", "two_mode"
+imitation_drop_count = 0
 
 def _build_imitation_info() -> Optional[str]:
     if imitation_method == "none" or imitation_drop_count <= 0:
