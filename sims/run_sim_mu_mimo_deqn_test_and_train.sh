@@ -75,6 +75,24 @@ run_scenario() {
     done
 }
 
+terminate_all_jobs() {
+    local exit_code=${1:-1}
+
+    echo "Error detected; terminating remaining jobs." >&2
+    # Kill any still-running background jobs.
+    for pid in $(jobs -p); do
+        if kill -0 "${pid}" 2>/dev/null; then
+            kill "${pid}" 2>/dev/null
+        fi
+    done
+
+    # Ensure all children are reaped.
+    wait
+    exit "${exit_code}"
+}
+
+trap 'terminate_all_jobs $?' SIGINT SIGTERM
+
 mapfile -t scenario_args < <(generate_scenario_args)
 
 total_scenarios=${#scenario_args[@]}
@@ -84,7 +102,9 @@ scenario_counter=0
 
 for scenario in "${scenario_args[@]}"; do
     while (( running_jobs >= PARALLEL_JOBS )); do
-        wait -n
+        if ! wait -n; then
+            terminate_all_jobs $?
+        fi
         ((completed_jobs+=1))
         echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
         ((running_jobs-=1))
@@ -99,7 +119,9 @@ for scenario in "${scenario_args[@]}"; do
 done
 
 while (( running_jobs > 0 )); do
-    wait -n
+    if ! wait -n; then
+            terminate_all_jobs $?
+        fi
     ((completed_jobs+=1))
     echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
     ((running_jobs-=1))
