@@ -402,11 +402,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     elif cfg.csi_prediction is True:
         rc_predictor = getattr(cfg, "rc_predictor", None)
 
-        if cfg.channel_prediction_method == "deqn":
-            use_imitation_override = getattr(cfg, "use_imitation_override", False)
-            if not use_imitation_override:
-                rc_config.history_len = 2
-
         if rc_predictor is None:
             rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, rc_config, ns3cfg)
             cfg.rc_predictor = rc_predictor
@@ -420,7 +415,11 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             h_freq_csi_history = rc_predictor.get_ideal_csi_history(cfg.first_slot_idx, cfg.csi_delay,
                                                           dmimo_chans)
         else:
-            if cfg.channel_prediction_method == "deqn":
+            if "deqn" in cfg.channel_prediction_method:
+                
+                if "plus" in cfg.channel_prediction_method:
+                    rc_predictor.history_len = rc_config.history_len + 1
+
                 h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx + cfg.num_slots_p1 + cfg.num_slots_p2, cfg.csi_delay,
                                                                 rg_csi, dmimo_chans, 
                                                                 cfo_vals=cfg.random_cfo_vals,
@@ -430,6 +429,10 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                                 lmmse_interpolator=lmmse_interpolator)
                 h_freq_csi = h_freq_csi_history[-2, ...] # h_freq_csi_t0
                 h_freq_csi_t1 = h_freq_csi_history[-1, ...]
+
+                if "plus" in cfg.channel_prediction_method:
+                    h_freq_csi_history = h_freq_csi_history[:-1, ...]
+                
             else:
                 h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
                                                                 rg_csi, dmimo_chans, 
