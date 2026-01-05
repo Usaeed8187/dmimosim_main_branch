@@ -394,6 +394,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
 
     # Channel CSI estimation using channels in previous frames/slots
+    h_freq_csi_history = None
     if cfg.perfect_csi is True:
         # Perfect channel estimation
         h_freq_csi, rx_snr_db, rx_pwr_dbm = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
