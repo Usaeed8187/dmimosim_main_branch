@@ -203,10 +203,6 @@ def plot_results(args: PlotArgs) -> None:
     plt.savefig(output_path, dpi=300)
     print(f"Saved plot to {output_path}")
 
-    if args.show:
-        plt.show()
-
-
 def _parse_args() -> PlotArgs:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -224,7 +220,7 @@ def _parse_args() -> PlotArgs:
     )
     parser.add_argument(
         "--rx-ues",
-        default="0,2,4",
+        default="0,2,4,6",
         help="Comma-separated list of RX-UE counts used in simulations.",
     )
     parser.add_argument(
@@ -239,13 +235,13 @@ def _parse_args() -> PlotArgs:
     )
     parser.add_argument(
         "--imitation-method",
-        default="none",
+        default=None,
         help="Optional imitation method tag used in filenames.",
     )
     parser.add_argument(
         "--imitation-steps",
         type=int,
-        default=0,
+        default=None,
         help="Optional imitation step count used in filenames.",
     )
     parser.add_argument(
@@ -256,6 +252,7 @@ def _parse_args() -> PlotArgs:
     parser.add_argument(
         "--show",
         action="store_true",
+        default=False,
         help="Display plots interactively instead of saving only.",
     )
 

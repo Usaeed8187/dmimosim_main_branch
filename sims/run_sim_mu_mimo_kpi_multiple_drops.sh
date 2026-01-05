@@ -20,7 +20,7 @@ if [[ "${link_adapt}" == "True" ]]; then
     code_rates=("${code_rates[0]}")
 fi
 
-PARALLEL_JOBS=${PARALLEL_JOBS:-6}
+PARALLEL_JOBS=${PARALLEL_JOBS:-12}
 
 generate_args() {
     # Loop through the arrays
