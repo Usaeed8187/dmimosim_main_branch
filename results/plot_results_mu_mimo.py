@@ -93,6 +93,7 @@ def _resolve_path(path: str, relative_to: Path) -> Path:
 @dataclass
 class DataPoint:
     uncoded_ber: float
+    coded_ber: float
     throughput: float
 
 @dataclass(frozen=True)
@@ -234,11 +235,19 @@ class ResultLoader:
 
     @staticmethod
     def _uncoded_ber_from_npz(data: np.lib.npyio.NpzFile) -> float:
-        uncoded = data.get("uncoded_ber_list")
+        uncoded = data.get("ldpc_ber_list")
         if uncoded is None:
             return float("nan")
         uncoded_array = np.asarray(uncoded, dtype=float)
         return float(np.nanmean(uncoded_array))
+    
+    @staticmethod
+    def _coded_ber_from_npz(data: np.lib.npyio.NpzFile) -> float:
+        coded = data.get("ldpc_ber_list")
+        if coded is None:
+            return float("nan")
+        coded_array = np.asarray(coded, dtype=float)
+        return float(np.nanmean(coded_array))
 
     def load_datapoint(
         self,
@@ -257,8 +266,12 @@ class ResultLoader:
 
         with np.load(file_path, allow_pickle=True) as data:
             uncoded_ber = self._uncoded_ber_from_npz(data)
+            coded_ber = self._coded_ber_from_npz(data)
             throughput = self._scalar_from_array(np.atleast_1d(data.get("throughput", [])))
-        return DataPoint(uncoded_ber=uncoded_ber, throughput=throughput)
+        return DataPoint(
+            uncoded_ber=uncoded_ber, coded_ber=coded_ber, throughput=throughput
+        )
+
 
 
 ################################################################################
@@ -321,6 +334,7 @@ def _average_metric(
 def average_datapoints(points: Sequence[DataPoint]) -> DataPoint:
     return DataPoint(
         uncoded_ber=float(np.nanmean([p.uncoded_ber for p in points])),
+        coded_ber=float(np.nanmean([p.coded_ber for p in points])),
         throughput=float(np.nanmean([p.throughput for p in points])),
     )
 
@@ -585,8 +599,10 @@ def main() -> None:
     rx_display = [rx + 2 for rx in cfg.rx_ues]
 
     ber_tx_series = []
+    coded_ber_tx_series = []
     for scenario in cfg.scenarios:
         scenario_values = []
+        coded_scenario_values = []
         for tx in cfg.tx_ues:
             datapoint = _average_metric(
                 aggregated,
@@ -597,7 +613,11 @@ def main() -> None:
                 float(cfg.ber_code_rate),
             )
             scenario_values.append(datapoint.uncoded_ber if datapoint else np.nan)
+            coded_scenario_values.append(
+                datapoint.coded_ber if datapoint else np.nan
+            )
         ber_tx_series.append((scenario.label, scenario_values))
+        coded_ber_tx_series.append((scenario.label, coded_scenario_values))
     
     semilogy_metric(
         tx_display,
@@ -608,10 +628,21 @@ def main() -> None:
         output_path=os.path.join(cfg.output_dir, "uncoded_ber_vs_tx_ues.png"),
     )
 
+    semilogy_metric(
+        tx_display,
+        coded_ber_tx_series,
+        xlabel="Number of RUs",
+        ylabel="Coded BER",
+        title=f"Coded BER vs RUs (UEs={cfg.fixed_rx_for_tx_sweep+2}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",  # treating rx BS as 2 UEs
+        output_path=os.path.join(cfg.output_dir, "coded_ber_vs_tx_ues.png"),
+    )
+
     # BER vs UEs (fixed Tx)
     ber_rx_series = []
+    coded_ber_rx_series = []
     for scenario in cfg.scenarios:
         scenario_values = []
+        coded_scenario_values = []
         for rx in cfg.rx_ues:
             datapoint = _average_metric(
                 aggregated,
@@ -622,7 +653,12 @@ def main() -> None:
                 float(cfg.ber_code_rate),
             )
             scenario_values.append(datapoint.uncoded_ber if datapoint else np.nan)
+            coded_scenario_values.append(
+                datapoint.coded_ber if datapoint else np.nan
+            )
         ber_rx_series.append((scenario.label, scenario_values))
+        coded_ber_rx_series.append((scenario.label, coded_scenario_values))
+
     semilogy_metric(
         rx_display,
         ber_rx_series,
@@ -630,6 +666,15 @@ def main() -> None:
         ylabel="Uncoded BER",
         title=f"Uncoded BER vs UEs (RUs={cfg.fixed_tx_for_rx_sweep+2}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",  # treating tx BS as 2 UEs
         output_path=os.path.join(cfg.output_dir, "uncoded_ber_vs_rx_ues.png"),
+    )
+
+    semilogy_metric(
+        rx_display,
+        coded_ber_rx_series,
+        xlabel="Number of UEs",
+        ylabel="Coded BER",
+        title=f"Coded BER vs UEs (RUs={cfg.fixed_tx_for_rx_sweep+2}, MCS={cfg.ber_modulation_order}/{cfg.ber_code_rate})",  # treating tx BS as 2 UEs
+        output_path=os.path.join(cfg.output_dir, "coded_ber_vs_rx_ues.png"),
     )
 
     # Throughput vs RUs (fixed Rx, best MCS)
