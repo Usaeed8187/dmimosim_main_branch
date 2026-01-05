@@ -34,12 +34,15 @@ import glob
 
 import os
 
+from pathlib import Path
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 ################################################################################
 # Argument parsing
@@ -79,6 +82,13 @@ class PlotConfig:
     link_adapt: bool
     scenarios: Sequence["Scenario"]
 
+def _resolve_path(path: str, relative_to: Path) -> Path:
+    """Resolve ``path`` against ``relative_to`` when not absolute."""
+
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return (relative_to / candidate).resolve()
 
 ################################################################################
 # Data loading helpers
@@ -459,7 +469,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--base-dir",
-        default=os.path.join("results", "channels_multiple_mu_mimo"),
+        default=SCRIPT_DIR / "channels_multiple_mu_mimo",
         help=(
             "Root directory containing per-drop results.  DEQN results are"
             " expected directly under this directory, while legacy results"
@@ -517,7 +527,7 @@ def main() -> None:
     parser.add_argument(
         "--fixed-rx",
         type=int,
-        default=2,
+        default=4,
         help="UE count to hold fixed when sweeping RUs.",
     )
     parser.add_argument(
@@ -528,7 +538,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--output-dir",
-        default=os.path.join("results", "plots"),
+        default=SCRIPT_DIR / "plots",
         help="Directory to save the generated plots.",
     )
     parser.add_argument(
@@ -545,12 +555,15 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    base_dir = _resolve_path(args.base_dir, SCRIPT_DIR)
+    output_dir = _resolve_path(args.output_dir, SCRIPT_DIR)
+
     scenarios = _default_scenarios(
         include_prediction=not args.no_prediction, link_adapt=args.link_adapt
     )
 
     cfg = PlotConfig(
-        base_dir=args.base_dir,
+        base_dir=str(base_dir),
         mobility=args.mobility,
         drops=args.drops,
         rx_ues=args.rx_ues,
@@ -561,11 +574,11 @@ def main() -> None:
         ber_code_rate=args.ber_code_rate,
         fixed_rx_for_tx_sweep=args.fixed_rx,
         fixed_tx_for_rx_sweep=args.fixed_tx,
-        output_dir=args.output_dir,
+        output_dir=str(output_dir),
         link_adapt=args.link_adapt,
         scenarios=scenarios,
-        )
-
+    )
+    
     os.makedirs(cfg.output_dir, exist_ok=True)
     loader = ResultLoader(cfg)
 
