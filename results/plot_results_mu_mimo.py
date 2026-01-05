@@ -14,6 +14,17 @@ For BER plots, the modulation order and code rate are fixed by the
 command-line arguments.  For throughput plots, the script selects, for
 each data point, the MCS that maximizes the *average* throughput across
 all requested drops and prints the maximizing MCS choices.
+
+The script also plots DEQN-based channel prediction results.  By default,
+DEQN outputs are expected directly under::
+
+    results/channels_multiple_mu_mimo/channels_<mobility>_<drop>
+
+All other scenarios are expected under the ``old_results`` subfolder of
+``base-dir``.  The ``--base-dir`` argument should therefore point to the
+``results/channels_multiple_mu_mimo`` directory containing both the
+current DEQN results and the legacy results in ``old_results``.
+
 """
 
 from __future__ import annotations
@@ -93,9 +104,13 @@ class ResultLoader:
     def __init__(self, cfg: PlotConfig) -> None:
         self.cfg = cfg
 
-    def _drop_folder(self, drop_id: int) -> str:
+    def _drop_folder(self, drop_id: int, scenario: Scenario) -> str:
         folder_name = f"channels_{self.cfg.mobility}_{drop_id}"
-        return os.path.join(self.cfg.base_dir, folder_name)
+        if scenario.prediction_method == "deqn":
+            base_dir = self.cfg.base_dir
+        else:
+            base_dir = os.path.join(self.cfg.base_dir, "old_results")
+        return os.path.join(base_dir, folder_name)
     
     @staticmethod
     def _parse_code_rate_from_path(path: str) -> Optional[float]:
@@ -172,7 +187,7 @@ class ResultLoader:
         code_rate: float,
         scenario: Scenario,
     ) -> Optional[str]:
-        folder = self._drop_folder(drop_id)
+        folder = self._drop_folder(drop_id, scenario)
         code_rate_str = str(code_rate)
         if scenario.link_adapt:
             prefix = f"mu_mimo_results_link_adapt_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
@@ -336,6 +351,14 @@ def _default_scenarios(
             prediction_method="weiner_filter",
         ),
         Scenario(
+            perfect_csi=False,
+            prediction=True,
+            quantization=True,
+            label="DEQN channel prediction",
+            link_adapt=link_adapt,
+            prediction_method="deqn",
+        ),
+        Scenario(
             perfect_csi=True,
             prediction=False,
             quantization=True,
@@ -437,7 +460,11 @@ def main() -> None:
     parser.add_argument(
         "--base-dir",
         default=os.path.join("results", "channels_multiple_mu_mimo"),
-        help="Root directory containing per-drop results.",
+        help=(
+            "Root directory containing per-drop results.  DEQN results are"
+            " expected directly under this directory, while legacy results"
+            " are searched under the 'old_results' subfolder."
+        ),
     )
     parser.add_argument("--mobility", default="high_mobility", help="Mobility string used in the folder names.")
     parser.add_argument(
@@ -667,20 +694,21 @@ def main() -> None:
     )
 
     # Print the maximizing MCS selections for throughput plots
-    print("\nMaximizing MCS for Throughput vs RUs (UEs fixed at {}):".format(cfg.fixed_rx_for_tx_sweep+2)) # treating rx BS as 2 UEs
-    for scenario in cfg.scenarios:
-        print(f"  Scenario: {scenario.label}")
-        for tx, mcs in zip(tx_display, best_mcs_tx.get(scenario, [])):
-            print(
-                f"    RUs={tx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
-            )
-    print("\nMaximizing MCS for Throughput vs UEs (RUs fixed at {}):".format(cfg.fixed_tx_for_rx_sweep+2)) # treating tx BS as 2 UEs
-    for scenario in cfg.scenarios:
-        print(f"  Scenario: {scenario.label}")
-        for rx, mcs in zip(rx_display, best_mcs_rx.get(scenario, [])):
-            print(
-                f"    UEs={rx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
-            )
+    if not args.link_adapt:
+        print("\nMaximizing MCS for Throughput vs RUs (UEs fixed at {}):".format(cfg.fixed_rx_for_tx_sweep+2)) # treating rx BS as 2 UEs
+        for scenario in cfg.scenarios:
+            print(f"  Scenario: {scenario.label}")
+            for tx, mcs in zip(tx_display, best_mcs_tx.get(scenario, [])):
+                print(
+                    f"    RUs={tx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
+                )
+        print("\nMaximizing MCS for Throughput vs UEs (RUs fixed at {}):".format(cfg.fixed_tx_for_rx_sweep+2)) # treating tx BS as 2 UEs
+        for scenario in cfg.scenarios:
+            print(f"  Scenario: {scenario.label}")
+            for rx, mcs in zip(rx_display, best_mcs_rx.get(scenario, [])):
+                print(
+                    f"    UEs={rx}: {'None' if mcs is None else f'Mod {mcs[0]}, Code rate {mcs[1]}'}"
+                )
 
 if __name__ == "__main__":
     main()
