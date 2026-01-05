@@ -85,7 +85,7 @@ arguments = sys.argv[1:]
 
 mobility = 'high_mobility'
 # drop_idx = '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24'
-drop_idx = ','.join(str(i) for i in range(1, 101))
+drop_idx = ','.join(str(i) for i in range(4, 45))
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [2]
 num_txue_sel = 2

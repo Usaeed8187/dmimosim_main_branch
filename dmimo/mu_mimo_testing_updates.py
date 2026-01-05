@@ -512,6 +512,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                             rbs_per_subband=4,
                                                             snrdb=rx_snr_db)
             w1_override = getattr(cfg, "rl_w1_override", None)
+            if cfg.start_slot_idx != cfg.start_slot_idx:
+                assert w1_override is not None
             h_freq_csi, wrong_PMI_feedback_bits = type_II_PMI_quantizer(
                 h_freq_csi,
                 return_feedback_bits=True,

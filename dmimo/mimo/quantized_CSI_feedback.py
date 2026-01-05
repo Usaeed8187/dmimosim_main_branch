@@ -460,7 +460,6 @@ class quantized_CSI_feedback(Layer):
     
     def type_II_precoder_CB2(self, W_1, curr_h_est, Ns, L=None, N1=None, return_feedback_bits=False, w1_beam_indices=None):
 
-            
         # H_A[k] = H[k] @ W_1  => [N_rx, L, N_SB]
         curr_h_est_reshaped = tf.transpose(curr_h_est, [2, 0, 1])  # [N_RB, N_rx, N_tx]
         sb_ids = tf.range(curr_h_est_reshaped.shape[0], dtype=tf.int32) // int(self.rbs_per_subband)
