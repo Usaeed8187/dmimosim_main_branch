@@ -204,10 +204,15 @@ def plot_results(args: PlotArgs) -> None:
     print(f"Saved plot to {output_path}")
 
 def _parse_args() -> PlotArgs:
+    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    default_base_dir = os.path.join(script_dir, "channels_multiple_mu_mimo")
+    default_output_dir = os.path.join(script_dir, "plots_deqn")
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--base-dir",
-        default="results/channels_multiple_mu_mimo",
+        default=default_base_dir,
         help="Root directory containing per-drop folders.",
     )
     parser.add_argument(
@@ -246,7 +251,7 @@ def _parse_args() -> PlotArgs:
     )
     parser.add_argument(
         "--output-dir",
-        default="results/plots_deqn",
+        default=default_output_dir,
         help="Directory where plots will be written.",
     )
     parser.add_argument(
