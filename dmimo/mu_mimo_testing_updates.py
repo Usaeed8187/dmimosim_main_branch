@@ -20,6 +20,7 @@ from sionna.utils.metrics import compute_ber, compute_bler
 from dmimo.config import Ns3Config, SimConfig, RCConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation, estimate_freq_cov, LMMSELinearInterp
 from dmimo.channel import standard_rc_pred_freq_mimo, default_ddpg_predictor
+from dmimo.channel.ddpg_predictor import DDPGChannelPredictor
 from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
 from dmimo.channel.rl_beam_selector import RLBeamSelector
@@ -472,6 +473,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len-1))
         elif cfg.channel_prediction_method == "deqn":
             pass
+        elif cfg.channel_prediction_method == "ddpg":
+            ddpg_actions = getattr(cfg, "ddpg_pred_channel", None)
+            if ddpg_actions is None:
+                h_freq_csi = h_freq_csi_history[-1, ...]
+            else:
+                h_freq_csi = ddpg_actions
         else:
             raise ValueError("Channel prediction method not implemented here.")
     else:
@@ -647,6 +654,7 @@ def sim_mu_mimo_all(
     rc_config:RCConfig,
     rl_selector: Optional[RLBeamSelector] = None,
     rl_selector_2: Optional[RLBeamSelector] = None,
+    ddpg_predictor: Optional[DDPGChannelPredictor] = None,
 ):
     """"
     Simulation of MU-MIMO scenario according to the frame structure
@@ -670,6 +678,14 @@ def sim_mu_mimo_all(
     snr_dB_list = []
     PMI_feedback_bits = []
     nodewise_bler_list = []
+    pending_ddpg_actions = None
+    ddpg_history = None
+    if ddpg_predictor is None and cfg.channel_prediction_method == "ddpg":
+        ddpg_predictor = default_ddpg_predictor(
+            num_receivers=ns3cfg.num_rxue_sel,
+            fft_size=cfg.fft_size,
+        )
+
     if rl_selector is None and cfg.channel_prediction_method == "deqn":
         rl_selector = RLBeamSelector()
         checkpoint = getattr(cfg, "rl_checkpoint", None)
@@ -688,13 +704,16 @@ def sim_mu_mimo_all(
             f"(method={imitation_method}, drop_count={imitation_drop_count})"
         )
 
+
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
         # print("first_slot_idx: ", first_slot_idx)
 
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
+
         cfg.rl_w1_override = pending_overrides
+        cfg.ddpg_pred_channel = pending_ddpg_actions
 
         start_time = time.time()
         bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config)
@@ -719,7 +738,7 @@ def sim_mu_mimo_all(
         PMI_feedback_bits.append(additional_KPIs[6])
         nodewise_bler_list.append(additional_KPIs[7])
 
-        if rl_selector is not None:
+        if "deqn" in cfg.channel_prediction_method and rl_selector is not None:
             if use_imitation_override:
                 chan_history = additional_KPIs[8]
             else:
@@ -735,6 +754,10 @@ def sim_mu_mimo_all(
                 ns3cfg,
                 cfg.num_tx_streams
             )
+        
+        if cfg.channel_prediction_method == "ddpg" and ddpg_predictor is not None:
+            ddpg_history = additional_KPIs[8]
+            pending_ddpg_actions = ddpg_predictor.predict_channels(np.asarray(ddpg_history))
 
             hold = 1
 

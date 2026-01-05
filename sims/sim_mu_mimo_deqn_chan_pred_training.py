@@ -35,6 +35,7 @@ tf.get_logger().setLevel('ERROR')
 from dmimo.config import SimConfig, Ns3Config, RCConfig
 from dmimo.mu_mimo_testing_updates import sim_mu_mimo_all
 from dmimo.channel.rl_beam_selector import RLBeamSelector
+from dmimo.channel import default_ddpg_predictor
 from sionna.ofdm import ResourceGrid
 from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
 
@@ -258,6 +259,16 @@ def run_simulation():
         RLBeamSelector(imitation_method=imitation_method) if channel_prediction_method == "deqn" else None
     )
 
+    shared_ddpg_predictor = (
+        default_ddpg_predictor(
+            num_receivers=int(max(rx_ues_arr)),
+            fft_size=SimConfig().fft_size,
+            evaluation_only=imitation_method == "none",
+        )
+        if channel_prediction_method == "ddpg"
+        else None
+    )
+
     for drop_number, drop_idx in enumerate(drop_list, start=1):
         start_time = time.time()
         # Simulation settings
@@ -386,7 +397,15 @@ def run_simulation():
 
             cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
-            rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config, rl_selector=shared_rl_selector, rl_selector_2=shared_rl_selector_2)
+            rst_zf = sim_mu_mimo_all(
+                cfg,
+                ns3cfg,
+                rc_config,
+                rl_selector=shared_rl_selector,
+                rl_selector_2=shared_rl_selector_2,
+                ddpg_predictor=shared_ddpg_predictor,
+            )
+
             ber[ue_arr_idx] = rst_zf[0]
             ldpc_ber[ue_arr_idx] = rst_zf[1]
             goodput[ue_arr_idx] = rst_zf[2]
