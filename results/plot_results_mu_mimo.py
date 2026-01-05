@@ -20,11 +20,6 @@ DEQN outputs are expected directly under::
 
     results/channels_multiple_mu_mimo/channels_<mobility>_<drop>
 
-All other scenarios are expected under the ``old_results`` subfolder of
-``base-dir``.  The ``--base-dir`` argument should therefore point to the
-``results/channels_multiple_mu_mimo`` directory containing both the
-current DEQN results and the legacy results in ``old_results``.
-
 """
 
 from __future__ import annotations
@@ -116,11 +111,7 @@ class ResultLoader:
 
     def _drop_folder(self, drop_id: int, scenario: Scenario) -> str:
         folder_name = f"channels_{self.cfg.mobility}_{drop_id}"
-        if scenario.prediction_method == "deqn":
-            base_dir = self.cfg.base_dir
-        else:
-            base_dir = os.path.join(self.cfg.base_dir, "old_results")
-        return os.path.join(base_dir, folder_name)
+        return os.path.join(self.cfg.base_dir, folder_name)
     
     @staticmethod
     def _parse_code_rate_from_path(path: str) -> Optional[float]:
@@ -471,9 +462,7 @@ def main() -> None:
         "--base-dir",
         default=SCRIPT_DIR / "channels_multiple_mu_mimo",
         help=(
-            "Root directory containing per-drop results.  DEQN results are"
-            " expected directly under this directory, while legacy results"
-            " are searched under the 'old_results' subfolder."
+            "Root directory containing per-drop results."
         ),
     )
     parser.add_argument("--mobility", default="high_mobility", help="Mobility string used in the folder names.")
