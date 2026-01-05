@@ -12,7 +12,7 @@ PERFECT_CSI=${PERFECT_CSI:-False}
 CSI_QUANTIZATION=${CSI_QUANTIZATION:-True}
 LINK_ADAPT=${LINK_ADAPT:-True}
 
-PARALLEL_JOBS=${PARALLEL_JOBS:-6}
+PARALLEL_JOBS=${PARALLEL_JOBS:-12}
 
 TRAIN_DROP_START=${TRAIN_DROP_START:-4}
 TRAIN_DROP_COUNT=${TRAIN_DROP_COUNT:-42}
@@ -102,9 +102,7 @@ scenario_counter=0
 
 for scenario in "${scenario_args[@]}"; do
     while (( running_jobs >= PARALLEL_JOBS )); do
-        if ! wait -n; then
-            terminate_all_jobs $?
-        fi
+        wait -n
         ((completed_jobs+=1))
         echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
         ((running_jobs-=1))
@@ -119,9 +117,7 @@ for scenario in "${scenario_args[@]}"; do
 done
 
 while (( running_jobs > 0 )); do
-    if ! wait -n; then
-            terminate_all_jobs $?
-        fi
+    wait -n
     ((completed_jobs+=1))
     echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
     ((running_jobs-=1))
