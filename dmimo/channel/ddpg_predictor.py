@@ -308,7 +308,6 @@ class DDPGChannelPredictor:
             ].astype(np.complex64)
             scaling = scaling.reshape((1, 1) + scaling.shape[:3] + (1, scaling.shape[-1]))
 
-
             predicted_channel[:, rx_idx : rx_idx + 1, ...] = predicted_channel[
                 :, rx_idx : rx_idx + 1, ...
 
