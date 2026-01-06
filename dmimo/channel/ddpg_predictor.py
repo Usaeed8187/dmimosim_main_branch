@@ -103,7 +103,7 @@ class Actor(nn.Module):
         self.act_limit = act_limit
 
     def forward(self, x):
-        features = self.esn(x)
+        features = self.esn(x).to(x.device)
         return self.act_limit * self.head(features)
 
 
@@ -148,7 +148,7 @@ class Critic(nn.Module):
         )
 
     def forward(self, s, a):
-        features = self.esn(s)
+        features = self.esn(s).to(s.device)
         return self.net(torch.cat([features, a], dim=-1))
 
 
