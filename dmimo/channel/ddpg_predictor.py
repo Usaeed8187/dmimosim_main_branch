@@ -394,7 +394,7 @@ class DDPGChannelPredictor:
                 else:
                     tx_ants = np.arange((tx_idx-1)*2+4,tx_idx*2+4)
 
-                curr_subbands = subbands[rx_ants,...][:, ]
+                curr_subbands = subbands[rx_ants,...][:, tx_ants, ...]
 
                 obs = self._complex_to_obs(curr_subbands.reshape(-1), float(sinr_db[rx_idx]))
                 action = self.agents[rx_idx][tx_idx].act(obs, explore=not self.evaluation_only)
