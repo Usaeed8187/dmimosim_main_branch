@@ -273,7 +273,7 @@ class DDPGAgent:
 
 
 class DDPGChannelPredictor:
-    """Per-receiver DDPG agents for continuous channel prediction."""
+    """Per-receiver and per-transmitter DDPG agents for continuous channel prediction."""
 
     def __init__(
         self,
@@ -298,12 +298,14 @@ class DDPGChannelPredictor:
         self.num_rx_antennas: Optional[int] = None
         self.num_tx_nodes: Optional[int] = None
         self.num_tx_antennas: Optional[int] = None
+        self.tx_ant_counts: List[int] = []
 
-        self.agents: List[DDPGAgent] = []
+        self.agents: List[List[DDPGAgent]] = []
 
-        self.prev_obs: Dict[int, np.ndarray] = {}
-        self.prev_action: Dict[int, np.ndarray] = {}
-        self.predicted_subbands: Dict[int, np.ndarray] = {}
+        self.prev_obs: Dict[Tuple[int, int], np.ndarray] = {}
+        self.prev_action: Dict[Tuple[int, int], np.ndarray] = {}
+        self.predicted_subbands: Dict[Tuple[int, int], np.ndarray] = {}
+
         self.reward_log: List[Tuple[int, float]] = []
 
     def set_evaluation_mode(self, evaluation_only: bool) -> None:
@@ -324,20 +326,29 @@ class DDPGChannelPredictor:
         self.num_tx_nodes = int(tx_node)
         self.num_tx_antennas = int(tx_ant)
 
-        feature_dim = self.num_rx_antennas * self.num_tx_nodes * self.num_tx_antennas * self.num_subbands
-        self.obs_dim = 2 * feature_dim + 1
-        self.act_dim = 2 * feature_dim
+        # First transmitter has four antennas, all others have two, but cap at the provided tx_ant dimension.
+        self.tx_ant_counts = [
+            min(self.num_tx_antennas, 4 if tx_idx == 0 else 2) for tx_idx in range(self.num_tx_nodes)
 
-        self.agents = [
-            DDPGAgent(
-                obs_dim=self.obs_dim,
-                act_dim=self.act_dim,
-                act_limit=self.act_limit,
-                device=self.device,
-                seed=self.seed + idx,
-            )
-            for idx in range(self.num_receivers)
         ]
+
+        self.agents = []
+        for rx_idx in range(self.num_receivers):
+            tx_agents: List[DDPGAgent] = []
+            for tx_idx, tx_ant_count in enumerate(self.tx_ant_counts):
+                feature_dim = self.num_rx_antennas * tx_ant_count * self.num_subbands
+                obs_dim = 2 * feature_dim + 1
+                act_dim = 2 * feature_dim
+                tx_agents.append(
+                    DDPGAgent(
+                        obs_dim=obs_dim,
+                        act_dim=act_dim,
+                        act_limit=self.act_limit,
+                        device=self.device,
+                        seed=self.seed + (rx_idx * self.num_tx_nodes + tx_idx),
+                    )
+                )
+            self.agents.append(tx_agents)
 
         self.prev_obs.clear()
         self.prev_action.clear()
@@ -369,41 +380,43 @@ class DDPGChannelPredictor:
             sinr_db = np.zeros(self.num_receivers, dtype=np.float32)
 
         latest_channel = tf.convert_to_tensor(channel_history[-1,...])
-        subbands = self._extract_subbands(latest_channel)
+        subbands = np.squeeze(self._extract_subbands(latest_channel))
         predicted_channel = latest_channel.numpy()
-
-        num_transmitters = ((subbands.shape[3] - 4) // 2) + 1
 
         for rx_idx in range(self.num_receivers):
 
             rx_ants = np.arange(rx_idx*2,(rx_idx+1)*2)
 
-            for tx_idx in range(num_transmitters):
+            for tx_idx, tx_ant_count in enumerate(self.tx_ant_counts):
 
                 if tx_idx == 0:
                     tx_ants = np.arange(0,4)
                 else:
                     tx_ants = np.arange((tx_idx-1)*2+4,tx_idx*2+4)
 
-            curr_subbands = subbands[:,rx_ants,...][:,:,:,tx_ants,...]
-            
-            obs = self._complex_to_obs(curr_subbands.reshape(-1), float(sinr_db[rx_idx]))
-            action = self.agents[rx_idx].act(obs, explore=not self.evaluation_only)
-            real, imag = np.split(action, 2)
-            pred_sb = (real + 1j * imag).reshape(curr_subbands.shape)
-            self.predicted_subbands[rx_idx] = pred_sb
-            self.prev_obs[rx_idx] = obs
-            self.prev_action[rx_idx] = action
+                curr_subbands = subbands[rx_ants,...][:, ]
 
-            scaling = np.repeat(pred_sb, self.scs_per_subband, axis=-1)[
-                ..., : predicted_channel.shape[-1]
-            ].astype(np.complex64)
-            scaling = scaling.reshape((1, 1) + scaling.shape[:3] + (1, scaling.shape[-1]))
+                obs = self._complex_to_obs(curr_subbands.reshape(-1), float(sinr_db[rx_idx]))
+                action = self.agents[rx_idx][tx_idx].act(obs, explore=not self.evaluation_only)
+                real, imag = np.split(action, 2)
+                pred_sb = (real + 1j * imag).reshape(curr_subbands.shape)
 
-            predicted_channel[:, rx_idx : rx_idx + 1, ...] = predicted_channel[
-                :, rx_idx : rx_idx + 1, ...
+                key = (rx_idx, tx_idx)
+                self.predicted_subbands[key] = pred_sb
+                self.prev_obs[key] = obs
+                self.prev_action[key] = action
 
-            ] * scaling
+                scaling = np.repeat(pred_sb, self.scs_per_subband, axis=-1)[
+                    ..., : predicted_channel.shape[-1]
+                ].astype(np.complex64)
+                scaling = scaling.reshape(
+                    (1, 1, scaling.shape[0], 1, scaling.shape[1], 1, scaling.shape[2])
+                )
+
+                predicted_channel[:, rx_idx : rx_idx + 1, :, tx_idx : tx_idx + 1, ...] = (
+                    predicted_channel[:, rx_idx : rx_idx + 1, :, tx_idx : tx_idx + 1, ...]
+                    * scaling
+                )
 
         return tf.convert_to_tensor(predicted_channel)
 
@@ -420,33 +433,38 @@ class DDPGChannelPredictor:
         true_subbands = self._extract_subbands(tf.convert_to_tensor(true_channel))
 
         for rx_idx in range(min(self.num_receivers, true_subbands.shape[0])):
-            if rx_idx not in self.prev_obs or rx_idx not in self.prev_action:
-                continue
+            for tx_idx, tx_ant_count in enumerate(self.tx_ant_counts):
+                key = (rx_idx, tx_idx)
+                if key not in self.prev_obs or key not in self.prev_action:
+                    continue
 
-            bler_val = 1.0
-            if node_bler is not None and node_bler.size > rx_idx:
-                bler_val = float(np.mean(node_bler[rx_idx]))
+                bler_val = 1.0
+                if node_bler is not None and node_bler.size > rx_idx:
+                    bler_val = float(np.mean(node_bler[rx_idx]))
 
-            target = true_subbands[rx_idx].reshape(-1)
+                target = true_subbands[rx_idx, :, tx_idx, :tx_ant_count, :]
+                target_vec = target.reshape(-1)
 
-            pred = self.predicted_subbands.get(rx_idx, np.zeros_like(target))
-            pred = pred.reshape(-1)
+                pred = self.predicted_subbands.get(key, np.zeros_like(target_vec))
+                pred_vec = pred.reshape(-1)
 
-            err = np.linalg.norm(pred - target) / (np.linalg.norm(target) + 1e-6)
-            match_bonus = 1.0 - np.tanh(err)
-            reward = (1.0 - bler_val) + match_bonus
+                err = np.linalg.norm(pred_vec - target_vec) / (np.linalg.norm(target_vec) + 1e-6)
+                match_bonus = 1.0 - np.tanh(err)
+                reward = (1.0 - bler_val) + match_bonus
 
-            next_obs = self._complex_to_obs(target, float(sinr_db[rx_idx]))
-            transition = Transition(
-                state=self.prev_obs[rx_idx],
-                action=self.prev_action[rx_idx],
-                reward=float(reward),
-                next_state=next_obs,
-                done=0.0,
-            )
-            self.agents[rx_idx].store_and_maybe_train(transition, evaluation_only=self.evaluation_only)
-            self.reward_log.append((rx_idx, float(reward)))
-            self.prev_obs[rx_idx] = next_obs
+                next_obs = self._complex_to_obs(target_vec, float(sinr_db[rx_idx]))
+                transition = Transition(
+                    state=self.prev_obs[key],
+                    action=self.prev_action[key],
+                    reward=float(reward),
+                    next_state=next_obs,
+                    done=0.0,
+                )
+                self.agents[rx_idx][tx_idx].store_and_maybe_train(
+                    transition, evaluation_only=self.evaluation_only
+                )
+                self.reward_log.append((rx_idx, float(reward)))
+                self.prev_obs[key] = next_obs
 
         return np.array(self.reward_log, dtype=np.float32)
 
@@ -461,12 +479,14 @@ class DDPGChannelPredictor:
 
     def save_all(self, checkpoint_dir: Path) -> None:
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        for idx, agent in enumerate(self.agents):
-            agent.save(checkpoint_dir / f"rx_{idx}.pt")
+        for rx_idx, tx_agents in enumerate(self.agents):
+            for tx_idx, agent in enumerate(tx_agents):
+                agent.save(checkpoint_dir / f"rx_{rx_idx}_tx_{tx_idx}.pt")
 
     def load_all(self, checkpoint_dir: Path) -> None:
-        for idx, agent in enumerate(self.agents):
-            agent.load(checkpoint_dir / f"rx_{idx}.pt")
+        for rx_idx, tx_agents in enumerate(self.agents):
+            for tx_idx, agent in enumerate(tx_agents):
+                agent.load(checkpoint_dir / f"rx_{rx_idx}_tx_{tx_idx}.pt")
 
 
 def default_ddpg_predictor(
