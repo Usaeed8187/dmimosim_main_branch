@@ -759,7 +759,7 @@ def sim_mu_mimo_all(
             ddpg_history = additional_KPIs[8]
             pending_ddpg_actions = ddpg_predictor.predict_channels(np.asarray(ddpg_history))
 
-            hold = 1
+        hold = 1
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps

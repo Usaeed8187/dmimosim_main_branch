@@ -371,7 +371,7 @@ def _default_scenarios(
             quantization=True,
             label="DEQN channel prediction",
             link_adapt=link_adapt,
-            prediction_method="deqn",
+            prediction_method="deqn_plus_two_mode",
         ),
         Scenario(
             perfect_csi=True,
