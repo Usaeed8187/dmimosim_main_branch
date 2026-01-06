@@ -296,6 +296,7 @@ class DDPGChannelPredictor:
         self.obs_dim: Optional[int] = None
         self.act_dim: Optional[int] = None
         self.num_rx_antennas: Optional[int] = None
+        self.rx_antennas_per_receiver: Optional[int] = None
         self.num_tx_nodes: Optional[int] = None
         self.num_tx_antennas: Optional[int] = None
         self.tx_ant_counts: List[int] = []
@@ -312,31 +313,31 @@ class DDPGChannelPredictor:
         self.evaluation_only = evaluation_only
 
     def _ensure_agents_initialized(self, channel: tf.Tensor) -> None:
-        # channel shape: [batch, rx_node, rx_ant, tx_node, tx_ant, ofdm_sym, fft]
-        _, _, rx_ant, tx_node, tx_ant, _, _ = channel.shape
-        if (
-            self.num_rx_antennas == rx_ant
-            and self.num_tx_nodes == tx_node
-            and self.num_tx_antennas == tx_ant
-            and self.agents
-        ):
-            return
+        # channel shape: [batch, _, rx_ant, _, tx_ant, ofdm_sym, fft]
+        _, _, rx_ant, _, tx_ant, _, _ = channel.shape
+        tx_node = ((tx_ant - 4) // 2) + 1
 
         self.num_rx_antennas = int(rx_ant)
+        # The channel tensor contains antennas for every receiver in a single dimension.
+        # Derive the per-receiver antenna count so the observation matches the
+        # expected shape: num_rx_ants * num_tx_ants * num_subbands * 2 + 1.
+        self.rx_antennas_per_receiver = self.num_rx_antennas // self.num_receivers
+
         self.num_tx_nodes = int(tx_node)
         self.num_tx_antennas = int(tx_ant)
 
         # First transmitter has four antennas, all others have two, but cap at the provided tx_ant dimension.
         self.tx_ant_counts = [
             min(self.num_tx_antennas, 4 if tx_idx == 0 else 2) for tx_idx in range(self.num_tx_nodes)
-
         ]
 
         self.agents = []
         for rx_idx in range(self.num_receivers):
             tx_agents: List[DDPGAgent] = []
             for tx_idx, tx_ant_count in enumerate(self.tx_ant_counts):
-                feature_dim = self.num_rx_antennas * tx_ant_count * self.num_subbands
+                feature_dim = (
+                    self.rx_antennas_per_receiver * tx_ant_count * self.num_subbands
+                )
                 obs_dim = 2 * feature_dim + 1
                 act_dim = 2 * feature_dim
                 tx_agents.append(
