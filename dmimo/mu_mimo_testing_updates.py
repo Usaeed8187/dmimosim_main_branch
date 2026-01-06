@@ -757,7 +757,7 @@ def sim_mu_mimo_all(
         
         if cfg.channel_prediction_method == "ddpg" and ddpg_predictor is not None:
             ddpg_history = additional_KPIs[8]
-            pending_ddpg_actions = ddpg_predictor.predict_channels(np.asarray(ddpg_history))
+            pending_ddpg_actions = ddpg_predictor.predict_channels(np.asarray(ddpg_history), sinr_db=additional_KPIs[4])
 
         hold = 1
 

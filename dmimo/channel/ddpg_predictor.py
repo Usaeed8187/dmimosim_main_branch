@@ -21,8 +21,8 @@ def _sparse_initializer(seed: int, density: float = 0.2, spectral_radius: float 
         .with_seed(seed)
         .uniform()
         .sparse(density)
-        .spectral_normalize(spectral_radius)
-        .scale(1.0)
+        .spectral_normalize()
+        .scale(spectral_radius)
     )
     return WeightInitializer(weight_ih_init=input_weight, weight_hh_init=reservoir_weight)
 
@@ -279,7 +279,7 @@ class DDPGChannelPredictor:
         self,
         num_receivers: int,
         num_subbands: int,
-        rbs_per_subband: int = 4,
+        scs_per_subband: int = 4*12,
         act_limit: float = 1.0,
         device: Optional[torch.device] = None,
         evaluation_only: bool = False,
@@ -287,7 +287,7 @@ class DDPGChannelPredictor:
     ):
         self.num_receivers = num_receivers
         self.num_subbands = num_subbands
-        self.rbs_per_subband = rbs_per_subband
+        self.scs_per_subband = scs_per_subband
         self.act_limit = act_limit
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.evaluation_only = evaluation_only
@@ -357,7 +357,7 @@ class DDPGChannelPredictor:
 
         mean_over_time = tf.reduce_mean(channel, axis=[0, 5])  # [rx, rx_ant, tx_node, tx_ant, fft]
         mean_t = tf.transpose(mean_over_time, perm=[4, 0, 1, 2, 3])  # [fft, rx, rx_ant, tx_node, tx_ant]
-        sb_ids = tf.range(tf.shape(mean_t)[0], dtype=tf.int32) // int(self.rbs_per_subband)
+        sb_ids = tf.range(tf.shape(mean_t)[0], dtype=tf.int32) // int(self.scs_per_subband)
         sb = tf.math.segment_mean(mean_t, sb_ids)  # [subband, rx, rx_ant, tx_node, tx_ant]
         return tf.transpose(sb, perm=[1, 2, 3, 4, 0]).numpy()
 
@@ -368,20 +368,34 @@ class DDPGChannelPredictor:
         if sinr_db is None:
             sinr_db = np.zeros(self.num_receivers, dtype=np.float32)
 
-        latest_channel = tf.convert_to_tensor(channel_history[-1])
+        latest_channel = tf.convert_to_tensor(channel_history[-1,...])
         subbands = self._extract_subbands(latest_channel)
         predicted_channel = latest_channel.numpy()
 
-        for rx_idx in range(min(self.num_receivers, subbands.shape[0])):
-            obs = self._complex_to_obs(subbands[rx_idx].reshape(-1), float(sinr_db[rx_idx]))
+        num_transmitters = ((subbands.shape[3] - 4) // 2) + 1
+
+        for rx_idx in range(self.num_receivers):
+
+            rx_ants = np.arange(rx_idx*2,(rx_idx+1)*2)
+
+            for tx_idx in range(num_transmitters):
+
+                if tx_idx == 0:
+                    tx_ants = np.arange(0,4)
+                else:
+                    tx_ants = np.arange((tx_idx-1)*2+4,tx_idx*2+4)
+
+            curr_subbands = subbands[:,rx_ants,...][:,:,:,tx_ants,...]
+            
+            obs = self._complex_to_obs(curr_subbands.reshape(-1), float(sinr_db[rx_idx]))
             action = self.agents[rx_idx].act(obs, explore=not self.evaluation_only)
             real, imag = np.split(action, 2)
-            pred_sb = (real + 1j * imag).reshape(subbands[rx_idx].shape)
+            pred_sb = (real + 1j * imag).reshape(curr_subbands.shape)
             self.predicted_subbands[rx_idx] = pred_sb
             self.prev_obs[rx_idx] = obs
             self.prev_action[rx_idx] = action
 
-            scaling = np.repeat(pred_sb, self.rbs_per_subband, axis=-1)[
+            scaling = np.repeat(pred_sb, self.scs_per_subband, axis=-1)[
                 ..., : predicted_channel.shape[-1]
             ].astype(np.complex64)
             scaling = scaling.reshape((1, 1) + scaling.shape[:3] + (1, scaling.shape[-1]))
@@ -458,13 +472,13 @@ class DDPGChannelPredictor:
 def default_ddpg_predictor(
     num_receivers: int,
     fft_size: int,
-    rbs_per_subband: int = 4,
+    scs_per_subband: int = 4*12,
     evaluation_only: bool = False,
 ) -> DDPGChannelPredictor:
-    num_subbands = int(np.ceil(float(fft_size) / float(rbs_per_subband)))
+    num_subbands = int(np.ceil(float(fft_size) / float(scs_per_subband)))
     return DDPGChannelPredictor(
         num_receivers=num_receivers,
         num_subbands=num_subbands,
-        rbs_per_subband=rbs_per_subband,
+        scs_per_subband=scs_per_subband,
         evaluation_only=evaluation_only,
     )

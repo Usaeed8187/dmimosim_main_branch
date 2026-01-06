@@ -96,9 +96,9 @@ code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "ddpg" # "None", "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode"
+channel_prediction_setting = "ddpg" # "None", "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", "ddpg"
 csi_prediction = True
-channel_prediction_method = "ddpg" # None, "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode"
+channel_prediction_method = "ddpg" # None, "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", ddpg
 csi_quantization_on = True
 imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
@@ -261,7 +261,7 @@ def run_simulation():
 
     shared_ddpg_predictor = (
         default_ddpg_predictor(
-            num_receivers=int(max(rx_ues_arr)),
+            num_receivers=int(max(rx_ues_arr)+2),
             fft_size=SimConfig().fft_size,
             evaluation_only=imitation_method == "none",
         )
