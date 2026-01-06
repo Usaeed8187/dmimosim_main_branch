@@ -7,10 +7,24 @@ import tensorflow as tf
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
+from auto_esn.esn.esn import GroupedDeepESN
+from auto_esn.esn.reservoir.activation import self_normalizing_default
+from auto_esn.esn.reservoir.initialization import CompositeInitializer, WeightInitializer
 
 def _to_torch(x: np.ndarray, device: torch.device) -> torch.Tensor:
     return torch.as_tensor(x, dtype=torch.float32, device=device)
+
+def _sparse_initializer(seed: int, density: float = 0.2, spectral_radius: float = 1.0) -> WeightInitializer:
+    input_weight = CompositeInitializer().with_seed(seed).uniform()
+    reservoir_weight = (
+        CompositeInitializer()
+        .with_seed(seed)
+        .uniform()
+        .sparse(density)
+        .spectral_normalize(spectral_radius)
+        .scale(1.0)
+    )
+    return WeightInitializer(weight_ih_init=input_weight, weight_hh_init=reservoir_weight)
 
 
 @dataclass
@@ -48,31 +62,94 @@ class ReplayBuffer:
 
 
 class Actor(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int, act_limit: float):
+    def __init__(
+        self,
+        obs_dim: int,
+        act_dim: int,
+        act_limit: float,
+        *,
+        groups: int = 4,
+        num_layers: Tuple[int, ...] = (2, 2),
+        hidden_size: int = 64,
+        density: float = 0.2,
+        spectral_radius: float = 1.0,
+        leaky: float = 1.0,
+        regularization: float = 0.5,
+        washout: int = 10,
+        seed: int = 0,
+    ):
         super().__init__()
-        self.act_limit = act_limit
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim, 512), nn.ReLU(),
-            nn.Linear(512, 512), nn.ReLU(),
-            nn.Linear(512, act_dim),
+        activation = self_normalizing_default(leaky_rate=leaky, spectral_radius=spectral_radius)
+        initializer = _sparse_initializer(seed=seed, density=density, spectral_radius=spectral_radius)
+        self.esn = GroupedDeepESN(
+            input_size=obs_dim,
+            output_dim=act_dim,
+            groups=groups,
+            num_layers=num_layers,
+            hidden_size=hidden_size,
+            initializer=initializer,
+            regularization=regularization,
+            activation=activation,
+            washout=washout,
+            bias=True,
+        )
+        hidden_dim = groups * hidden_size
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, act_dim),
             nn.Tanh(),
         )
+        self.act_limit = act_limit
 
     def forward(self, x):
-        return self.act_limit * self.net(x)
+        features = self.esn(x)
+        return self.act_limit * self.head(features)
 
 
 class Critic(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int):
+    def __init__(
+        self,
+        obs_dim: int,
+        act_dim: int,
+        *,
+        groups: int = 4,
+        num_layers: Tuple[int, ...] = (2, 2),
+        hidden_size: int = 64,
+        density: float = 0.2,
+        spectral_radius: float = 1.0,
+        leaky: float = 1.0,
+        regularization: float = 0.5,
+        washout: int = 10,
+        seed: int = 0,
+    ):
+
         super().__init__()
+        activation = self_normalizing_default(leaky_rate=leaky, spectral_radius=spectral_radius)
+        initializer = _sparse_initializer(seed=seed, density=density, spectral_radius=spectral_radius)
+        self.esn = GroupedDeepESN(
+            input_size=obs_dim,
+            output_dim=act_dim,
+            groups=groups,
+            num_layers=num_layers,
+            hidden_size=hidden_size,
+            initializer=initializer,
+            regularization=regularization,
+            activation=activation,
+            washout=washout,
+            bias=True,
+        )
+        hidden_dim = groups * hidden_size
+
         self.net = nn.Sequential(
-            nn.Linear(obs_dim + act_dim, 512), nn.ReLU(),
-            nn.Linear(512, 512), nn.ReLU(),
-            nn.Linear(512, 1),
+            nn.Linear(hidden_dim + act_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1),
         )
 
     def forward(self, s, a):
-        return self.net(torch.cat([s, a], dim=-1))
+        features = self.esn(s)
+        return self.net(torch.cat([features, a], dim=-1))
 
 
 class DDPGAgent:
@@ -102,10 +179,11 @@ class DDPGAgent:
         torch.manual_seed(seed)
         np.random.seed(seed)
 
-        self.actor = Actor(obs_dim, act_dim, act_limit).to(self.device)
-        self.actor_t = Actor(obs_dim, act_dim, act_limit).to(self.device)
-        self.critic = Critic(obs_dim, act_dim).to(self.device)
-        self.critic_t = Critic(obs_dim, act_dim).to(self.device)
+        self.actor = Actor(obs_dim, act_dim, act_limit, seed=seed).to(self.device)
+        self.actor_t = Actor(obs_dim, act_dim, act_limit, seed=seed).to(self.device)
+        self.critic = Critic(obs_dim, act_dim, seed=seed).to(self.device)
+        self.critic_t = Critic(obs_dim, act_dim, seed=seed).to(self.device)
+
         self.actor_t.load_state_dict(self.actor.state_dict())
         self.critic_t.load_state_dict(self.critic.state_dict())
 
