@@ -215,18 +215,13 @@ class DDPGChannelPredictor:
         self.evaluation_only = evaluation_only
         self.seed = seed
 
-        obs_dim = 2 * num_subbands + 1
-        act_dim = 2 * num_subbands
-        self.agents: List[DDPGAgent] = [
-            DDPGAgent(
-                obs_dim=obs_dim,
-                act_dim=act_dim,
-                act_limit=act_limit,
-                device=self.device,
-                seed=seed + idx,
-            )
-            for idx in range(num_receivers)
-        ]
+        self.obs_dim: Optional[int] = None
+        self.act_dim: Optional[int] = None
+        self.num_rx_antennas: Optional[int] = None
+        self.num_tx_nodes: Optional[int] = None
+        self.num_tx_antennas: Optional[int] = None
+
+        self.agents: List[DDPGAgent] = []
 
         self.prev_obs: Dict[int, np.ndarray] = {}
         self.prev_action: Dict[int, np.ndarray] = {}
@@ -235,6 +230,40 @@ class DDPGChannelPredictor:
 
     def set_evaluation_mode(self, evaluation_only: bool) -> None:
         self.evaluation_only = evaluation_only
+
+    def _ensure_agents_initialized(self, channel: tf.Tensor) -> None:
+        # channel shape: [batch, rx_node, rx_ant, tx_node, tx_ant, ofdm_sym, fft]
+        _, _, rx_ant, tx_node, tx_ant, _, _ = channel.shape
+        if (
+            self.num_rx_antennas == rx_ant
+            and self.num_tx_nodes == tx_node
+            and self.num_tx_antennas == tx_ant
+            and self.agents
+        ):
+            return
+
+        self.num_rx_antennas = int(rx_ant)
+        self.num_tx_nodes = int(tx_node)
+        self.num_tx_antennas = int(tx_ant)
+
+        feature_dim = self.num_rx_antennas * self.num_tx_nodes * self.num_tx_antennas * self.num_subbands
+        self.obs_dim = 2 * feature_dim + 1
+        self.act_dim = 2 * feature_dim
+
+        self.agents = [
+            DDPGAgent(
+                obs_dim=self.obs_dim,
+                act_dim=self.act_dim,
+                act_limit=self.act_limit,
+                device=self.device,
+                seed=self.seed + idx,
+            )
+            for idx in range(self.num_receivers)
+        ]
+
+        self.prev_obs.clear()
+        self.prev_action.clear()
+        self.predicted_subbands.clear()
 
     def _complex_to_obs(self, complex_vec: np.ndarray, sinr_db: float) -> np.ndarray:
         real = np.real(complex_vec)
@@ -246,11 +275,14 @@ class DDPGChannelPredictor:
 
     def _extract_subbands(self, channel: tf.Tensor) -> np.ndarray:
         # channel shape: [batch, rx_node, rx_ant, tx_node, tx_ant, ofdm_sym, fft]
-        mean_rx = tf.reduce_mean(channel, axis=[0, 2, 3, 4, 5])  # [rx, fft]
-        mean_rx_t = tf.transpose(mean_rx, perm=[1, 0])  # [fft, rx]
-        sb_ids = tf.range(tf.shape(mean_rx_t)[0], dtype=tf.int32) // int(self.rbs_per_subband)
-        sb = tf.math.segment_mean(mean_rx_t, sb_ids)
-        return tf.transpose(sb, perm=[1, 0]).numpy()
+        self._ensure_agents_initialized(channel)
+
+        mean_over_time = tf.reduce_mean(channel, axis=[0, 5])  # [rx, rx_ant, tx_node, tx_ant, fft]
+        mean_t = tf.transpose(mean_over_time, perm=[4, 0, 1, 2, 3])  # [fft, rx, rx_ant, tx_node, tx_ant]
+        sb_ids = tf.range(tf.shape(mean_t)[0], dtype=tf.int32) // int(self.rbs_per_subband)
+        sb = tf.math.segment_mean(mean_t, sb_ids)  # [subband, rx, rx_ant, tx_node, tx_ant]
+        return tf.transpose(sb, perm=[1, 2, 3, 4, 0]).numpy()
+
 
     def predict_channels(self, channel_history: np.ndarray, sinr_db: Optional[np.ndarray] = None) -> tf.Tensor:
         if channel_history is None:
@@ -263,21 +295,23 @@ class DDPGChannelPredictor:
         predicted_channel = latest_channel.numpy()
 
         for rx_idx in range(min(self.num_receivers, subbands.shape[0])):
-            obs = self._complex_to_obs(subbands[rx_idx], float(sinr_db[rx_idx]))
+            obs = self._complex_to_obs(subbands[rx_idx].reshape(-1), float(sinr_db[rx_idx]))
             action = self.agents[rx_idx].act(obs, explore=not self.evaluation_only)
             real, imag = np.split(action, 2)
-            pred_sb = real + 1j * imag
+            pred_sb = (real + 1j * imag).reshape(subbands[rx_idx].shape)
             self.predicted_subbands[rx_idx] = pred_sb
             self.prev_obs[rx_idx] = obs
             self.prev_action[rx_idx] = action
 
-            scaling = np.repeat(pred_sb, self.rbs_per_subband)[: predicted_channel.shape[-1]]
-            scaling = scaling.astype(np.complex64)
-            scale_shape = (1, 1, 1, 1, 1, 1, -1)
-            scaling = scaling.reshape(scale_shape)
+            scaling = np.repeat(pred_sb, self.rbs_per_subband, axis=-1)[
+                ..., : predicted_channel.shape[-1]
+            ].astype(np.complex64)
+            scaling = scaling.reshape((1, 1) + scaling.shape[:3] + (1, scaling.shape[-1]))
 
-            predicted_channel[:, rx_idx:rx_idx + 1, ...] = predicted_channel[
-                :, rx_idx:rx_idx + 1, ...
+
+            predicted_channel[:, rx_idx : rx_idx + 1, ...] = predicted_channel[
+                :, rx_idx : rx_idx + 1, ...
+
             ] * scaling
 
         return tf.convert_to_tensor(predicted_channel)
@@ -302,8 +336,11 @@ class DDPGChannelPredictor:
             if node_bler is not None and node_bler.size > rx_idx:
                 bler_val = float(np.mean(node_bler[rx_idx]))
 
-            target = true_subbands[rx_idx]
+            target = true_subbands[rx_idx].reshape(-1)
+
             pred = self.predicted_subbands.get(rx_idx, np.zeros_like(target))
+            pred = pred.reshape(-1)
+
             err = np.linalg.norm(pred - target) / (np.linalg.norm(target) + 1e-6)
             match_bonus = 1.0 - np.tanh(err)
             reward = (1.0 - bler_val) + match_bonus
