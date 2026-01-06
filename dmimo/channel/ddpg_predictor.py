@@ -12,7 +12,8 @@ from auto_esn.esn.reservoir.activation import self_normalizing_default
 from auto_esn.esn.reservoir.initialization import CompositeInitializer, WeightInitializer
 
 def _to_torch(x: np.ndarray, device: torch.device) -> torch.Tensor:
-    return torch.as_tensor(x, dtype=torch.float32, device=device)
+    # Always create the tensor on the device we were asked to use
+    return torch.as_tensor(x, dtype=torch.float32).to(device, non_blocking=True)
 
 def _sparse_initializer(seed: int, density: float = 0.2, spectral_radius: float = 1.0) -> WeightInitializer:
     input_weight = CompositeInitializer().with_seed(seed).uniform()
@@ -103,7 +104,21 @@ class Actor(nn.Module):
         self.act_limit = act_limit
 
     def forward(self, x):
-        features = self.esn(x).to(x.device)
+        # Single-device policy:
+        # everything (ESN + head + input) must already be on the same device.
+        dev = x.device
+
+        # Hard fail early with a clear message if something is off-device.
+        p_esn = next(self.esn.parameters())
+        p_head = next(self.head.parameters())
+        if p_esn.device != dev or p_head.device != dev:
+            raise RuntimeError(
+                f"Device mismatch in Actor.forward: "
+                f"x={dev}, esn={p_esn.device}, head={p_head.device}. "
+                f"Construct the agent with device={dev} so all modules live on one device."
+            )
+
+        features = self.esn(x)
         return self.act_limit * self.head(features)
 
 
@@ -148,7 +163,21 @@ class Critic(nn.Module):
         )
 
     def forward(self, s, a):
-        features = self.esn(s).to(s.device)
+        # Single-device policy: s, a, ESN, and net must all be on the same device.
+        dev = s.device
+        if a.device != dev:
+            raise RuntimeError(f"Critic.forward device mismatch: s={dev}, a={a.device}")
+
+        p_esn = next(self.esn.parameters())
+        p_net = next(self.net.parameters())
+        if p_esn.device != dev or p_net.device != dev:
+            raise RuntimeError(
+                f"Device mismatch in Critic.forward: "
+                f"s={dev}, esn={p_esn.device}, net={p_net.device}. "
+                f"Construct the agent with device={dev} so all modules live on one device."
+            )
+
+        features = self.esn(s)
         return self.net(torch.cat([features, a], dim=-1))
 
 
@@ -169,7 +198,9 @@ class DDPGAgent:
         noise_std: float = 0.1,
         seed: int = 0,
     ):
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Device is decided once at construction; everything will live on this device.
+        self.device = torch.device("cpu")
+
         self.gamma = gamma
         self.tau = tau
         self.batch_size = batch_size
@@ -179,10 +210,26 @@ class DDPGAgent:
         torch.manual_seed(seed)
         np.random.seed(seed)
 
-        self.actor = Actor(obs_dim, act_dim, act_limit, seed=seed).to(self.device)
-        self.actor_t = Actor(obs_dim, act_dim, act_limit, seed=seed).to(self.device)
-        self.critic = Critic(obs_dim, act_dim, seed=seed).to(self.device)
-        self.critic_t = Critic(obs_dim, act_dim, seed=seed).to(self.device)
+        # Build on CPU first, then move once (so no hidden CPU tensors linger inside auto_esn)
+        self.actor = Actor(obs_dim, act_dim, act_limit, seed=seed)
+        self.actor_t = Actor(obs_dim, act_dim, act_limit, seed=seed)
+        self.critic = Critic(obs_dim, act_dim, seed=seed)
+        self.critic_t = Critic(obs_dim, act_dim, seed=seed)
+
+        self.actor.to(self.device)
+        self.actor_t.to(self.device)
+        self.critic.to(self.device)
+        self.critic_t.to(self.device)
+
+        # Make sure auto_esn has a dummy forward on the final device so it initializes
+        # any internal state tensors on the correct device.
+        with torch.no_grad():
+            dummy = torch.zeros(1, obs_dim, device=self.device)
+            _ = self.actor(dummy)
+            _ = self.actor_t(dummy)
+            _ = self.critic(dummy, torch.zeros(1, act_dim, device=self.device))
+            _ = self.critic_t(dummy, torch.zeros(1, act_dim, device=self.device))
+
 
         self.actor_t.load_state_dict(self.actor.state_dict())
         self.critic_t.load_state_dict(self.critic.state_dict())
@@ -289,7 +336,9 @@ class DDPGChannelPredictor:
         self.num_subbands = num_subbands
         self.scs_per_subband = scs_per_subband
         self.act_limit = act_limit
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Device is fixed for the whole predictor; agents inherit it.
+        self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.evaluation_only = evaluation_only
         self.seed = seed
 
@@ -495,11 +544,17 @@ def default_ddpg_predictor(
     fft_size: int,
     scs_per_subband: int = 4*12,
     evaluation_only: bool = False,
+    device: Optional[torch.device] = None,
 ) -> DDPGChannelPredictor:
     num_subbands = int(np.ceil(float(fft_size) / float(scs_per_subband)))
+
+    # Choose device once, up-front. Everything will stay there.
+    dev = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     return DDPGChannelPredictor(
         num_receivers=num_receivers,
         num_subbands=num_subbands,
         scs_per_subband=scs_per_subband,
         evaluation_only=evaluation_only,
+        device=dev,
     )
