@@ -461,12 +461,18 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     # Channel CSI estimation using channels in previous frames/slots
     h_freq_csi_history = None
     matrix_target = getattr(cfg, "perfect_csi_matrix", None)
-    use_matrix_mix = matrix_target in {"W_1", "W_C1", "W_C2_t"}
+    force_outdated_csi = getattr(cfg, "force_outdated_csi", False)
+    use_matrix_mix = matrix_target in {"W_1", "W_C1", "W_C2_t"} and not force_outdated_csi
     h_freq_csi_perfect = None
     h_freq_csi_outdated = None
     rx_snr_db = None
 
-    if use_matrix_mix:
+    if force_outdated_csi:
+        h_freq_csi, rx_snr_db, _ = dmimo_chans.load_channel(
+            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+            batch_size=cfg.num_slots_p2,
+        )
+    elif use_matrix_mix:
         h_freq_csi_perfect, _, _ = dmimo_chans.load_channel(
             slot_idx=cfg.first_slot_idx,
             batch_size=cfg.num_slots_p2,
