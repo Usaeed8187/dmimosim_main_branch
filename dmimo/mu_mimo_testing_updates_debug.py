@@ -82,6 +82,44 @@ def _enumerate_beam_sets(N1, O1, N2, O2, L):
 
     return sorted(beam_sets)
 
+def _build_w1_override_candidates(ns3cfg):
+    num_tx_nodes = ns3cfg.num_txue_sel + 1
+    num_rx_nodes = ns3cfg.num_rxue_sel + 2
+
+    per_rx_tx_beams = []
+    for _rx in range(num_rx_nodes):
+        per_tx_options = []
+        for tx in range(num_tx_nodes):
+            if tx == 0:
+                N1 = 4
+                L = 4
+            else:
+                N1 = 2
+                L = 2
+            per_tx_options.append(_enumerate_beam_sets(N1=N1, O1=4, N2=1, O2=1, L=L))
+        per_rx_tx_beams.append(per_tx_options)
+
+    override_candidates = []
+    per_pair_options = [
+        per_rx_tx_beams[rx][tx]
+        for rx in range(num_rx_nodes)
+        for tx in range(num_tx_nodes)
+    ]
+
+    for combo in itertools.product(*per_pair_options):
+        override = [None for _ in range(num_rx_nodes)]
+        combo_idx = 0
+        for rx in range(num_rx_nodes):
+            tx_overrides = []
+            for _tx in range(num_tx_nodes):
+                tx_overrides.append(combo[combo_idx])
+                combo_idx += 1
+            override[rx + 2] = tx_overrides
+        override_candidates.append(override)
+
+    return override_candidates
+
+
 class MU_MIMO(Model):
 
     def __init__(self, cfg: SimConfig, rg_csi: ResourceGrid, **kwargs):
@@ -555,12 +593,14 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
         
     PMI_feedback_bits = None
+    w1_override_candidates = None
+    h_freq_csi_quant_input = None
 
     if cfg.csi_quantization_on:
-        h_freq_csi = tf.reduce_mean(h_freq_csi, axis=0, keepdims=True)
+        h_freq_csi_quant_input = tf.reduce_mean(h_freq_csi, axis=0, keepdims=True)
         if cfg.PMI_feedback_architecture == "RVQ":
             rvq = RandomVectorQuantizer(bits_per_codeword=15, vector_dim=h_freq_csi.shape[4], seed=42)
-            h_freq_csi = rvq.quantize_feedback(h_freq_csi, cfg, rg_csi, donald_hack=True, quantization_debug=False)
+            h_freq_csi = rvq.quantize_feedback(h_freq_csi_quant_input, cfg, rg_csi, donald_hack=True, quantization_debug=False)
         else:
             type_II_PMI_quantizer = quantized_CSI_feedback(method='5G', 
                                                             codebook_selection_method=None,
@@ -572,36 +612,14 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             if cfg.start_slot_idx != cfg.start_slot_idx:
                 assert w1_override is not None
             h_freq_csi, feedback_bits, components = type_II_PMI_quantizer(
-                h_freq_csi,
+                h_freq_csi_quant_input,
                 return_feedback_bits=True,
                 return_components=True,
             )
                 
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
             
-            for rx in range(ns3cfg.num_rxue_sel):
-                for tx in range(ns3cfg.num_txue_sel):
-                    if tx == 0:
-                        N1 = 4
-                        L = 4
-                    else:
-                        N1 = 2
-                        L = 2
-                    beam_sets = _enumerate_beam_sets(N1=N1, O1=4, N2=1, O2=1, L=L)
-
-                    for beam in beam_sets:
-
-                        hold = 1
-
-
-
-            h_freq_csi_curr, _, _ = type_II_PMI_quantizer(
-                h_freq_csi,
-                return_feedback_bits=True,
-                return_components=True,
-                w1_beam_indices_override=w1_override,
-            )
-
+            w1_override_candidates = _build_w1_override_candidates(ns3cfg)
         
     if cfg.rank_adapt:
         # Update rank and total number of streams
@@ -660,6 +678,41 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
     print("BLER: ", coded_bler)
     # print("BER: ", uncoded_ber_phase_2)
+
+    override_sum_log_sinr = []
+    override_bler = []
+    override_sinr_db_arr = []
+    if cfg.csi_quantization_on and w1_override_candidates:
+        for w1_override in w1_override_candidates:
+            h_freq_csi_override, _, _ = type_II_PMI_quantizer(
+                h_freq_csi_quant_input,
+                return_feedback_bits=True,
+                return_components=True,
+                w1_beam_indices_override=w1_override,
+            )
+            h_freq_csi_override = tf.squeeze(h_freq_csi_override, axis=(1, 3))
+            dec_bits_override, _, _, _, _, sinr_db_arr_override = mu_mimo(
+                dmimo_chans,
+                h_freq_csi_override,
+                info_bits,
+                snr_dB_arr,
+            )
+            info_bits_override = tf.reshape(info_bits, dec_bits_override.shape)
+            coded_bler_override = compute_bler(info_bits_override, dec_bits_override).numpy()
+            sinr_linear = 10.0 ** (np.asarray(sinr_db_arr_override) / 10.0)
+            sum_log_sinr = np.sum(np.log(1.0 + sinr_linear))
+
+            override_sum_log_sinr.append(sum_log_sinr)
+            override_bler.append(coded_bler_override)
+            override_sinr_db_arr.append(sinr_db_arr_override)
+
+        override_sum_log_sinr = np.array(override_sum_log_sinr)
+        override_bler = np.array(override_bler)
+        best_override_idx = int(np.argmax(override_sum_log_sinr))
+        best_override_sinr_db_arr = override_sinr_db_arr[best_override_idx]
+        print("Override candidate count: ", len(override_sum_log_sinr))
+        print("Baseline SINR (dB): ", sinr_db_arr)
+        print("Best override SINR (dB): ", best_override_sinr_db_arr)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
 
