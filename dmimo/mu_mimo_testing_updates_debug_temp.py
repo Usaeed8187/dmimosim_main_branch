@@ -1,9 +1,10 @@
 import numpy as np
 import tensorflow as tf
-import os
 from tensorflow.python.keras import Model
 import matplotlib.pyplot as plt
 import time
+from typing import Optional
+from pathlib import Path
 
 from sionna.ofdm import ResourceGrid, ResourceGridMapper, LSChannelEstimator, LMMSEEqualizer
 from sionna.mimo import StreamManagement
@@ -17,13 +18,15 @@ from sionna.utils import BinarySource, flatten_dims, matrix_inv, matrix_pinv
 from sionna.utils.metrics import compute_ber, compute_bler
 
 from dmimo.config import Ns3Config, SimConfig, RCConfig
-from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
-from dmimo.channel import standard_rc_pred_freq_mimo
+from dmimo.channel import dMIMOChannels, lmmse_channel_estimation, estimate_freq_cov, LMMSELinearInterp
+from dmimo.channel import standard_rc_pred_freq_mimo, default_ddpg_predictor
+from dmimo.channel.ddpg_predictor import DDPGChannelPredictor
 from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred
-from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple 
+from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
+from dmimo.channel.rl_beam_selector import RLBeamSelector
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
-from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
+from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, QuantizedSLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
 from dmimo.mimo import rankAdaptation, linkAdaptation
 from dmimo.mimo import MUMIMOScheduler
 from dmimo.mimo import update_node_selection, quantized_CSI_feedback, RandomVectorQuantizer, RandomVectorQuantizerNumpy
@@ -32,6 +35,69 @@ from dmimo.utils import add_frequency_offset, add_timing_offset, compute_UE_wise
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
 
+def _assemble_type_ii_cb2_precoder(quantizer, components):
+    w_1 = components["W_1"]
+    w_c1 = components["W_C1"]
+    w_c2 = components["W_C2"]
+
+    w_rb = quantizer.assemble_W(w_1, w_c1, w_c2)  # [Ns, N_tx, N_sb]
+    w_rb = tf.transpose(w_rb, perm=[2, 0, 1])  # [N_sb, Ns, N_tx]
+
+    p_wb = tf.transpose(tf.linalg.diag_part(w_c1), perm=[1, 0])
+    p_l_i_t_2_all = tf.transpose(tf.abs(w_c2), perm=[2, 1, 0])
+
+    norm_factor = 1 / tf.math.sqrt(
+        w_1.shape[0]
+        * quantizer.N_2
+        * tf.reduce_sum((p_wb[tf.newaxis, ...] * p_l_i_t_2_all) ** 2, axis=1)
+    )
+    norm_factor = tf.cast(norm_factor, quantizer.dtype)
+    w_rb = norm_factor[..., tf.newaxis] * w_rb
+    w_rb = tf.transpose(w_rb, perm=[0, 2, 1])  # [N_sb, N_tx, Ns]
+
+    return w_rb
+
+
+def _build_type_ii_cb2_quantized_channel(quantizer, components_by_rx, h_est):
+    w_rb_all = []
+    for components in components_by_rx:
+        w_rb_all.append(_assemble_type_ii_cb2_precoder(quantizer, components))
+
+    h_est_quant = tf.concat(w_rb_all, axis=-1)  # [N_sb, N_tx, total_Ns]
+    h_est_quant = tf.repeat(
+        h_est_quant,
+        repeats=np.ceil(quantizer.nfft / w_rb_all[0].shape[0]),
+        axis=0,
+    )
+    h_est_quant = h_est_quant[: quantizer.nfft, ...]
+    h_est_quant = h_est_quant[tf.newaxis, ...]  # [1, N_fft, N_tx, total_Ns]
+    h_est_quant = tf.repeat(h_est_quant, repeats=h_est.shape[5], axis=0)
+    h_est_quant = tf.transpose(h_est_quant, perm=[3, 2, 0, 1])
+    h_est_quant = h_est_quant[tf.newaxis, tf.newaxis, :, tf.newaxis, :, :, :]
+
+    return h_est_quant
+
+
+def _mix_cb2_feedback_bits(perfect_bits, outdated_bits, matrix_target):
+    mixed_bits = []
+    for perfect_entry, outdated_entry in zip(perfect_bits, outdated_bits):
+        mixed_entry = {
+            "w1_beam_indices": perfect_entry["w1_beam_indices"]
+            if matrix_target == "W_1"
+            else outdated_entry["w1_beam_indices"],
+            "wb_amplitude_indices": perfect_entry["wb_amplitude_indices"]
+            if matrix_target == "W_C1"
+            else outdated_entry["wb_amplitude_indices"],
+            "sb_amplitude_indices": perfect_entry["sb_amplitude_indices"]
+            if matrix_target == "W_C2_t"
+            else outdated_entry["sb_amplitude_indices"],
+            "sb_phase_indices": perfect_entry["sb_phase_indices"]
+            if matrix_target == "W_C2_t"
+            else outdated_entry["sb_phase_indices"],
+        }
+        mixed_bits.append(mixed_entry)
+
+    return mixed_bits
 
 class MU_MIMO(Model):
 
@@ -123,6 +189,8 @@ class MU_MIMO(Model):
         elif self.cfg.precoding_method == "SLNR":
             self.slnr_precoder = SLNRPrecoder(self.rg, sm, return_effective_channel=True)
             self.slnr_equalizer = SLNREqualizer(self.rg, sm)
+            self.slnr_quantized_precoder = QuantizedSLNRPrecoder(self.rg, sm)
+            # self.slnr_quantized_equalizer = QuantizedSLNREqualizer(self.rg, sm)
         elif "DIRECT" in self.cfg.precoding_method:
             self.quantized_direct_precoder = QuantizedDirectPrecoder(self.rg, sm)
         else:
@@ -142,7 +210,7 @@ class MU_MIMO(Model):
         # The decoder provides hard-decisions on the information bits
         self.decoder = LDPC5GDecoder(self.encoder, hard_out=True)
 
-    def call(self, dmimo_chans: dMIMOChannels, h_freq_csi, info_bits):
+    def call(self, dmimo_chans: dMIMOChannels, h_freq_csi, info_bits, snr_dB_arr):
         """
         Signal processing for one MU-MIMO transmission cycle (P2)
 
@@ -177,7 +245,10 @@ class MU_MIMO(Model):
             x_precoded, g = self.bd_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "SLNR":
             nvar = 5e-2  # TODO optimize value
-            x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi, nvar, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
+            if "type_II" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
+                x_precoded, g = self.slnr_quantized_precoder(x_rg, h_freq_csi, snr_dB_arr, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+            else:
+                x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi, nvar, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
         elif self.cfg.precoding_method == "DIRECT":
             x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
         else:
@@ -198,8 +269,8 @@ class MU_MIMO(Model):
 
         if self.cfg.precoding_method == "BD":
             y = self.bd_equalizer([y, h_freq_csi, self.cfg.ue_indices, self.cfg.ue_ranks])
-        elif self.cfg.precoding_method == "SLNR":
-            y = self.slnr_equalizer([y, h_freq_csi, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
+        # elif self.cfg.precoding_method == "SLNR":
+        #     y = self.slnr_equalizer([y, h_freq_csi, nvar, self.cfg.ue_indices, self.cfg.ue_ranks])
 
         # LS channel estimation with linear interpolation
         no = 5e-2  # initial noise estimation (tunable param)
@@ -255,6 +326,8 @@ class MU_MIMO(Model):
         uncoded_ber = compute_ber(d, d_hard).numpy()
         # print(f"\nUncoded BER: {uncoded_ber}\n")
 
+        nodewise_uncoded_ber, _ = compute_UE_wise_BER(d, d_hard, self.cfg.ue_ranks[0], self.cfg.num_tx_streams)
+
         # Hard-decision symbol error rate
         x_hard = self.mapper(d_hard)
         uncoded_ser = np.count_nonzero(x - x_hard) / np.prod(x.shape)
@@ -267,7 +340,11 @@ class MU_MIMO(Model):
         # LDPC hard-decision decoding
         dec_bits = self.decoder(llr)
 
-        sinr_dB_arr = None
+        sinr_linear = tf.math.reciprocal(tf.cast(no_eff, tf.float32) + 1e-12)
+        sinr_linear = tf.reduce_mean(sinr_linear, axis=[1, -1])
+        sinr_linear = tf.reduce_mean(sinr_linear, axis=0)
+        sinr_dB_arr = 10 * np.log10(sinr_linear.numpy() + 1e-12)
+
         return dec_bits, uncoded_ber, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_dB_arr
 
 
@@ -376,16 +453,38 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                           dc_null=False,
                           pilot_pattern="kronecker",
                           pilot_ofdm_symbol_indices=[2, 11])
+    
+    # Cacheable LMMSE resources for the current drop
+    freq_cov_mat = getattr(cfg, "freq_cov_mat", None)
+    lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
 
     # Channel CSI estimation using channels in previous frames/slots
-    if cfg.perfect_csi is True:
+    h_freq_csi_history = None
+    matrix_target = getattr(cfg, "perfect_csi_matrix", None)
+    use_matrix_mix = matrix_target in {"W_1", "W_C1", "W_C2_t"}
+    h_freq_csi_perfect = None
+    h_freq_csi_outdated = None
+    rx_snr_db = None
+
+    if use_matrix_mix:
+        h_freq_csi_perfect, _, _ = dmimo_chans.load_channel(
+            slot_idx=cfg.first_slot_idx,
+            batch_size=cfg.num_slots_p2,
+        )
+        h_freq_csi_outdated, rx_snr_db, _ = dmimo_chans.load_channel(
+            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+            batch_size=cfg.num_slots_p2,
+        )
+        h_freq_csi = h_freq_csi_outdated
+    elif cfg.perfect_csi is True:
         # Perfect channel estimation
         h_freq_csi, rx_snr_db, rx_pwr_dbm = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
                                                                      batch_size=cfg.num_slots_p2)
     elif cfg.csi_prediction is True:
         rc_predictor = getattr(cfg, "rc_predictor", None)
+
         if rc_predictor is None:
-            rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, ns3cfg)
+            rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, rc_config, ns3cfg)
             cfg.rc_predictor = rc_predictor
         if cfg.first_slot_idx == cfg.start_slot_idx:
             rc_predictor.reset_csi_history()
@@ -397,17 +496,39 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             h_freq_csi_history = rc_predictor.get_ideal_csi_history(cfg.first_slot_idx, cfg.csi_delay,
                                                           dmimo_chans)
         else:
-            h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
-                                                            rg_csi, dmimo_chans, 
-                                                            cfo_vals=cfg.random_cfo_vals,
-                                                            sto_vals=cfg.random_sto_vals,
-                                                            estimated_channels_dir=cfg.estimated_channels_dir)
+            if "deqn" in cfg.channel_prediction_method:
+                
+                if "plus" in cfg.channel_prediction_method:
+                    rc_predictor.history_len = rc_config.history_len + 1
+
+                h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx + cfg.num_slots_p1 + cfg.num_slots_p2, cfg.csi_delay,
+                                                                rg_csi, dmimo_chans, 
+                                                                cfo_vals=cfg.random_cfo_vals,
+                                                                sto_vals=cfg.random_sto_vals,
+                                                                estimated_channels_dir=cfg.estimated_channels_dir,
+                                                                freq_cov_mat=freq_cov_mat,
+                                                                lmmse_interpolator=lmmse_interpolator)
+                h_freq_csi = h_freq_csi_history[-2, ...] # h_freq_csi_t0
+                h_freq_csi_t1 = h_freq_csi_history[-1, ...]
+
+                if "plus" in cfg.channel_prediction_method:
+                    h_freq_csi_history = h_freq_csi_history[:-1, ...]
+                
+            else:
+                h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
+                                                                rg_csi, dmimo_chans, 
+                                                                cfo_vals=cfg.random_cfo_vals,
+                                                                sto_vals=cfg.random_sto_vals,
+                                                                estimated_channels_dir=cfg.estimated_channels_dir,
+                                                                freq_cov_mat=freq_cov_mat,
+                                                                lmmse_interpolator=lmmse_interpolator)
+                
         end_time = time.time()
         # print("Total time for channel history gathering: ", end_time - start_time)
         
         if "two_mode" in cfg.channel_prediction_method:
 
-            if cfg.channel_prediction_method == "two_mode_tf":
+            if "two_mode_tf" in cfg.channel_prediction_method:
 
                 start_time_all_loops = time.time()
 
@@ -426,10 +547,18 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
         elif cfg.channel_prediction_method == "old":
             h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
-        elif cfg.channel_prediction_method == "weiner_filter":
+        elif "weiner_filter" in cfg.channel_prediction_method:
             # Weiner Filter based prediction (MIMO) (per_tx_rx_node_pair)
             weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
             h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len-1))
+        elif cfg.channel_prediction_method == "deqn":
+            pass
+        elif cfg.channel_prediction_method == "ddpg":
+            ddpg_actions = getattr(cfg, "ddpg_pred_channel", None)
+            if ddpg_actions is None:
+                h_freq_csi = h_freq_csi_history[-1, ...]
+            else:
+                h_freq_csi = ddpg_actions
         else:
             raise ValueError("Channel prediction method not implemented here.")
     else:
@@ -437,13 +566,51 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi,
                                                            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                            cfo_vals=cfg.random_cfo_vals,
-                                                           sto_vals=cfg.random_sto_vals)
-    _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                batch_size=cfg.num_slots_p2)
+                                                           sto_vals=cfg.random_sto_vals,
+                                                           freq_cov_mat=freq_cov_mat,
+                                                           lmmse_interpolator=lmmse_interpolator)
+    if not use_matrix_mix:
+        if cfg.channel_prediction_method == "deqn":
+            _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
+                                                        batch_size=cfg.num_slots_p2)
+        else:
+            _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+                                                        batch_size=cfg.num_slots_p2)
     
     # Pick the selected UE's channels
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_tx_ue_indices, (-1,)), axis=4)
+
+    if use_matrix_mix:
+        h_freq_csi_perfect = tf.gather(
+            h_freq_csi_perfect,
+            tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)),
+            axis=2,
+        )
+        h_freq_csi_perfect = tf.gather(
+            h_freq_csi_perfect,
+            tf.reshape(cfg.scheduled_tx_ue_indices, (-1,)),
+            axis=4,
+        )
+        h_freq_csi_outdated = tf.gather(
+            h_freq_csi_outdated,
+            tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)),
+            axis=2,
+        )
+        h_freq_csi_outdated = tf.gather(
+            h_freq_csi_outdated,
+            tf.reshape(cfg.scheduled_tx_ue_indices, (-1,)),
+            axis=4,
+        )
+
+    # TODO : Make rank and link adaptation work with quantized CSI feedback
+    if cfg.rank_adapt or cfg.link_adapt:
+        # Rank and link adaptation
+        # TODO: add support for quantized CSI feedback
+        rank_feedback_report, n_var, mcs_feedback_report = \
+            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
+        
+    PMI_feedback_bits = None
 
     if cfg.csi_quantization_on:
         h_freq_csi = tf.reduce_mean(h_freq_csi, axis=0, keepdims=True)
@@ -451,26 +618,87 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             rvq = RandomVectorQuantizer(bits_per_codeword=15, vector_dim=h_freq_csi.shape[4], seed=42)
             h_freq_csi = rvq.quantize_feedback(h_freq_csi, cfg, rg_csi, donald_hack=True, quantization_debug=False)
         else:
-            type_II_PMI_quantizer = quantized_CSI_feedback(method='5G', 
-                                                            codebook_selection_method=None,
-                                                            num_tx_streams=cfg.num_tx_streams,
-                                                            architecture=cfg.PMI_feedback_architecture,
-                                                            rbs_per_subband=4,
-                                                            snrdb=rx_snr_db)
-            return_feedback_bits = True
-            PMI_feedback_report = type_II_PMI_quantizer(h_freq_csi, return_feedback_bits=return_feedback_bits)
-            if return_feedback_bits:
-                h_freq_csi = PMI_feedback_report[0]
-                PMI_feedback_bits = PMI_feedback_report[1]
-            else:
-                h_freq_csi = PMI_feedback_report
-            h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
+            type_II_PMI_quantizer = quantized_CSI_feedback(
+                method='5G',
+                codebook_selection_method=None,
+                num_tx_streams=cfg.num_tx_streams,
+                architecture=cfg.PMI_feedback_architecture,
+                rbs_per_subband=4,
+                snrdb=rx_snr_db,
+            )
+            w1_override = getattr(cfg, "rl_w1_override", None)
+            if cfg.start_slot_idx != cfg.start_slot_idx:
+                assert w1_override is not None
+            if use_matrix_mix and cfg.PMI_feedback_architecture == "dMIMO_phase2_type_II_CB2":
+                type_II_PMI_quantizer_perfect = quantized_CSI_feedback(
+                    method='5G',
+                    codebook_selection_method=None,
+                    num_tx_streams=cfg.num_tx_streams,
+                    architecture=cfg.PMI_feedback_architecture,
+                    rbs_per_subband=4,
+                    snrdb=rx_snr_db,
+                )
+                h_freq_csi_perfect_rb = tf.reduce_mean(h_freq_csi_perfect, axis=0, keepdims=True)
+                h_freq_csi_outdated_rb = tf.reduce_mean(h_freq_csi_outdated, axis=0, keepdims=True)
 
-    if cfg.rank_adapt or cfg.link_adapt:
-        # Rank and link adaptation
-        # TODO: add support for quantized CSI feedback
-        rank_feedback_report, n_var, mcs_feedback_report = \
-            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
+                _, perfect_feedback_bits, perfect_components = type_II_PMI_quantizer_perfect(
+                    h_freq_csi_perfect_rb,
+                    return_feedback_bits=True,
+                    return_components=True,
+                    w1_beam_indices_override=w1_override,
+                )
+
+                _, outdated_feedback_bits, outdated_components = type_II_PMI_quantizer(
+                    h_freq_csi_outdated_rb,
+                    return_feedback_bits=True,
+                    return_components=True,
+                    w1_beam_indices_override=w1_override,
+                )
+
+                mixed_components = []
+                for perfect_component, outdated_component in zip(perfect_components, outdated_components):
+                    mixed_components.append(
+                        {
+                            "W_1": perfect_component["W_1"]
+                            if matrix_target == "W_1"
+                            else outdated_component["W_1"],
+                            "W_C1": perfect_component["W_C1"]
+                            if matrix_target == "W_C1"
+                            else outdated_component["W_C1"],
+                            "W_C2": perfect_component["W_C2"]
+                            if matrix_target == "W_C2_t"
+                            else outdated_component["W_C2"],
+                        }
+                    )
+
+                h_freq_csi = _build_type_ii_cb2_quantized_channel(
+                    type_II_PMI_quantizer,
+                    mixed_components,
+                    h_freq_csi_outdated_rb,
+                )
+                PMI_feedback_bits = _mix_cb2_feedback_bits(
+                    perfect_feedback_bits,
+                    outdated_feedback_bits,
+                    matrix_target,
+                )
+            else:
+                h_freq_csi, wrong_PMI_feedback_bits = type_II_PMI_quantizer(
+                    h_freq_csi,
+                    return_feedback_bits=True,
+                    w1_beam_indices_override=w1_override,
+                )
+
+                if cfg.csi_prediction is True and cfg.channel_prediction_method == "deqn":
+                    h_freq_csi_t1 = tf.reduce_mean(h_freq_csi_t1, axis=0, keepdims=True)
+                    tmp_2, PMI_feedback_bits = type_II_PMI_quantizer(
+                        h_freq_csi_t1,
+                        return_feedback_bits=True,
+                    )
+                # print("wrong_PMI_feedback_bits[0]['w1_beam_indices']: ", wrong_PMI_feedback_bits[0]['w1_beam_indices'])
+                # print("PMI_feedback_bits[0]['w1_beam_indices']: ", PMI_feedback_bits[0]['w1_beam_indices'])
+
+
+            h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
         
     if cfg.rank_adapt:
         # Update rank and total number of streams
@@ -513,14 +741,22 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         # print("BER: {}  BLER: {}".format(txs_ber, txs_bler))
         assert txs_ber <= 1e-3, "TxSquad transmission BER too high"
 
+    # Saving Rx SNRs
+    rx_snr_lin = 10.0 **( rx_snr_db / 10.0)
+    rx_snr_lin = np.mean(rx_snr_lin, axis=(0,1, 3))
+    rx_snr_lin = np.reshape(rx_snr_lin, [ns3cfg.num_rxue_sel+2, -1])
+    rx_snr_lin = np.mean(rx_snr_lin, axis=-1)
+    snr_dB_arr = 10*np.log10(rx_snr_lin)
+
     # MU-MIMO transmission (P2)
-    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_dB_arr = mu_mimo(dmimo_chans, h_freq_csi, info_bits)
+    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_db_arr = mu_mimo(dmimo_chans, h_freq_csi, info_bits, snr_dB_arr)
 
     # Update error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
     print("BLER: ", coded_bler)
+    # print("BER: ", uncoded_ber_phase_2)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
 
@@ -568,176 +804,17 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_dB_arr, PMI_feedback_bits]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, h_freq_csi_history]
 
 
-def _flatten_pmi_values(val):
-    if val is None:
-        return np.array([])
-    if isinstance(val, tf.Tensor):
-        val = val.numpy()
-    if isinstance(val, np.ndarray):
-        return val.flatten()
-    if isinstance(val, (list, tuple)):
-        if len(val) == 0:
-            return np.array([])
-        flattened = [_flatten_pmi_values(v) for v in val if v is not None]
-        flattened = [v for v in flattened if v.size > 0]
-        if len(flattened) == 0:
-            return np.array([])
-        return np.concatenate(flattened)
-    try:
-        return np.array([val]).flatten()
-    except Exception:
-        return np.array([])
-
-
-def _extract_pmi_field(entry, rx_idx, key, tx_idx=None):
-    if entry is None:
-        return np.array([])
-    if isinstance(entry, list):
-        if rx_idx >= len(entry):
-            return np.array([])
-        entry = entry[rx_idx]
-    if not isinstance(entry, dict) or key not in entry:
-        return np.array([])
-    value = entry[key]
-    if key == "w1_beam_indices" and isinstance(value, (list, tuple)) and tx_idx is not None:
-        if tx_idx < len(value):
-            value = value[tx_idx]
-        else:
-            return np.array([])
-    return _flatten_pmi_values(value)
-
-
-def _extract_all_pmi_fields(entry, key):
-    if entry is None:
-        return np.array([])
-    values = []
-    rx_entries = entry if isinstance(entry, list) else [entry]
-    for rx_entry in rx_entries:
-        if not isinstance(rx_entry, dict) or key not in rx_entry:
-            continue
-        data = rx_entry[key]
-        if key == "w1_beam_indices" and isinstance(data, (list, tuple)):
-            for tx_val in data:
-                flattened = _flatten_pmi_values(tx_val)
-                if flattened.size > 0:
-                    values.append(flattened)
-        else:
-            flattened = _flatten_pmi_values(data)
-            if flattened.size > 0:
-                values.append(flattened)
-    if len(values) == 0:
-        return np.array([])
-    return np.concatenate(values)
-
-
-def _compute_change_rate(sequences):
-    if len(sequences) < 2:
-        return 0.0
-    changes = 0
-    for idx in range(1, len(sequences)):
-        if not np.array_equal(sequences[idx], sequences[idx-1]):
-            changes += 1
-    return changes / float(len(sequences) - 1)
-
-
-def _debug_pmi_temporal_change(PMI_feedback_bits, ref_tx=0, ref_rx=0, save_dir="results"):
-    if PMI_feedback_bits is None or len(PMI_feedback_bits) < 2:
-        print("PMI debug requested but insufficient PMI feedback samples were collected.")
-        return
-
-    valid_feedback = [entry for entry in PMI_feedback_bits if entry is not None]
-    if len(valid_feedback) < 2:
-        print("PMI debug requested but PMI feedback entries are missing.")
-        return
-
-    keys = ["w1_beam_indices", "wb_amplitude_indices", "sb_amplitude_indices", "sb_phase_indices"]
-
-    sample_entry = valid_feedback[0]
-    num_rx = len(sample_entry) if isinstance(sample_entry, list) else 1
-    num_tx = 1
-    if isinstance(sample_entry, list) and len(sample_entry) > 0 and isinstance(sample_entry[0], dict):
-        w1_first = sample_entry[0].get("w1_beam_indices")
-        if isinstance(w1_first, (list, tuple)):
-            num_tx = len(w1_first)
-
-    rx_rates = {key: [] for key in keys}
-    for rx_idx in range(num_rx):
-        for key in keys:
-            sequences = [_extract_pmi_field(entry, rx_idx, key, tx_idx=ref_tx) for entry in valid_feedback]
-            rx_rates[key].append(_compute_change_rate(sequences))
-
-    tx_rates = {key: [] for key in keys}
-    for tx_idx in range(num_tx):
-        for key in keys:
-            sequences = [_extract_pmi_field(entry, ref_rx, key, tx_idx=tx_idx) for entry in valid_feedback]
-            tx_rates[key].append(_compute_change_rate(sequences))
-
-    aggregate_rates = {}
-    for key in keys:
-        sequences = [_extract_all_pmi_fields(entry, key) for entry in valid_feedback]
-        aggregate_rates[key] = _compute_change_rate(sequences)
-
-    print("\nPMI temporal change debug (fraction of subframe transitions that changed):")
-    print(f"  Reference transmitter {ref_tx} across receivers:")
-    for key in keys:
-        if len(rx_rates[key]) == 0:
-            continue
-        max_rx = int(np.argmax(rx_rates[key]))
-        print(f"    {key}: mean change rate {np.mean(rx_rates[key]):.2f}, max at RX {max_rx} ({rx_rates[key][max_rx]:.2f})")
-
-    print(f"  Reference receiver {ref_rx} across transmitters:")
-    for key in keys:
-        if len(tx_rates[key]) == 0:
-            continue
-        max_tx = int(np.argmax(tx_rates[key]))
-        print(f"    {key}: mean change rate {np.mean(tx_rates[key]):.2f}, max at TX {max_tx} ({tx_rates[key][max_tx]:.2f})")
-
-    print("  Aggregate across all transmitters and receivers:")
-    for key in keys:
-        print(f"    {key}: change rate {aggregate_rates.get(key, 0.0):.2f}")
-
-    os.makedirs(save_dir, exist_ok=True)
-    fig, axes = plt.subplots(3, 1, figsize=(10, 12))
-
-    rx_axis = np.arange(len(next(iter(rx_rates.values()), [])))
-    for key in keys:
-        if len(rx_rates[key]) == 0:
-            continue
-        axes[0].plot(rx_axis, rx_rates[key], marker='o', label=key)
-    axes[0].set_title(f"PMI change vs. receivers (ref TX {ref_tx})")
-    axes[0].set_xlabel("Receiver index")
-    axes[0].set_ylabel("Change rate")
-    axes[0].grid(True)
-    axes[0].legend()
-
-    tx_axis = np.arange(len(next(iter(tx_rates.values()), [])))
-    for key in keys:
-        if len(tx_rates[key]) == 0:
-            continue
-        axes[1].plot(tx_axis, tx_rates[key], marker='o', label=key)
-    axes[1].set_title(f"PMI change vs. transmitters (ref RX {ref_rx})")
-    axes[1].set_xlabel("Transmitter index")
-    axes[1].set_ylabel("Change rate")
-    axes[1].grid(True)
-    axes[1].legend()
-
-    aggregate_axis = np.arange(len(keys))
-    aggregate_values = [aggregate_rates.get(key, 0.0) for key in keys]
-    axes[2].bar(aggregate_axis, aggregate_values, tick_label=keys)
-    axes[2].set_title("Aggregate PMI change across TX/RX")
-    axes[2].set_ylabel("Change rate")
-    axes[2].grid(True, axis='y')
-
-    plt.tight_layout()
-    fig_path = os.path.join(save_dir, "pmi_dynamics_debug.png")
-    plt.savefig(fig_path)
-    plt.close(fig)
-    print(f"PMI dynamics debug plot saved to {fig_path}\n")
-
-def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
+def sim_mu_mimo_all(
+    cfg: SimConfig,
+    ns3cfg: Ns3Config,
+    rc_config:RCConfig,
+    rl_selector: Optional[RLBeamSelector] = None,
+    rl_selector_2: Optional[RLBeamSelector] = None,
+    ddpg_predictor: Optional[DDPGChannelPredictor] = None,
+):
     """"
     Simulation of MU-MIMO scenario according to the frame structure
 
@@ -757,13 +834,45 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     ldpc_ber_list = []
     uncoded_ber_list = []
     sinr_dB_list = []
+    snr_dB_list = []
     PMI_feedback_bits = []
+    nodewise_bler_list = []
+    pending_ddpg_actions = None
+    ddpg_history = None
+    if ddpg_predictor is None and cfg.channel_prediction_method == "ddpg":
+        ddpg_predictor = default_ddpg_predictor(
+            num_receivers=ns3cfg.num_rxue_sel,
+            fft_size=cfg.fft_size,
+        )
+
+    if rl_selector is None and cfg.channel_prediction_method == "deqn":
+        rl_selector = RLBeamSelector()
+        checkpoint = getattr(cfg, "rl_checkpoint", None)
+        if checkpoint:
+            rl_selector.load_all(Path(checkpoint))
+        rl_selector.set_evaluation_mode(bool(getattr(cfg, "rl_evaluation_only", False)))
+    pending_overrides = None
+    use_imitation_override = getattr(cfg, "use_imitation_override", False)
+
+    imitation_description = None
+    imitation_method = getattr(cfg, "imitation_method", "none")
+    imitation_drop_count = getattr(cfg, "imitation_drop_count", 0)
+    if imitation_method != "none" and imitation_drop_count > 0:
+        imitation_description = (
+            "imitation learning enabled "
+            f"(method={imitation_method}, drop_count={imitation_drop_count})"
+        )
+
+
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
-        print("first_slot_idx: ", first_slot_idx, "\n")
+        # print("first_slot_idx: ", first_slot_idx)
 
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
+
+        cfg.rl_w1_override = pending_overrides
+        cfg.ddpg_pred_channel = pending_ddpg_actions
 
         start_time = time.time()
         bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config)
@@ -784,23 +893,38 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         nodewise_bitrate.append(additional_KPIs[2])
         ranks_list.append(additional_KPIs[3])
         sinr_dB_list.append(additional_KPIs[4])
-        PMI_feedback_bits.append(additional_KPIs[5])
+        snr_dB_list.append(additional_KPIs[5])
+        PMI_feedback_bits.append(additional_KPIs[6])
+        nodewise_bler_list.append(additional_KPIs[7])
 
-    debug = False
-    if debug:
-        debug_ref_tx = ns3cfg.num_txue_sel // 2
-        debug_ref_rx = ns3cfg.num_rxue_sel // 2
+        if "deqn" in cfg.channel_prediction_method and rl_selector is not None:
+            if use_imitation_override:
+                chan_history = additional_KPIs[8]
+            else:
+                chan_history = None
+            pending_overrides = rl_selector.prepare_next_actions(
+                additional_KPIs[6],
+                additional_KPIs[4],
+                additional_KPIs[7],
+                cfg.modulation_order,
+                use_imitation_override,
+                chan_history,
+                rc_config,
+                ns3cfg,
+                cfg.num_tx_streams
+            )
+        
+        if cfg.channel_prediction_method == "ddpg" and ddpg_predictor is not None:
+            ddpg_history = additional_KPIs[8]
+            pending_ddpg_actions = ddpg_predictor.predict_channels(np.asarray(ddpg_history), sinr_db=additional_KPIs[4])
 
-        _debug_pmi_temporal_change(
-            PMI_feedback_bits,
-            ref_tx=debug_ref_tx,
-            ref_rx=debug_ref_rx,
-            save_dir="results",
-        )
+        hold = 1
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
+
+    print("Average throughput: {:.2f} Mbps".format(throughput))
 
     nodewise_goodput = np.concatenate(nodewise_goodput) / (slot_time * 1e6) * overhead  # Mbps
     nodewise_throughput = np.concatenate(nodewise_throughput) / (slot_time * 1e6) * overhead  # Mbps
@@ -811,5 +935,27 @@ def sim_mu_mimo_all(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     else:
         sinr_dB = None
 
-    return [uncoded_ber/total_cycles, ldpc_ber/total_cycles, goodput, throughput, bitrate, nodewise_goodput, nodewise_throughput, nodewise_bitrate, ranks, uncoded_ber_list, ldpc_ber_list, sinr_dB]
+    if snr_dB_list[0] is not None:
+        snr_dB = np.concatenate(snr_dB_list)
+    else:
+        snr_dB = None
 
+    if rl_selector is not None:
+        checkpoint_dir = Path("results") / "deqn_checkpoints" / Path(cfg.ns3_folder.rstrip("/")).name
+        rl_selector.save_all(checkpoint_dir, imitation_info=imitation_description)
+
+    return [
+        uncoded_ber / total_cycles,
+        ldpc_ber / total_cycles,
+        goodput,
+        throughput,
+        bitrate,
+        nodewise_goodput,
+        nodewise_throughput,
+        nodewise_bitrate,
+        ranks,
+        uncoded_ber_list,
+        ldpc_ber_list,
+        sinr_dB,
+        snr_dB,
+    ]

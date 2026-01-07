@@ -76,8 +76,14 @@ class quantized_CSI_feedback(Layer):
         self.num_BS_Ant = 4
         self.num_UE_Ant = 2
 
-    def call(self, h_est, return_codebook=False, return_feedback_bits=False, w1_beam_indices_override=None):
-
+    def call(
+        self,
+        h_est,
+        return_codebook=False,
+        return_feedback_bits=False,
+        w1_beam_indices_override=None,
+        return_components=False,
+    ):
         
         if self.method == '5G' and self.architecture == 'baseline':
 
@@ -244,6 +250,7 @@ class quantized_CSI_feedback(Layer):
 
             W_rb_all = []
             feedback_bits = []
+            components = []
 
             rx_ue_ant_indices = [
                 np.arange(0, 2),
@@ -314,13 +321,22 @@ class quantized_CSI_feedback(Layer):
                     N1=W1_rb_all_tx.shape[0],
                     return_feedback_bits=return_feedback_bits,
                     w1_beam_indices=W1_indices,
+                    return_components=return_components,
                 )
 
-                if return_feedback_bits:
-                    W_rb, pmi_bits = W_rb_out
-                    feedback_bits.append(pmi_bits)
+                if return_components:
+                    if return_feedback_bits:
+                        W_rb, pmi_bits, component_output = W_rb_out
+                        feedback_bits.append(pmi_bits)
+                    else:
+                        W_rb, component_output = W_rb_out
+                    components.append(component_output)
                 else:
-                    W_rb = W_rb_out
+                    if return_feedback_bits:
+                        W_rb, pmi_bits = W_rb_out
+                        feedback_bits.append(pmi_bits)
+                    else:
+                        W_rb = W_rb_out
 
                 W_rb_all.append(W_rb)
                 total_pmi_streams += Ns
@@ -335,10 +351,16 @@ class quantized_CSI_feedback(Layer):
             h_est_quant = tf.transpose(h_est_quant, perm=[3, 2, 0, 1])
             h_est_quant  = h_est_quant[tf.newaxis, tf.newaxis, :, tf.newaxis, :, :, :] # [1,1,total_Ns,1,N_tx,N_syms,N_fft]
 
-            if return_feedback_bits:
-                PMI_feedback_report = (h_est_quant, feedback_bits)
+            if return_components:
+                if return_feedback_bits:
+                    PMI_feedback_report = (h_est_quant, feedback_bits, components)
+                else:
+                    PMI_feedback_report = (h_est_quant, None, components)
             else:
-                PMI_feedback_report = (h_est_quant, None)
+                if return_feedback_bits:
+                    PMI_feedback_report = (h_est_quant, feedback_bits)
+                else:
+                    PMI_feedback_report = (h_est_quant, None)
             
 
         elif self.method == '5G' and self.architecture == 'dMIMO_phase1':
@@ -458,7 +480,17 @@ class quantized_CSI_feedback(Layer):
 
         return W_rb
     
-    def type_II_precoder_CB2(self, W_1, curr_h_est, Ns, L=None, N1=None, return_feedback_bits=False, w1_beam_indices=None):
+    def type_II_precoder_CB2(
+        self,
+        W_1,
+        curr_h_est,
+        Ns,
+        L=None,
+        N1=None,
+        return_feedback_bits=False,
+        w1_beam_indices=None,
+        return_components=False,
+    ):
 
         # H_A[k] = H[k] @ W_1  => [N_rx, L, N_SB]
         curr_h_est_reshaped = tf.transpose(curr_h_est, [2, 0, 1])  # [N_RB, N_rx, N_tx]
@@ -503,7 +535,14 @@ class quantized_CSI_feedback(Layer):
                 "sb_phase_indices": tf.identity(phi_l_i_t_idx),
                 "w1_beam_indices": w1_beam_indices,
             }
+            if return_components:
+                component_output = {"W_1": W_1, "W_C1": W_C1, "W_C2": W_C2}
+                return W_rb, feedback_bits, component_output
             return W_rb, feedback_bits
+
+        if return_components:
+            component_output = {"W_1": W_1, "W_C1": W_C1, "W_C2": W_C2}
+            return W_rb, component_output
 
         return W_rb
     
