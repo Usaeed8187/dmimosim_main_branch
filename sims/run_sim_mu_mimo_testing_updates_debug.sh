@@ -1,11 +1,11 @@
 #!/bin/bash
 
 declare -a mobilities=("high_mobility")
-declare -a drop_idx=({1..45})
-declare -a rx_ues_arr=("2" "6")
-declare -a modulation_orders=("2" "4")
-declare -a code_rates=("2/3" "5/6")
-declare -a num_txue_sel_arr=("2" "10")
+declare -a drop_idx=({1..30})
+declare -a rx_ues_arr=("4")
+declare -a modulation_orders=("4")
+declare -a code_rates=("1/2")
+declare -a num_txue_sel_arr=("4")
 
 link_adapt="True"
 channel_prediction_setting="None"
