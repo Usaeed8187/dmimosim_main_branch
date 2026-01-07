@@ -19,24 +19,55 @@ def _load_throughput(file_path):
 
 
 def main():
-    if len(sys.argv) < 5:
-        print(
-            "Usage: python sims/plot_mu_mimo_matrix_importance.py "
-            "<mobility> <drop_indices_csv> <rx_ue> <num_txue_sel> "
-            "[mod_order] [code_rate] [link_adapt] [csi_quantization_on]"
-        )
-        sys.exit(1)
+    usage = (
+        "Usage: python sims/plot_mu_mimo_matrix_importance.py "
+        "<mobility> <drop_indices_csv> <rx_ue> <num_txue_sel> "
+        "[mod_order] [code_rate] [link_adapt] [csi_quantization_on]"
+    )
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+        print(usage)
+        return
 
-    mobility = sys.argv[1]
-    drop_indices = [idx.strip() for idx in sys.argv[2].split(",") if idx.strip()]
+    defaults = {
+        "mobility": "high_mobility",
+        "drop_indices_csv": ",".join(str(idx) for idx in range(1, 31)),
+        "rx_ue": 4,
+        "num_txue_sel": 4,
+        "modulation_order": 4,
+        "code_rate": 1 / 2,
+        "link_adapt": True,
+        "csi_quantization_on": True,
+    }
+
+    mobility = sys.argv[1] if len(sys.argv) >= 2 else defaults["mobility"]
+    drop_indices_csv = (
+        sys.argv[2] if len(sys.argv) >= 3 else defaults["drop_indices_csv"]
+    )
+    drop_indices = [idx.strip() for idx in drop_indices_csv.split(",") if idx.strip()]
+
     drop_numbers = [int(idx) for idx in drop_indices]
-    rx_ue = int(sys.argv[3])
-    num_txue_sel = int(sys.argv[4])
+    rx_ue = int(sys.argv[3]) if len(sys.argv) >= 4 else defaults["rx_ue"]
+    num_txue_sel = (
+        int(sys.argv[4]) if len(sys.argv) >= 5 else defaults["num_txue_sel"]
+    )
 
-    modulation_order = int(sys.argv[5]) if len(sys.argv) >= 6 else 4
-    code_rate = float(sys.argv[6]) if len(sys.argv) >= 7 else 1 / 2
-    link_adapt = _parse_bool(sys.argv[7]) if len(sys.argv) >= 8 else True
-    csi_quantization_on = _parse_bool(sys.argv[8]) if len(sys.argv) >= 9 else True
+
+    modulation_order = (
+        int(sys.argv[5])
+        if len(sys.argv) >= 6
+        else defaults["modulation_order"]
+    )
+    code_rate = (
+        float(sys.argv[6]) if len(sys.argv) >= 7 else defaults["code_rate"]
+    )
+    link_adapt = (
+        _parse_bool(sys.argv[7]) if len(sys.argv) >= 8 else defaults["link_adapt"]
+    )
+    csi_quantization_on = (
+        _parse_bool(sys.argv[8])
+        if len(sys.argv) >= 9
+        else defaults["csi_quantization_on"]
+    )
 
     if link_adapt:
         mcs_string = "link_adapt"

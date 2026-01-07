@@ -339,13 +339,6 @@ def run_simulation():
         cfg.modulation_order = modulation_order
         cfg.code_rate = code_rate
         
-        # if not cfg.scheduling:
-        #     tx_ue_mask = np.zeros(10)
-        #     tx_ue_mask[:ns3cfg.num_txue_sel] = np.ones(ns3cfg.num_txue_sel)
-        #     rx_ue_mask = np.zeros(10)
-        #     rx_ue_mask[:ns3cfg.num_rxue_sel] = np.ones(ns3cfg.num_rxue_sel)
-        #     ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
-
         cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
         rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config)
