@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import time
 from typing import Optional
 from pathlib import Path
+import itertools
 
 from sionna.ofdm import ResourceGrid, ResourceGridMapper, LSChannelEstimator, LMMSEEqualizer
 from sionna.mimo import StreamManagement
@@ -34,6 +35,52 @@ from dmimo.utils import add_frequency_offset, add_timing_offset, compute_UE_wise
 
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
+
+def _enumerate_beam_sets(N1, O1, N2, O2, L):
+    """
+    Enumerate all possible beam index sets allowed by Algorithm 1 (structure only).
+
+    Returns:
+        list of sorted tuples of beam indices
+    """
+
+    beam_sets = set()
+
+    # possible offsets
+    q1_vals = range(O1)
+    q2_vals = range(O2)
+
+    for q1 in q1_vals:
+        for q2 in q2_vals:
+
+            # possible coarse indices
+            n1_vals = range(N1)
+            n2_vals = range(N2)
+
+            # choose distinct n1's
+            for n1_sel in itertools.combinations(n1_vals, L):
+
+                if N2 == 1:
+                    # n2 is fixed
+                    n2_sel = [0] * L
+                    beams = [
+                        (O2 * 0 + q2) * (O1 * N1) + (O1 * n1 + q1)
+                        for n1 in n1_sel
+                    ]
+                    beam_sets.add(tuple(sorted(beams)))
+                else:
+                    # choose distinct n2's
+                    for n2_sel in itertools.permutations(n2_vals, L):
+                        if len(set(n2_sel)) < L:
+                            continue
+
+                        beams = [
+                            (O2 * n2 + q2) * (O1 * N1) + (O1 * n1 + q1)
+                            for n1, n2 in zip(n1_sel, n2_sel)
+                        ]
+                        beam_sets.add(tuple(sorted(beams)))
+
+    return sorted(beam_sets)
 
 class MU_MIMO(Model):
 
@@ -532,6 +579,30 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             )
                 
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
+            
+            for rx in range(ns3cfg.num_rxue_sel):
+                for tx in range(ns3cfg.num_txue_sel):
+                    if tx == 0:
+                        N1 = 4
+                        L = 4
+                    else:
+                        N1 = 2
+                        L = 2
+                    beam_sets = _enumerate_beam_sets(N1=N1, O1=4, N2=1, O2=1, L=L)
+
+                    for beam in beam_sets:
+
+                        hold = 1
+
+
+
+            h_freq_csi_curr, _, _ = type_II_PMI_quantizer(
+                h_freq_csi,
+                return_feedback_bits=True,
+                return_components=True,
+                w1_beam_indices_override=w1_override,
+            )
+
         
     if cfg.rank_adapt:
         # Update rank and total number of streams
