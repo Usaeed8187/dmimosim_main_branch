@@ -102,6 +102,7 @@ csi_quantization_on = True
 rl_checkpoint = None
 rl_evaluation_only = False
 perfect_csi_matrix = None
+force_outdated_csi = False
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -132,6 +133,7 @@ def parse_arguments():
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
     global perfect_csi_matrix
+    global force_outdated_csi
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -166,6 +168,12 @@ def parse_arguments():
         if len(arguments) >= 12:
             rl_evaluation_only = _parse_bool(arguments[11])
 
+        if len(arguments) >= 13:
+            perfect_csi_matrix = arguments[12]
+
+        if len(arguments) >= 14:
+            force_outdated_csi = _parse_bool(arguments[13])
+
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
             channel_prediction_method = None
@@ -194,6 +202,10 @@ def parse_arguments():
             else:
                 perfect_csi_matrix = None
 
+        if force_outdated_csi:
+            perfect_csi = False
+            csi_prediction = False
+            channel_prediction_method = None
 
         print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
         # print("rx_ues_arr: ", rx_ues_arr)
@@ -238,6 +250,7 @@ def run_simulation():
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
     cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
     cfg.perfect_csi_matrix = perfect_csi_matrix
+    cfg.force_outdated_csi = force_outdated_csi
 
     if cfg.perfect_csi:
         cfg.csi_prediction = False
