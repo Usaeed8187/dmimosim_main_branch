@@ -36,7 +36,7 @@ from sionna.ofdm import ResourceGrid
 from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
-from dmimo.mu_mimo_testing_updates_debug_temp import sim_mu_mimo_all
+from dmimo.mu_mimo_testing_updates_debug import sim_mu_mimo_all
 from dmimo.channel.rl_beam_selector import RLBeamSelector
 
 # Add system path for the dmimo library
@@ -101,8 +101,6 @@ channel_prediction_method = None # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 rl_checkpoint = None
 rl_evaluation_only = False
-perfect_csi_matrix = None
-force_outdated_csi = False
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -132,8 +130,6 @@ def parse_arguments():
     global csi_prediction, channel_prediction_method
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
-    global perfect_csi_matrix
-    global force_outdated_csi
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -168,12 +164,6 @@ def parse_arguments():
         if len(arguments) >= 12:
             rl_evaluation_only = _parse_bool(arguments[11])
 
-        if len(arguments) >= 13:
-            perfect_csi_matrix = arguments[12]
-
-        if len(arguments) >= 14:
-            force_outdated_csi = _parse_bool(arguments[13])
-
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
             channel_prediction_method = None
@@ -182,28 +172,6 @@ def parse_arguments():
             channel_prediction_method = channel_prediction_setting
 
         if perfect_csi:
-            csi_prediction = False
-            channel_prediction_method = None
-
-        if perfect_csi_matrix is not None:
-            normalized_matrix = str(perfect_csi_matrix).strip().lower()
-            matrix_map = {
-                "w_1": "W_1",
-                "w_c1": "W_C1",
-                "w_c2_t": "W_C2_t",
-                "wc2_t": "W_C2_t",
-                "wc1": "W_C1",
-            }
-            if normalized_matrix in matrix_map:
-                perfect_csi_matrix = matrix_map[normalized_matrix]
-                perfect_csi = True
-                csi_prediction = False
-                channel_prediction_method = None
-            else:
-                perfect_csi_matrix = None
-
-        if force_outdated_csi:
-            perfect_csi = False
             csi_prediction = False
             channel_prediction_method = None
 
@@ -249,8 +217,6 @@ def run_simulation():
     cfg.csi_quantization_on = csi_quantization_on
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
     cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
-    cfg.perfect_csi_matrix = perfect_csi_matrix
-    cfg.force_outdated_csi = force_outdated_csi
 
     if cfg.perfect_csi:
         cfg.csi_prediction = False
@@ -352,6 +318,13 @@ def run_simulation():
         cfg.modulation_order = modulation_order
         cfg.code_rate = code_rate
         
+        # if not cfg.scheduling:
+        #     tx_ue_mask = np.zeros(10)
+        #     tx_ue_mask[:ns3cfg.num_txue_sel] = np.ones(ns3cfg.num_txue_sel)
+        #     rx_ue_mask = np.zeros(10)
+        #     rx_ue_mask[:ns3cfg.num_rxue_sel] = np.ones(ns3cfg.num_rxue_sel)
+        #     ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+
         cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
         rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config)
@@ -387,32 +360,9 @@ def run_simulation():
                     ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])
         else:
             if cfg.scheduling:
-                file_suffix = "perfect_CSI_{}".format(cfg.perfect_csi)
-                if cfg.perfect_csi_matrix:
-                    file_suffix = "perfect_{}_matrix".format(cfg.perfect_csi_matrix)
-                file_path = os.path.join(
-                    folder_path,
-                    "mu_mimo_results_{}_scheduling_tx_UE_{}_{}_pmi_quantization_{}.npz".format(
-                        MCS_string,
-                        num_txue_sel,
-                        file_suffix,
-                        cfg.csi_quantization_on,
-                    ),
-                )
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
             else:
-                file_suffix = "perfect_CSI_{}".format(cfg.perfect_csi)
-                if cfg.perfect_csi_matrix:
-                    file_suffix = "perfect_{}_matrix".format(cfg.perfect_csi_matrix)
-                file_path = os.path.join(
-                    folder_path,
-                    "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_{}_pmi_quantization_{}.npz".format(
-                        MCS_string,
-                        rx_ues_arr[ue_arr_idx],
-                        num_txue_sel,
-                        file_suffix,
-                        cfg.csi_quantization_on,
-                    ),
-                )
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
 
             np.savez(file_path,
                     cfg=cfg, ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
