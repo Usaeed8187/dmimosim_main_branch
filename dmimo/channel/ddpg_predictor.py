@@ -69,9 +69,10 @@ class Actor(nn.Module):
         act_dim: int,
         act_limit: float,
         *,
-        groups: int = 4,
-        num_layers: Tuple[int, ...] = (2, 2),
-        hidden_size: int = 64,
+        # NEW: ESN latent dim multiplier k in N_n = k * d_s
+        esn_k: int = 2,
+        groups: int = 1,
+        num_layers: Tuple[int, ...] = (1,),
         density: float = 0.2,
         spectral_radius: float = 1.0,
         leaky: float = 1.0,
@@ -82,21 +83,26 @@ class Actor(nn.Module):
         super().__init__()
         activation = self_normalizing_default(leaky_rate=leaky, spectral_radius=spectral_radius)
         initializer = _sparse_initializer(seed=seed, density=density, spectral_radius=spectral_radius)
+        # d_s = obs_dim, N_n = k * d_s
+        self.esn_latent_dim = int(esn_k * obs_dim)
+
         self.esn = GroupedDeepESN(
             input_size=obs_dim,
-            output_dim=act_dim,
-            groups=groups,
-            num_layers=num_layers,
-            hidden_size=hidden_size,
+            # IMPORTANT: "output_dim" here is library-specific; we are NOT using it to size the MLP.
+            output_dim=self.esn_latent_dim,
+            groups=groups,              # forced to 1 above
+            num_layers=num_layers,      # forced to (1,) above
+            hidden_size=self.esn_latent_dim,  # one big reservoir of size N_n
             initializer=initializer,
             regularization=regularization,
             activation=activation,
             washout=washout,
             bias=True,
         )
-        hidden_dim = groups * hidden_size
+
+        # MLP input should match ESN latent features (what self.esn(x) returns)
         self.head = nn.Sequential(
-            nn.Linear(hidden_dim, 256),
+            nn.Linear(self.esn_latent_dim, 256),
             nn.ReLU(),
             nn.Linear(256, act_dim),
             nn.Tanh(),
@@ -128,9 +134,11 @@ class Critic(nn.Module):
         obs_dim: int,
         act_dim: int,
         *,
-        groups: int = 4,
-        num_layers: Tuple[int, ...] = (2, 2),
-        hidden_size: int = 64,
+        # NEW: ESN latent dim multiplier k in N_n = k * d_s
+        esn_k: int = 2,
+        # For now we force "one big ESN"
+        groups: int = 1,
+        num_layers: Tuple[int, ...] = (1,),
         density: float = 0.2,
         spectral_radius: float = 1.0,
         leaky: float = 1.0,
@@ -142,25 +150,28 @@ class Critic(nn.Module):
         super().__init__()
         activation = self_normalizing_default(leaky_rate=leaky, spectral_radius=spectral_radius)
         initializer = _sparse_initializer(seed=seed, density=density, spectral_radius=spectral_radius)
+        self.esn_latent_dim = int(esn_k * obs_dim)
+
         self.esn = GroupedDeepESN(
             input_size=obs_dim,
-            output_dim=act_dim,
-            groups=groups,
-            num_layers=num_layers,
-            hidden_size=hidden_size,
+            # IMPORTANT: "output_dim" here is library-specific; we are NOT using it to size the critic MLP.
+            output_dim=self.esn_latent_dim,
+            groups=groups,              # forced to 1 above
+            num_layers=num_layers,      # forced to (1,) above
+            hidden_size=self.esn_latent_dim,
             initializer=initializer,
             regularization=regularization,
             activation=activation,
             washout=washout,
             bias=True,
         )
-        hidden_dim = groups * hidden_size
 
         self.net = nn.Sequential(
-            nn.Linear(hidden_dim + act_dim, 256),
+            nn.Linear(self.esn_latent_dim + act_dim, 256),
             nn.ReLU(),
             nn.Linear(256, 1),
         )
+
 
     def forward(self, s, a):
         # Single-device policy: s, a, ESN, and net must all be on the same device.
@@ -211,10 +222,13 @@ class DDPGAgent:
         np.random.seed(seed)
 
         # Build on CPU first, then move once (so no hidden CPU tensors linger inside auto_esn)
-        self.actor = Actor(obs_dim, act_dim, act_limit, seed=seed)
-        self.actor_t = Actor(obs_dim, act_dim, act_limit, seed=seed)
-        self.critic = Critic(obs_dim, act_dim, seed=seed)
-        self.critic_t = Critic(obs_dim, act_dim, seed=seed)
+        # NEW: configurable k (multiplier) for N_n = k * d_s
+        self.esn_k = 2  # <-- set this once, or make it a DDPGAgent __init__ arg
+
+        self.actor = Actor(obs_dim, act_dim, act_limit, esn_k=self.esn_k, seed=seed)
+        self.actor_t = Actor(obs_dim, act_dim, act_limit, esn_k=self.esn_k, seed=seed)
+        self.critic = Critic(obs_dim, act_dim, esn_k=self.esn_k, seed=seed)
+        self.critic_t = Critic(obs_dim, act_dim, esn_k=self.esn_k, seed=seed)
 
         self.actor.to(self.device)
         self.actor_t.to(self.device)
@@ -377,7 +391,7 @@ class DDPGChannelPredictor:
 
         # First transmitter has four antennas, all others have two, but cap at the provided tx_ant dimension.
         self.tx_ant_counts = [
-            min(self.num_tx_antennas, 4 if tx_idx == 0 else 2) for tx_idx in range(self.num_tx_nodes)
+            4 if tx_idx == 0 else 2 for tx_idx in range(self.num_tx_nodes)
         ]
 
         self.agents = []
@@ -431,7 +445,7 @@ class DDPGChannelPredictor:
 
         latest_channel = tf.convert_to_tensor(channel_history[-1,...])
         subbands = np.squeeze(self._extract_subbands(latest_channel))
-        predicted_channel = latest_channel.numpy()
+        predicted_channel = np.zeros(latest_channel.shape, dtype=complex)
 
         for rx_idx in range(self.num_receivers):
 
@@ -456,17 +470,20 @@ class DDPGChannelPredictor:
                 self.prev_obs[key] = obs
                 self.prev_action[key] = action
 
-                scaling = np.repeat(pred_sb, self.scs_per_subband, axis=-1)[
+                reshaped_pred_sb = np.repeat(pred_sb, self.scs_per_subband, axis=-1)[
                     ..., : predicted_channel.shape[-1]
                 ].astype(np.complex64)
-                scaling = scaling.reshape(
-                    (1, 1, scaling.shape[0], 1, scaling.shape[1], 1, scaling.shape[2])
+                reshaped_pred_sb = reshaped_pred_sb[:,:, np.newaxis, :]
+                reshaped_pred_sb = np.broadcast_to(
+                    reshaped_pred_sb,
+                    (reshaped_pred_sb.shape[0], reshaped_pred_sb.shape[1], predicted_channel.shape[-2], predicted_channel.shape[-1])
                 )
+                reshaped_pred_sb = reshaped_pred_sb[:,:, np.newaxis, np.newaxis, np.newaxis, :, :]
 
-                predicted_channel[:, rx_idx : rx_idx + 1, :, tx_idx : tx_idx + 1, ...] = (
-                    predicted_channel[:, rx_idx : rx_idx + 1, :, tx_idx : tx_idx + 1, ...]
-                    * scaling
-                )
+                rx_ix = rx_ants[:, None]   # (2, 1)
+                tx_ix = tx_ants[None, :]   # (1, 4)
+
+                predicted_channel[:, :, rx_ix, :, tx_ix, :, :] = reshaped_pred_sb
 
         return tf.convert_to_tensor(predicted_channel)
 

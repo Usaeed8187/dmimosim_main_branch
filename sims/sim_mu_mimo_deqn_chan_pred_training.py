@@ -521,8 +521,9 @@ def run_simulation():
 
 
 if __name__ == "__main__":
-    try:
-        run_simulation()
-    except Exception as exc:  # noqa: BLE001
-        log_error(exc)
-        sys.exit(1)
+    # try:
+    #     run_simulation()
+    # except Exception as exc:  # noqa: BLE001
+    #     log_error(exc)
+    #     sys.exit(1)
+    run_simulation()
