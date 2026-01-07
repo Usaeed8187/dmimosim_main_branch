@@ -903,26 +903,27 @@ def sim_mu_mimo_all(
         PMI_feedback_bits.append(additional_KPIs[6])
         nodewise_bler_list.append(additional_KPIs[7])
 
-        if "deqn" in cfg.channel_prediction_method and rl_selector is not None:
-            if use_imitation_override:
-                chan_history = additional_KPIs[8]
-            else:
-                chan_history = None
-            pending_overrides = rl_selector.prepare_next_actions(
-                additional_KPIs[6],
-                additional_KPIs[4],
-                additional_KPIs[7],
-                cfg.modulation_order,
-                use_imitation_override,
-                chan_history,
-                rc_config,
-                ns3cfg,
-                cfg.num_tx_streams
-            )
-        
-        if cfg.channel_prediction_method == "ddpg" and ddpg_predictor is not None:
-            ddpg_history = additional_KPIs[8]
-            pending_ddpg_actions = ddpg_predictor.predict_channels(np.asarray(ddpg_history), sinr_db=additional_KPIs[4])
+        if cfg.channel_prediction_method is not None:
+            if "deqn" in cfg.channel_prediction_method and rl_selector is not None:
+                if use_imitation_override:
+                    chan_history = additional_KPIs[8]
+                else:
+                    chan_history = None
+                pending_overrides = rl_selector.prepare_next_actions(
+                    additional_KPIs[6],
+                    additional_KPIs[4],
+                    additional_KPIs[7],
+                    cfg.modulation_order,
+                    use_imitation_override,
+                    chan_history,
+                    rc_config,
+                    ns3cfg,
+                    cfg.num_tx_streams
+                )
+            
+            if cfg.channel_prediction_method == "ddpg" and ddpg_predictor is not None:
+                ddpg_history = additional_KPIs[8]
+                pending_ddpg_actions = ddpg_predictor.predict_channels(np.asarray(ddpg_history), sinr_db=additional_KPIs[4])
 
         hold = 1
 
