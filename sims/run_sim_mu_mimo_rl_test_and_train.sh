@@ -11,7 +11,7 @@ CODE_RATE=${CODE_RATE:-"1/2"}
 PERFECT_CSI=${PERFECT_CSI:-False}
 CSI_QUANTIZATION=${CSI_QUANTIZATION:-True}
 LINK_ADAPT=${LINK_ADAPT:-True}
-RL_MODE=${RL_MODE:-"deqn_plus_two_mode"} # "deqn", "deqn_plus_two_mode"
+RL_MODE=${RL_MODE:-"ddpg"} # "deqn", "deqn_plus_two_mode", "ddpg"
 
 PARALLEL_JOBS=${PARALLEL_JOBS:-12}
 
@@ -39,7 +39,7 @@ run_scenario() {
     local CHECKPOINT_DIR="results/rl_models/${MOBILITY}/drop_${TRAIN_END_DROP}_rx_UE_${RX_UES}_tx_UE_${NUM_TXUE_SEL}_imitation_none_steps_0"
 
     echo "Training ${RL_MODE} model for RX_UE=${RX_UES}, TX_UE=${NUM_TXUE_SEL} with ${TRAIN_DROP_COUNT} drops (${TRAIN_DROP_START}-${TRAIN_END_DROP}) in a single run"
-    python sims/sim_mu_mimo_deqn_chan_pred_training.py \
+    python sims/sim_mu_mimo_rl_chan_pred_training.py \
         "${MOBILITY}" \
         "${TRAIN_DROPS}" \
         "${RX_UES}" \
