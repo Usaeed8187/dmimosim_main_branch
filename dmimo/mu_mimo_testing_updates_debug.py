@@ -114,7 +114,7 @@ def _build_w1_override_candidates(ns3cfg):
             for _tx in range(num_tx_nodes):
                 tx_overrides.append(combo[combo_idx])
                 combo_idx += 1
-            override[rx + 2] = tx_overrides
+            override[rx] = tx_overrides
         override_candidates.append(override)
 
     return override_candidates
