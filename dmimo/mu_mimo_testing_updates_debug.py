@@ -575,7 +575,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                 h_freq_csi,
                 return_feedback_bits=True,
                 return_components=True,
-                w1_beam_indices_override=w1_override,
             )
                 
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
