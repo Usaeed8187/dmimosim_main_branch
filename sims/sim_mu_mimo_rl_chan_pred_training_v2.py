@@ -34,7 +34,7 @@ tf.get_logger().setLevel('ERROR')
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
 from dmimo.mu_mimo_testing_updates_v2 import sim_mu_mimo_all
-from dmimo.channel.rl_beam_selector import RLBeamSelector
+from dmimo.channel.rl_beam_selector_v2 import RLBeamSelector
 from dmimo.channel import default_ddpg_predictor
 from sionna.ofdm import ResourceGrid
 from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
@@ -95,13 +95,14 @@ modulation_order = 4
 code_rate = 1 / 2
 link_adapt = True
 
-perfect_csi = True
-channel_prediction_setting = "None" # "None", "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", "ddpg"
-csi_prediction = False
-channel_prediction_method = None # None, "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", ddpg
+perfect_csi = False
+channel_prediction_setting = "deqn" # "None", "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", "ddpg"
+csi_prediction = True
+channel_prediction_method = "deqn" # None, "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", ddpg
 csi_quantization_on = True
 imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
+rl_user_count = 2
 
 def _build_imitation_info() -> Optional[str]:
     if imitation_method == "none" or imitation_drop_count <= 0:
@@ -167,6 +168,7 @@ def parse_arguments():
     global csi_prediction, channel_prediction_method
     global csi_quantization_on, link_adapt
     global imitation_method, imitation_drop_count
+    global rl_user_count
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -200,6 +202,9 @@ def parse_arguments():
 
         if len(arguments) >= 12:
             imitation_drop_count = int(arguments[11])
+
+        if len(arguments) >= 13:
+            rl_user_count = int(arguments[12])
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -301,6 +306,7 @@ def run_simulation():
         cfg.imitation_method = imitation_method if warm_start_active else "none"
         cfg.use_imitation_override = warm_start_active
         cfg.imitation_drop_count = imitation_drop_count
+        cfg.rl_user_count = rl_user_count
 
         if shared_rl_selector is not None:
             time_steps_per_drop = math.ceil(

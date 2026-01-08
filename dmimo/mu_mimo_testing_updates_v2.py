@@ -23,7 +23,7 @@ from dmimo.channel import standard_rc_pred_freq_mimo, default_ddpg_predictor
 from dmimo.channel.ddpg_predictor import DDPGChannelPredictor
 from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
-from dmimo.channel.rl_beam_selector import RLBeamSelector
+from dmimo.channel.rl_beam_selector_v2 import RLBeamSelector
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, QuantizedSLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
@@ -595,7 +595,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     # print("BER: ", uncoded_ber_phase_2)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
-    node_wise_acks = np.ceil(node_wise_bler)
+    node_wise_acks = 1 - np.ceil(node_wise_bler)
 
     # RxSquad transmission (P3)
     if cfg.enable_rxsquad is True:
@@ -741,14 +741,9 @@ def sim_mu_mimo_all(
                 chan_history = None
             pending_overrides = rl_selector.prepare_next_actions(
                 additional_KPIs[6],
-                additional_KPIs[4],
-                additional_KPIs[7],
-                cfg.modulation_order,
-                use_imitation_override,
-                chan_history,
-                rc_config,
-                ns3cfg,
-                cfg.num_tx_streams
+                mcs_indices=additional_KPIs[9],
+                node_wise_acks=additional_KPIs[10],
+                user_count=getattr(cfg, "rl_user_count", 2),
             )
         
         if cfg.csi_prediction and cfg.channel_prediction_method == "ddpg" and ddpg_predictor is not None:
