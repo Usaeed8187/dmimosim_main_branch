@@ -681,50 +681,168 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     sum_log_sinr = np.sum(np.log(1.0 + sinr_linear))
     print("Baseline sum_log_sinr: ", sum_log_sinr)
 
-    est_sinr = _esimate_sinr(h_freq_csi)
-
     best_sum_log_sinr = sum_log_sinr
+
+    def _eval_override(w1_override):
+        """Evaluate a full W1 override config and return (sum_log_sinr, bler, sinr_db_arr, uncoded_ber)."""
+        h_freq_csi_override, _, _ = type_II_PMI_quantizer(
+            h_freq_csi_quant_input,
+            return_feedback_bits=True,
+            return_components=True,
+            w1_beam_indices_override=w1_override,
+        )
+        # h_freq_csi_override expected shape: [B,1,Ns,1,Nt,Nsym,Nfft] -> squeeze singleton dims
+        h_freq_csi_override = tf.squeeze(h_freq_csi_override, axis=(1, 3))
+
+        dec_bits_override, uncoded_ber, _, _, _, sinr_db_arr_override = mu_mimo(
+            dmimo_chans,
+            h_freq_csi_override,
+            info_bits,
+            snr_dB_arr,
+        )
+        info_bits_override = tf.reshape(info_bits, dec_bits_override.shape)
+        coded_bler_override = compute_bler(info_bits_override, dec_bits_override).numpy()
+
+        sinr_linear = 10.0 ** (np.asarray(sinr_db_arr_override) / 10.0)
+        sum_log_sinr = float(np.sum(np.log(1.0 + sinr_linear)))
+        return sum_log_sinr, coded_bler_override, sinr_db_arr_override, float(uncoded_ber)
+
+    def _deepcopy_override(ov):
+        # ov is nested list: override[rx][tx] = tuple/list beam indices
+        return [list(tx_list) for tx_list in ov]
 
     override_sum_log_sinr = []
     override_bler = []
     override_sinr_db_arr = []
-    if cfg.csi_quantization_on and w1_override_candidates:
-        for w1_override in w1_override_candidates:
-            h_freq_csi_override, _, _ = type_II_PMI_quantizer(
-                h_freq_csi_quant_input,
-                return_feedback_bits=True,
-                return_components=True,
-                w1_beam_indices_override=w1_override,
-            )
-            h_freq_csi_override = tf.squeeze(h_freq_csi_override, axis=(1, 3))
-            dec_bits_override, uncoded_ber, _, _, _, sinr_db_arr_override = mu_mimo(
-                dmimo_chans,
-                h_freq_csi_override,
-                info_bits,
-                snr_dB_arr,
-            )
-            info_bits_override = tf.reshape(info_bits, dec_bits_override.shape)
-            coded_bler_override = compute_bler(info_bits_override, dec_bits_override).numpy()
-            sinr_linear = 10.0 ** (np.asarray(sinr_db_arr_override) / 10.0)
-            sum_log_sinr = np.sum(np.log(1.0 + sinr_linear))
 
-            override_sum_log_sinr.append(sum_log_sinr)
-            override_bler.append(coded_bler_override)
-            override_sinr_db_arr.append(sinr_db_arr_override)
+    if cfg.csi_quantization_on:
+        # ---- Build per-(rx,tx) candidate lists (same logic as your helper) ----
+        num_tx_nodes = ns3cfg.num_txue_sel + 1
+        num_rx_nodes = ns3cfg.num_rxue_sel + 2
 
-            if sum_log_sinr > best_sum_log_sinr:
-                best_sum_log_sinr = sum_log_sinr
-                print("Updating best_sum_log_sinr to: ", best_sum_log_sinr)
-                print("Current uncoded BER: ", uncoded_ber)
-                print("Current BLER: ", coded_bler_override)
+        per_pair_candidates = [[None for _ in range(num_tx_nodes)] for _ in range(num_rx_nodes)]
+        for rx in range(num_rx_nodes):
+            for tx in range(num_tx_nodes):
+                if tx == 0:
+                    N1, L = 4, 4
+                else:
+                    N1, L = 2, 2
+                # This returns a list of tuples (beam sets) for that (rx,tx)
+                per_pair_candidates[rx][tx] = _enumerate_beam_sets(N1=N1, O1=4, N2=1, O2=1, L=L)
 
+        # ---- Initialize: start from "no override" baseline ----
+        # If you want to start from some initial override, replace None with that structure.
+        current_override = [[np.sort(feedback_bits[rx]['w1_beam_indices'][tx]) for tx in range(num_tx_nodes)]
+                            for rx in range(num_rx_nodes)]
+        # NOTE: choosing index [0] just gives a valid structure. If you want the true baseline,
+        # you can set current_override = None and only start greedy after a first eval with None.
+        # But greedy needs a concrete override to mutate, so we seed it with something valid.
+        # Alternatively: you can call type_II_PMI_quantizer once with None, extract the chosen W1 indices,
+        # and seed current_override with those (best practice).
+
+        # Evaluate initial
+        best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber = _eval_override(current_override)
+        print("Greedy init sum_log_sinr:", best_sum_log_sinr, "BLER:", best_bler)
+
+        max_passes = getattr(cfg, "greedy_max_passes", 1)   # set as you like
+        improved = True
+        pass_idx = 0
+
+        while improved and pass_idx < max_passes:
+            improved = False
+            pass_idx += 1
+
+            # Track best single change in this pass
+            best_local_delta = 0.0
+            best_local_override = None
+            best_local_metrics = None
+
+            # For each (rx,tx), try changing ONLY that entry
+            for rx in range(num_rx_nodes):
+                for tx in range(num_tx_nodes):
+                    base_choice = current_override[rx][tx]
+                    candidates = per_pair_candidates[rx][tx]
+
+                    for cand in candidates:
+                        if np.all(cand == base_choice):
+                            continue
+
+                        trial_override = _deepcopy_override(current_override)
+                        trial_override[rx][tx] = cand
+
+                        sum_log_sinr, bler, sinr_db_arr, uncoded_ber = _eval_override(trial_override)
+
+                        delta = sum_log_sinr - best_sum_log_sinr
+                        if delta > best_local_delta:
+                            best_local_delta = delta
+                            best_local_override = trial_override
+                            best_local_metrics = (sum_log_sinr, bler, sinr_db_arr, uncoded_ber)
+
+            # Apply the best single change found in this pass
+            if best_local_override is not None:
+                current_override = best_local_override
+                best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber = best_local_metrics
+                improved = True
+
+                print(f"[Greedy pass {pass_idx}] Updating best_sum_log_sinr to:", best_sum_log_sinr)
+                print(f"[Greedy pass {pass_idx}] Current uncoded BER:", best_uncoded_ber)
+                print(f"[Greedy pass {pass_idx}] Current BLER:", best_bler)
+
+                override_sum_log_sinr.append(best_sum_log_sinr)
+                override_bler.append(best_bler)
+                override_sinr_db_arr.append(best_sinr_db_arr)
+
+        # Convert logs to arrays (optional)
         override_sum_log_sinr = np.array(override_sum_log_sinr)
         override_bler = np.array(override_bler)
-        best_override_idx = int(np.argmax(override_sum_log_sinr))
-        best_override_sinr_db_arr = override_sinr_db_arr[best_override_idx]
-        print("Override candidate count: ", len(override_sum_log_sinr))
-        print("Baseline SINR (dB): ", sinr_db_arr)
-        print("Best override SINR (dB): ", best_override_sinr_db_arr)
+
+        print("Greedy passes executed:", pass_idx)
+        print("Baseline/initial SINR (dB): ", sinr_db_arr)
+        print("Best greedy SINR (dB): ", best_sinr_db_arr)
+        print("Best greedy sum_log_sinr: ", best_sum_log_sinr)
+        print("Best greedy BLER: ", best_bler)
+
+    hold = 1
+    # override_sum_log_sinr = []
+    # override_bler = []
+    # override_sinr_db_arr = []
+    # if cfg.csi_quantization_on and w1_override_candidates:
+    #     for w1_override in w1_override_candidates:
+    #         h_freq_csi_override, _, _ = type_II_PMI_quantizer(
+    #             h_freq_csi_quant_input,
+    #             return_feedback_bits=True,
+    #             return_components=True,
+    #             w1_beam_indices_override=w1_override,
+    #         )
+    #         h_freq_csi_override = tf.squeeze(h_freq_csi_override, axis=(1, 3))
+    #         dec_bits_override, uncoded_ber, _, _, _, sinr_db_arr_override = mu_mimo(
+    #             dmimo_chans,
+    #             h_freq_csi_override,
+    #             info_bits,
+    #             snr_dB_arr,
+    #         )
+    #         info_bits_override = tf.reshape(info_bits, dec_bits_override.shape)
+    #         coded_bler_override = compute_bler(info_bits_override, dec_bits_override).numpy()
+    #         sinr_linear = 10.0 ** (np.asarray(sinr_db_arr_override) / 10.0)
+    #         sum_log_sinr = np.sum(np.log(1.0 + sinr_linear))
+
+    #         override_sum_log_sinr.append(sum_log_sinr)
+    #         override_bler.append(coded_bler_override)
+    #         override_sinr_db_arr.append(sinr_db_arr_override)
+
+    #         if sum_log_sinr > best_sum_log_sinr:
+    #             best_sum_log_sinr = sum_log_sinr
+    #             print("Updating best_sum_log_sinr to: ", best_sum_log_sinr)
+    #             print("Current uncoded BER: ", uncoded_ber)
+    #             print("Current BLER: ", coded_bler_override)
+
+    #     override_sum_log_sinr = np.array(override_sum_log_sinr)
+    #     override_bler = np.array(override_bler)
+    #     best_override_idx = int(np.argmax(override_sum_log_sinr))
+    #     best_override_sinr_db_arr = override_sinr_db_arr[best_override_idx]
+    #     print("Override candidate count: ", len(override_sum_log_sinr))
+    #     print("Baseline SINR (dB): ", sinr_db_arr)
+    #     print("Best override SINR (dB): ", best_override_sinr_db_arr)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
 
