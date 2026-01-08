@@ -660,7 +660,7 @@ def sim_mu_mimo_all(
     PMI_feedback_bits = []
     nodewise_bler_list = []
 
-    if rl_selector is None and cfg.channel_prediction_method == "deqn":
+    if rl_selector is None and "deqn" in cfg.channel_prediction_method:
         rl_selector = RLBeamSelector()
         checkpoint = getattr(cfg, "rl_checkpoint", None)
         if checkpoint:
