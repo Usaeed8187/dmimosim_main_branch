@@ -37,7 +37,6 @@ from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
 from dmimo.mu_mimo_testing_updates_v2 import sim_mu_mimo_all
-from dmimo.channel.rl_beam_selector import RLBeamSelector
 
 # Add system path for the dmimo library
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
