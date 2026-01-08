@@ -48,12 +48,12 @@ class linkAdaptation(Layer):
         self.rank_adaptation = rankAdaptation(num_bs_ant, num_ue_ant, architecture, sinrdb, nfft, precoder=precoder)
 
 
-    def call(self, h_est, channel_type):
+    def call(self, h_est, channel_type, return_mcs_index=False):
 
         if self.architecture == "SU-MIMO":
             feedback_report  = self.generate_link_SU_MIMO(h_est, channel_type)
         elif self.architecture == "MU-MIMO":
-            feedback_report = self.generate_link_MU_MIMO(h_est, channel_type)
+            feedback_report = self.generate_link_MU_MIMO(h_est, channel_type, return_mcs_index)
         
         return feedback_report
 
@@ -166,7 +166,7 @@ class linkAdaptation(Layer):
         
             return qam_order_arr
     
-    def generate_link_MU_MIMO(self, h_est, channel_type):
+    def generate_link_MU_MIMO(self, h_est, channel_type, return_mcs_index):
 
         N_t = h_est.shape[4]
         N_r = h_est.shape[2]
@@ -175,6 +175,8 @@ class linkAdaptation(Layer):
         h_est = h_est[0:1,...]
         H_freq = tf.squeeze(h_est)
         H_freq = tf.transpose(H_freq, perm=[3,0,1,2])
+
+        mcs_index = None
 
         if self.use_mmse_eesm_method:
 
@@ -196,6 +198,7 @@ class linkAdaptation(Layer):
             qam_order_arr = np.zeros((self.N_s, num_rx_nodes))
             code_rate_arr = np.zeros((self.N_s, num_rx_nodes))
             cqi_snr = np.zeros((self.N_s, num_rx_nodes))
+            mcs_indices = np.zeros((self.N_s, num_rx_nodes))
 
             if self.N_s == 1:
                 
@@ -208,12 +211,13 @@ class linkAdaptation(Layer):
                         sinr_eff = -beta * np.log(np.mean(np.exp(-curr_sinr_linear / beta)))
                         sinr_eff_dB = 10*np.log10(sinr_eff)
                         sinr_eff_list.append(sinr_eff_dB)
-                    
-                    curr_qam_order, curr_code_rate, cqi_snr_tmp = self.lookup_table(sinr_eff_list, refer_sinr_db, mcs_candidates)
+
+                    curr_qam_order, curr_code_rate, cqi_snr_tmp, mcs_index = self.lookup_table(sinr_eff_list, refer_sinr_db, mcs_candidates, return_mcs_index)
 
                     qam_order_arr[0, rx_node_idx] = curr_qam_order
                     code_rate_arr[0, rx_node_idx] = curr_code_rate
                     cqi_snr[0, rx_node_idx] = cqi_snr_tmp
+                    mcs_indices[0, rx_node_idx] = mcs_index
                 
             else:
 
@@ -256,14 +260,14 @@ class linkAdaptation(Layer):
                         code_rate_arr[stream_idx, rx_node_idx] = curr_code_rate
                         cqi_snr[stream_idx, rx_node_idx] = cqi_snr_tmp
 
-            return [qam_order_arr, code_rate_arr, cqi_snr]
+            return [qam_order_arr, code_rate_arr, cqi_snr, mcs_indices]
         else:
             raise Exception(f"The non-EESM methods have not been implemented.")
 
 
         
     
-    def lookup_table(self, sinr_eff_list, refer_sinr_db, mcs_candidates):
+    def lookup_table(self, sinr_eff_list, refer_sinr_db, mcs_candidates, return_mcs_index):
 
         assert len(sinr_eff_list) == refer_sinr_db.shape[0]
 
@@ -276,5 +280,7 @@ class linkAdaptation(Layer):
 
         [curr_qam_order, curr_code_rate] = mcs_candidates[mcs_idx, :]
 
-        
-        return curr_qam_order, curr_code_rate, refer_sinr_db[mcs_idx]
+        if not return_mcs_index:
+            mcs_index = None
+
+        return curr_qam_order, curr_code_rate, refer_sinr_db[mcs_idx], mcs_idx

@@ -284,7 +284,7 @@ class MU_MIMO(Model):
         return dec_bits, uncoded_ber, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_dB_arr
 
 
-def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_sinr_db):
+def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_sinr_db, return_mcs_index=False):
 
     # Rank adaptation
     rank_adaptation = rankAdaptation(dmimo_chans.ns3_config.num_bs_ant, dmimo_chans.ns3_config.num_ue_ant,
@@ -304,9 +304,9 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_sinr_db):
                                         architecture='MU-MIMO', sinrdb=rx_sinr_db, nfft=cfg.fft_size,
                                         N_s=rank, data_sym_position=data_sym_position, lookup_table_size='long')
 
-        mcs_feedback_report = link_adaptation(h_est, channel_type='dMIMO')
+        mcs_feedback_report = link_adaptation(h_est, channel_type='dMIMO', return_mcs_index=return_mcs_index)
     else:
-        mcs_feedback_report = [[cfg.modulation_order], [cfg.code_rate]]
+        mcs_feedback_report = [[cfg.modulation_order], [cfg.code_rate], [None], [None]]
 
     return rank_feedback_report, mcs_feedback_report
 
@@ -559,7 +559,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         # Rank and link adaptation
         # TODO: add support for quantized CSI feedback
         rank_feedback_report, mcs_feedback_report = \
-            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi_unquantized, sinr_db_arr)
+            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi_unquantized, sinr_db_arr, return_mcs_index=True)
 
     if cfg.rank_adapt:
         # Update rank and total number of streams
@@ -575,6 +575,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         qam_order_arr = mcs_feedback_report[0]
         code_rate_arr = mcs_feedback_report[1]
         cqi_sinrs = mcs_feedback_report[2]
+        mcs_indices = mcs_feedback_report[3]
         values, counts = np.unique(qam_order_arr, return_counts=True)
         most_frequent_value = values[np.argmax(counts)]
         cfg.modulation_order = int(most_frequent_value)
@@ -639,7 +640,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, h_freq_csi_history]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, h_freq_csi_history, mcs_indices]
 
 
 def sim_mu_mimo_all(
