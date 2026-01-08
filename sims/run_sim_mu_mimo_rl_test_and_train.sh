@@ -59,7 +59,7 @@ run_scenario() {
     echo "Testing with frozen model for drops ${TEST_DROP_START}-${TEST_END_DROP} (RX_UE=${RX_UES}, TX_UE=${NUM_TXUE_SEL})"
     for drop in $(seq ${TEST_DROP_START} ${TEST_END_DROP}); do
         echo "Running test drop ${drop} for RX_UE=${RX_UES}, TX_UE=${NUM_TXUE_SEL}"
-        python sims/sim_mu_mimo_testing_updates_v2.py \
+        python sims/sim_mu_mimo_testing_updates.py \
             "${MOBILITY}" \
             "${drop}" \
             "${RX_UES}" \

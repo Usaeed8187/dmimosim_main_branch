@@ -636,8 +636,6 @@ def sim_mu_mimo_all(
     ns3cfg: Ns3Config,
     rc_config:RCConfig,
     rl_selector: Optional[RLBeamSelector] = None,
-    rl_selector_2: Optional[RLBeamSelector] = None,
-    ddpg_predictor: Optional[DDPGChannelPredictor] = None,
 ):
     """"
     Simulation of MU-MIMO scenario according to the frame structure

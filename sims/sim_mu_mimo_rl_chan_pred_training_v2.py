@@ -257,11 +257,7 @@ def run_simulation():
     rc_config.history_len = 8
 
     shared_rl_selector = (
-        RLBeamSelector(imitation_method=imitation_method) if channel_prediction_method == "deqn" else None
-    )
-
-    shared_rl_selector_2 = (
-        RLBeamSelector(imitation_method=imitation_method) if channel_prediction_method == "deqn" else None
+        RLBeamSelector(imitation_method=imitation_method) if "deqn" in channel_prediction_method else None
     )
 
     shared_ddpg_predictor = (
@@ -315,7 +311,6 @@ def run_simulation():
             ) - 1
             epsilon_total_steps = len(drop_list) * time_steps_per_drop
             shared_rl_selector.set_epsilon_total_steps(epsilon_total_steps)
-            shared_rl_selector_2.set_epsilon_total_steps(epsilon_total_steps)
 
         if cfg.perfect_csi:
             cfg.csi_prediction = False
@@ -408,7 +403,6 @@ def run_simulation():
                 ns3cfg,
                 rc_config,
                 rl_selector=shared_rl_selector,
-                rl_selector_2=shared_rl_selector_2,
                 ddpg_predictor=shared_ddpg_predictor,
             )
 
