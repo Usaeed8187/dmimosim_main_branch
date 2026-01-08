@@ -674,13 +674,6 @@ def sim_mu_mimo_all(
     snr_dB_list = []
     PMI_feedback_bits = []
     nodewise_bler_list = []
-    pending_ddpg_actions = None
-    ddpg_history = None
-    if ddpg_predictor is None and cfg.channel_prediction_method == "ddpg":
-        ddpg_predictor = default_ddpg_predictor(
-            num_receivers=ns3cfg.num_rxue_sel,
-            fft_size=cfg.fft_size,
-        )
 
     if rl_selector is None and cfg.channel_prediction_method == "deqn":
         rl_selector = RLBeamSelector()
@@ -689,17 +682,6 @@ def sim_mu_mimo_all(
             rl_selector.load_all(Path(checkpoint))
         rl_selector.set_evaluation_mode(bool(getattr(cfg, "rl_evaluation_only", False)))
     pending_overrides = None
-    use_imitation_override = getattr(cfg, "use_imitation_override", False)
-
-    imitation_description = None
-    imitation_method = getattr(cfg, "imitation_method", "none")
-    imitation_drop_count = getattr(cfg, "imitation_drop_count", 0)
-    if imitation_method != "none" and imitation_drop_count > 0:
-        imitation_description = (
-            "imitation learning enabled "
-            f"(method={imitation_method}, drop_count={imitation_drop_count})"
-        )
-
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
@@ -709,7 +691,6 @@ def sim_mu_mimo_all(
         cfg.first_slot_idx = first_slot_idx
 
         cfg.rl_w1_override = pending_overrides
-        cfg.ddpg_pred_channel = pending_ddpg_actions
 
         start_time = time.time()
         bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config)
@@ -734,11 +715,7 @@ def sim_mu_mimo_all(
         PMI_feedback_bits.append(additional_KPIs[6])
         nodewise_bler_list.append(additional_KPIs[7])
 
-        if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method and rl_selector is not None:
-            if use_imitation_override:
-                chan_history = additional_KPIs[8]
-            else:
-                chan_history = None
+        if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
             pending_overrides = rl_selector.prepare_next_actions(
                 additional_KPIs[6],
                 mcs_indices=additional_KPIs[9],
@@ -746,10 +723,6 @@ def sim_mu_mimo_all(
                 user_count=getattr(cfg, "rl_user_count", 2),
             )
         
-        if cfg.csi_prediction and cfg.channel_prediction_method == "ddpg" and ddpg_predictor is not None:
-            ddpg_history = additional_KPIs[8]
-            pending_ddpg_actions = ddpg_predictor.predict_channels(np.asarray(ddpg_history), sinr_db=additional_KPIs[4])
-
         hold = 1
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
@@ -774,7 +747,7 @@ def sim_mu_mimo_all(
 
     if rl_selector is not None:
         checkpoint_dir = Path("results") / "deqn_checkpoints" / Path(cfg.ns3_folder.rstrip("/")).name
-        rl_selector.save_all(checkpoint_dir, imitation_info=imitation_description)
+        rl_selector.save_all(checkpoint_dir)
 
     return [
         uncoded_ber / total_cycles,
