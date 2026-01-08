@@ -595,6 +595,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     # print("BER: ", uncoded_ber_phase_2)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
+    node_wise_acks = np.ceil(node_wise_bler)
 
     # RxSquad transmission (P3)
     if cfg.enable_rxsquad is True:
@@ -640,7 +641,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, h_freq_csi_history, mcs_indices]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, h_freq_csi_history, mcs_indices, node_wise_acks]
 
 
 def sim_mu_mimo_all(
