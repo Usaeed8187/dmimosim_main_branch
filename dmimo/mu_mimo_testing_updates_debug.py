@@ -617,9 +617,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             )
                 
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
-            
-            w1_override_candidates = _build_w1_override_candidates(ns3cfg)
-        
+                    
     if cfg.rank_adapt:
         # Update rank and total number of streams
         rank = rank_feedback_report[0]
@@ -705,7 +703,10 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
         sinr_linear = 10.0 ** (np.asarray(sinr_db_arr_override) / 10.0)
         sum_log_sinr = float(np.sum(np.log(1.0 + sinr_linear)))
-        return sum_log_sinr, coded_bler_override, sinr_db_arr_override, float(uncoded_ber)
+
+        node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits_override, cfg.ue_ranks[0], cfg.num_tx_streams)
+        
+        return sum_log_sinr, coded_bler_override, sinr_db_arr_override, float(uncoded_ber), node_wise_bler
 
     def _deepcopy_override(ov):
         # ov is nested list: override[rx][tx] = tuple/list beam indices
@@ -736,8 +737,10 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                             for rx in range(num_rx_nodes)]
 
         # Evaluate initial
-        best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber = _eval_override(current_override)
+        best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber, node_wise_bler = _eval_override(current_override)
         print("Greedy init sum_log_sinr:", best_sum_log_sinr, "BLER:", best_bler)
+
+        print("Greedy init node_wise_bler:", node_wise_bler)
 
 
         # ########################################################################################################
@@ -811,7 +814,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         pass_idx = 0
 
         # How many "worst" users to consider each pass
-        bottom_N = int(getattr(cfg, "greedy_bottom_N", 2))  # e.g., 1,2,3,...
+        bottom_N = int(getattr(cfg, "greedy_bottom_N", 3))  # e.g., 1,2,3,...
         bottom_N = max(1, min(bottom_N, num_rx_nodes))
 
         rank_per_user = int(cfg.num_tx_streams / num_rx_nodes)  # e.g., 1 if 1 stream per node
@@ -859,25 +862,27 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                         trial_override = _deepcopy_override(current_override)
                         trial_override[rx][tx] = cand
 
-                        sum_log_sinr, bler, sinr_db_arr, uncoded_ber = _eval_override(trial_override)
+                        sum_log_sinr, bler, sinr_db_arr, uncoded_ber, node_wise_bler = _eval_override(trial_override)
+
 
                         delta = sum_log_sinr - best_sum_log_sinr
                         if delta > best_local_delta:
                             best_local_delta = delta
                             best_local_override = trial_override
-                            best_local_metrics = (sum_log_sinr, bler, sinr_db_arr, uncoded_ber)
+                            best_local_metrics = (sum_log_sinr, bler, sinr_db_arr, uncoded_ber, node_wise_bler)
                             best_local_where = (rx, tx, cand)
 
             # 3) apply best single change (if any improvement)
             if best_local_override is not None:
                 current_override = best_local_override
-                best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber = best_local_metrics
+                best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber, best_node_wise_bler = best_local_metrics
                 improved = True
 
                 rx_changed, tx_changed, cand_used = best_local_where
                 print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Changed (rx={rx_changed}, tx={tx_changed}) -> {cand_used}")
                 print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Updating best_sum_log_sinr to:", best_sum_log_sinr)
                 print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Current uncoded BER:", best_uncoded_ber)
+                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Current node_wise_bler:", best_node_wise_bler)
                 print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Current BLER:", best_bler)
 
                 override_sum_log_sinr.append(best_sum_log_sinr)
@@ -895,6 +900,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         print("Best greedy SINR (dB): ", best_sinr_db_arr)
         print("Best greedy sum_log_sinr: ", best_sum_log_sinr)
         print("Best greedy BLER: ", best_bler)
+        print("Best greedy node-wise BLER: ", best_node_wise_bler)
 
 
     hold = 1
