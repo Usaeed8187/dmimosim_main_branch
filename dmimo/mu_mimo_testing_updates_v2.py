@@ -504,12 +504,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                         user_count=getattr(cfg, "rl_user_count", 2),
                     )
 
-            # if w1_override is not None:
-            h_freq_csi, _ = type_II_PMI_quantizer(
-                h_freq_csi_unquantized,
-                return_feedback_bits=True,
-                w1_beam_indices_override=w1_override,
-            )
+            if w1_override is not None:
+                h_freq_csi, _ = type_II_PMI_quantizer(
+                    h_freq_csi_unquantized,
+                    return_feedback_bits=True,
+                    w1_beam_indices_override=w1_override,
+                )
                 
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
 
