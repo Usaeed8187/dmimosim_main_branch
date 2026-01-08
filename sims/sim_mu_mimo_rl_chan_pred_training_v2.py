@@ -403,7 +403,6 @@ def run_simulation():
                 ns3cfg,
                 rc_config,
                 rl_selector=shared_rl_selector,
-                ddpg_predictor=shared_ddpg_predictor,
             )
 
             ber[ue_arr_idx] = rst_zf[0]
