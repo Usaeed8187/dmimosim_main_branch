@@ -277,18 +277,18 @@ class MU_MIMO(Model):
         dec_bits = self.decoder(llr)
 
         sinr_linear = tf.math.reciprocal(tf.cast(no_eff, tf.float32) + 1e-12)
-        sinr_linear = tf.reduce_mean(sinr_linear, axis=[1, -1])
-        sinr_linear = tf.reduce_mean(sinr_linear, axis=0)
+        # sinr_linear = tf.reduce_mean(sinr_linear, axis=[1, -1])
+        # sinr_linear = tf.reduce_mean(sinr_linear, axis=0)
         sinr_dB_arr = 10 * np.log10(sinr_linear.numpy() + 1e-12)
 
         return dec_bits, uncoded_ber, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_dB_arr
 
 
-def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
+def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_sinr_db):
 
     # Rank adaptation
     rank_adaptation = rankAdaptation(dmimo_chans.ns3_config.num_bs_ant, dmimo_chans.ns3_config.num_ue_ant,
-                                        architecture='MU-MIMO', snrdb=rx_snr_db, fft_size=cfg.fft_size,
+                                        architecture='MU-MIMO', sinrdb=rx_sinr_db, fft_size=cfg.fft_size,
                                         precoder=cfg.precoding_method)
     if cfg.rank_adapt:
         rank_feedback_report = rank_adaptation(h_est, channel_type='dMIMO')
@@ -297,25 +297,18 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_snr_db):
     
     rank = rank_feedback_report[0]
 
-    h_eff = rank_adaptation.calculate_effective_channel(rank, h_est)
-    snr_linear = 10**(rx_snr_db/10)
-    snr_linear = np.sum(snr_linear, axis=(2))
-    snr_linear = np.mean(snr_linear)
-
-    n_var = rank_adaptation.cal_n_var(h_eff, snr_linear)
-
     # Link adaptation
     if cfg.link_adapt:
         data_sym_position = np.arange(0, 14)
         link_adaptation = linkAdaptation(dmimo_chans.ns3_config.num_bs_ant, dmimo_chans.ns3_config.num_ue_ant,
-                                        architecture='MU-MIMO', snrdb=rx_snr_db, nfft=cfg.fft_size,
-                                        N_s=rank, data_sym_position=data_sym_position, lookup_table_size='short')
+                                        architecture='MU-MIMO', sinrdb=rx_sinr_db, nfft=cfg.fft_size,
+                                        N_s=rank, data_sym_position=data_sym_position, lookup_table_size='long')
 
         mcs_feedback_report = link_adaptation(h_est, channel_type='dMIMO')
     else:
         mcs_feedback_report = [[cfg.modulation_order], [cfg.code_rate]]
 
-    return rank_feedback_report, n_var, mcs_feedback_report
+    return rank_feedback_report, mcs_feedback_report
 
 
 def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
@@ -499,13 +492,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     # Pick the selected UE's channels
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_tx_ue_indices, (-1,)), axis=4)
-
-    # TODO : Make rank and link adaptation work with quantized CSI feedback
-    if cfg.rank_adapt or cfg.link_adapt:
-        # Rank and link adaptation
-        # TODO: add support for quantized CSI feedback
-        rank_feedback_report, n_var, mcs_feedback_report = \
-            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi, rx_snr_db)
+    h_freq_csi_unquantized = h_freq_csi
         
     PMI_feedback_bits = None
 
@@ -540,30 +527,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             # print("PMI_feedback_bits[0]['w1_beam_indices']: ", PMI_feedback_bits[0]['w1_beam_indices'])
                 
             h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
-        
-    if cfg.rank_adapt:
-        # Update rank and total number of streams
-        rank = rank_feedback_report[0]
-        cfg.ue_ranks = [rank]
-        cfg.num_tx_streams = rank * (cfg.num_scheduled_ues + 2)  # treat BS as two UEs
-
-        # print("\n", "rank per user (MU-MIMO) = ", rank, "\n")
-        # print("\n", "rate per user (MU-MIMO) = ", rate, "\n")
-
-    if cfg.link_adapt:
-        
-        qam_order_arr = mcs_feedback_report[0]
-        code_rate_arr = mcs_feedback_report[1]
-        values, counts = np.unique(qam_order_arr, return_counts=True)
-        most_frequent_value = values[np.argmax(counts)]
-        cfg.modulation_order = int(most_frequent_value)
-
-        values, counts = np.unique(code_rate_arr, return_counts=True)
-        most_frequent_value = values[np.argmax(counts)]
-        cfg.code_rate = most_frequent_value
-
-        # print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
-        # print("\n", "Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
 
     ranks_out = int(cfg.num_tx_streams / (cfg.num_scheduled_ues+2))
 
@@ -591,6 +554,37 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
     # MU-MIMO transmission (P2)
     dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_db_arr = mu_mimo(dmimo_chans, h_freq_csi, info_bits, snr_dB_arr)
+    
+    if cfg.rank_adapt or cfg.link_adapt:
+        # Rank and link adaptation
+        # TODO: add support for quantized CSI feedback
+        rank_feedback_report, mcs_feedback_report = \
+            do_rank_link_adaptation(cfg, dmimo_chans, h_freq_csi_unquantized, sinr_db_arr)
+
+    if cfg.rank_adapt:
+        # Update rank and total number of streams
+        rank = rank_feedback_report[0]
+        cfg.ue_ranks = [rank]
+        cfg.num_tx_streams = rank * (cfg.num_scheduled_ues + 2)  # treat BS as two UEs
+
+        # print("\n", "rank per user (MU-MIMO) = ", rank, "\n")
+        # print("\n", "rate per user (MU-MIMO) = ", rate, "\n")
+
+    if cfg.link_adapt:
+        
+        qam_order_arr = mcs_feedback_report[0]
+        code_rate_arr = mcs_feedback_report[1]
+        cqi_sinrs = mcs_feedback_report[2]
+        values, counts = np.unique(qam_order_arr, return_counts=True)
+        most_frequent_value = values[np.argmax(counts)]
+        cfg.modulation_order = int(most_frequent_value)
+
+        values, counts = np.unique(code_rate_arr, return_counts=True)
+        most_frequent_value = values[np.argmax(counts)]
+        cfg.code_rate = most_frequent_value
+
+        # print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order, "\n")
+        # print("\n", "Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
 
     # Update error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
@@ -738,7 +732,7 @@ def sim_mu_mimo_all(
         PMI_feedback_bits.append(additional_KPIs[6])
         nodewise_bler_list.append(additional_KPIs[7])
 
-        if "deqn" in cfg.channel_prediction_method and rl_selector is not None:
+        if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method and rl_selector is not None:
             if use_imitation_override:
                 chan_history = additional_KPIs[8]
             else:
@@ -755,7 +749,7 @@ def sim_mu_mimo_all(
                 cfg.num_tx_streams
             )
         
-        if cfg.channel_prediction_method == "ddpg" and ddpg_predictor is not None:
+        if cfg.csi_prediction and cfg.channel_prediction_method == "ddpg" and ddpg_predictor is not None:
             ddpg_history = additional_KPIs[8]
             pending_ddpg_actions = ddpg_predictor.predict_channels(np.asarray(ddpg_history), sinr_db=additional_KPIs[4])
 

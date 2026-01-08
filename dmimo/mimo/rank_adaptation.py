@@ -20,7 +20,7 @@ class rankAdaptation(Layer):
                 num_bs_ant,
                 num_ue_ant,
                 architecture,
-                snrdb,
+                sinrdb,
                 fft_size,
                 precoder,
                 dtype=tf.complex64,
@@ -34,12 +34,12 @@ class rankAdaptation(Layer):
         self.architecture = architecture
         
         if self.architecture == 'SU-MIMO':
-            snr_linear = 10**(snrdb/10)
-            snr_linear = np.sum(snr_linear, axis=(2))
-            self.snr_linear = np.mean(snr_linear)
+            sinr_linear = 10**(sinrdb/10)
+            sinr_linear = np.sum(sinr_linear, axis=(2))
+            self.sinr_linear = np.mean(sinr_linear)
         elif self.architecture == 'MU-MIMO':
-            snr_linear = 10**(snrdb/10)
-            self.snr_linear = np.mean(snr_linear, axis =   (0,1,3))
+            sinr_linear = 10**(sinrdb/10)
+            self.sinr_linear = sinr_linear
         else:
             raise Exception(f"Rank adaptation for {self.architecture} has not been implemented.")
 
@@ -78,12 +78,12 @@ class rankAdaptation(Layer):
                 for rank_idx in range(1, max_rank+1):
 
                     if rank_idx == 1:
-                        avg_sinr = self.snr_linear
+                        avg_sinr = self.sinr_linear
                     else:
 
                         h_eff = self.calculate_effective_channel(rank_idx, h_est)
 
-                        n_var = self.cal_n_var(h_eff, self.snr_linear)
+                        n_var = self.cal_n_var(h_eff, self.sinr_linear)
 
                         mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True) + n_var*tf.eye(N_r, dtype=h_eff.dtype)
                         mmse_inv = tf.linalg.inv(mmse_inv)
@@ -116,8 +116,8 @@ class rankAdaptation(Layer):
                             
                             # tx_pow_per_stream = self.tx_pow / rank
                             # rank_capacity[sym_idx, :, rank - 1] += np.log2(1 + tx_pow_per_stream * s[:, i]**2 / self.noise_var_data)
-                            snr_linear = self.snr_linear
-                            snr_per_stream = snr_linear / rank
+                            sinr_linear = self.sinr_linear
+                            snr_per_stream = sinr_linear / rank
                             snr_per_stream_eff = np.min(np.mean(snr_per_stream, axis=(0,1,3)))
                             rank_capacity[sym_idx, :, rank - 1] += np.log2(1 + snr_per_stream_eff * s[:, i]**2)
 
@@ -186,8 +186,8 @@ class rankAdaptation(Layer):
                         else:
                             h_eff_per_node = tf.gather(h_eff, ant_indices, axis=-2)
 
-                        snr_linear = np.sum(self.snr_linear[ant_indices])
-                        n_var = self.cal_n_var(h_eff_per_node, snr_linear)
+                        sinr_linear = np.sum(self.sinr_linear[ant_indices])
+                        n_var = self.cal_n_var(h_eff_per_node, sinr_linear)
 
                         mmse_inv = tf.matmul(h_eff_per_node, h_eff_per_node, adjoint_b=True)
                         mmse_inv  = mmse_inv + n_var*tf.eye(mmse_inv.shape[-1], dtype=mmse_inv.dtype)
@@ -233,7 +233,7 @@ class rankAdaptation(Layer):
                         ant_idx = tf.range(self.num_BS_Ant + (rx_node_id-1)*self.num_UE_Ant, self.num_BS_Ant + rx_node_id * self.num_UE_Ant)
                         H_freq_temp = tf.gather(H_freq, ant_idx, axis=1)
                     
-                    snr_linear_nodewise = self.snr_linear[:,:,ant_idx,:]
+                    sinr_linear_nodewise = self.sinr_linear[:,:,ant_idx,:]
 
                     for sym_idx in range(total_num_symbols):
                         
@@ -242,7 +242,7 @@ class rankAdaptation(Layer):
                         for rank in range(1, max_rank + 1):
                             
                             for i in range(rank):
-                                snr_per_stream = snr_linear_nodewise / rank
+                                snr_per_stream = sinr_linear_nodewise / rank
                                 snr_per_stream_eff = np.min(np.mean(snr_per_stream, axis=(0,1,3)))
                                 rank_capacity[sym_idx, :, rank - 1] += np.log2(1 + snr_per_stream_eff * s[:, i]**2)               
                     max_rank_temp = np.argmax(np.mean(rank_capacity, axis=1), axis=1) + 1
@@ -545,11 +545,11 @@ class rankAdaptation(Layer):
 
         return eesm_avg_sinr
 
-    def cal_n_var(self, h_eff, snr_linear):
+    def cal_n_var(self, h_eff, sinr_linear):
         
         prod = tf.matmul(h_eff, h_eff, adjoint_b=True)
         sig_pow = np.abs(np.mean(np.trace(prod, axis1=-2, axis2=-1)))
 
-        n_var = sig_pow / snr_linear
+        n_var = sig_pow / sinr_linear
 
         return n_var

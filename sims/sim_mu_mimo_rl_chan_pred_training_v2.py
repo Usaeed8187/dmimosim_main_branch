@@ -89,17 +89,17 @@ mobility = 'high_mobility'
 drop_idx = ','.join(str(i) for i in range(4, 45))
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [2]
-num_txue_sel = 2
+num_txue_sel = 10
 
 modulation_order = 4
 code_rate = 1 / 2
 link_adapt = True
 
-perfect_csi = False
-channel_prediction_setting = "ddpg" # "None", "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", "ddpg"
-csi_prediction = True
-channel_prediction_method = "ddpg" # None, "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", ddpg
-csi_quantization_on = True
+perfect_csi = True
+channel_prediction_setting = "None" # "None", "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", "ddpg"
+csi_prediction = False
+channel_prediction_method = None # None, "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", ddpg
+csi_quantization_on = False
 imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
 

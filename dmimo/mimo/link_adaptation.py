@@ -12,7 +12,7 @@ class linkAdaptation(Layer):
                 num_bs_ant,
                 num_ue_ant,
                 architecture,
-                snrdb,
+                sinrdb,
                 nfft,
                 N_s,
                 data_sym_position,
@@ -26,13 +26,13 @@ class linkAdaptation(Layer):
         self.nfft = nfft
         self.architecture = architecture
         if self.architecture == 'SU-MIMO':
-            snr_linear = 10**(snrdb/10)
-            snr_linear = np.sum(snr_linear, axis=(2))
-            self.snr_linear = np.mean(snr_linear)
+            sinr_linear = 10**(sinrdb/10)
+            sinr_linear = np.sum(sinr_linear, axis=(2))
+            self.sinr_linear = np.mean(sinr_linear)
             precoder= 'SVD'
         elif self.architecture == 'MU-MIMO':
-            snr_linear = 10**(snrdb/10)
-            self.snr_linear = np.mean(snr_linear, axis =   (0,1,3))
+            sinr_linear = 10**(sinrdb/10)
+            self.sinr_linear = sinr_linear
             precoder= 'BD'
         else:
             raise Exception(f"Rank adaptation for {self.architecture} has not been implemented.")
@@ -45,7 +45,7 @@ class linkAdaptation(Layer):
 
         self.N_s = N_s
         
-        self.rank_adaptation = rankAdaptation(num_bs_ant, num_ue_ant, architecture, snrdb, nfft, precoder=precoder)
+        self.rank_adaptation = rankAdaptation(num_bs_ant, num_ue_ant, architecture, sinrdb, nfft, precoder=precoder)
 
 
     def call(self, h_est, channel_type):
@@ -89,7 +89,7 @@ class linkAdaptation(Layer):
 
             if self.N_s == 1:
                 
-                avg_sinr = self.snr_linear
+                avg_sinr = self.sinr_linear
 
                 sinr_eff_list = []
                 for beta in beta_list:
@@ -106,7 +106,7 @@ class linkAdaptation(Layer):
             else:
 
                 h_eff = self.rank_adaptation.calculate_effective_channel(self.N_s, h_est)
-                n_var = self.rank_adaptation.cal_n_var(h_eff, self.snr_linear)
+                n_var = self.rank_adaptation.cal_n_var(h_eff, self.sinr_linear)
                 mmse_inv = tf.matmul(h_eff, h_eff, adjoint_b=True)
                 mmse_inv  = mmse_inv + n_var*tf.eye(mmse_inv.shape[-1], dtype=mmse_inv.dtype)
                 mmse_inv = tf.linalg.inv(mmse_inv)
@@ -170,8 +170,7 @@ class linkAdaptation(Layer):
 
         N_t = h_est.shape[4]
         N_r = h_est.shape[2]
-        num_rx_nodes = int((N_r - self.num_BS_Ant)/self.num_UE_Ant) + 1
-        total_num_symbols = h_est.shape[5]
+        num_rx_nodes = int(N_r/self.num_UE_Ant)
 
         h_est = h_est[0:1,...]
         H_freq = tf.squeeze(h_est)
@@ -202,11 +201,7 @@ class linkAdaptation(Layer):
                 
                 for rx_node_idx in range(num_rx_nodes):
 
-                    if rx_node_idx == 0:
-                        ant_indices = np.arange(self.num_BS_Ant)
-                    else:
-                        ant_indices = np.arange((rx_node_idx-1)*self.num_UE_Ant  + self.num_BS_Ant, rx_node_idx*self.num_UE_Ant + self.num_BS_Ant)
-                    curr_sinr_linear = np.sum(self.snr_linear[ant_indices])
+                    curr_sinr_linear = self.sinr_linear[:, :, rx_node_idx, :]
 
                     sinr_eff_list = []
                     for beta in beta_list:
@@ -220,7 +215,6 @@ class linkAdaptation(Layer):
                     code_rate_arr[0, rx_node_idx] = curr_code_rate
                     cqi_snr[0, rx_node_idx] = cqi_snr_tmp
                 
-                
             else:
 
                 h_eff = self.rank_adaptation.calculate_effective_channel(self.N_s, h_est)
@@ -231,7 +225,7 @@ class linkAdaptation(Layer):
                         ant_indices = np.arange(self.num_BS_Ant)
                     else:
                         ant_indices = np.arange((rx_node_idx-1)*self.num_UE_Ant  + self.num_BS_Ant, rx_node_idx*self.num_UE_Ant + self.num_BS_Ant)
-                    curr_sinr_linear = np.sum(self.snr_linear[ant_indices])
+                    curr_sinr_linear = np.sum(self.sinr_linear[ant_indices])
 
                     h_eff_per_node = tf.gather(h_eff, ant_indices, axis=-2)
                     
