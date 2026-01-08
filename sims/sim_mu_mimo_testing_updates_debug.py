@@ -94,10 +94,10 @@ modulation_order = 4
 code_rate = 1 / 2
 link_adapt = True
 
-perfect_csi = True
-channel_prediction_setting = "None" # "None", "two_mode", "weiner_filter", "deqn"
-csi_prediction = False
-channel_prediction_method = None # None, "two_mode", "weiner_filter", "deqn"
+perfect_csi = False
+channel_prediction_setting = "two_mode" # "None", "two_mode", "weiner_filter", "deqn"
+csi_prediction = True
+channel_prediction_method = "two_mode" # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 rl_checkpoint = None
 rl_evaluation_only = False

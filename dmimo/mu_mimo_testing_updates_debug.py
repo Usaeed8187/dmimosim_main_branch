@@ -119,7 +119,6 @@ def _build_w1_override_candidates(ns3cfg):
 
     return override_candidates
 
-
 class MU_MIMO(Model):
 
     def __init__(self, cfg: SimConfig, rg_csi: ResourceGrid, **kwargs):
@@ -676,8 +675,15 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    print("BLER: ", coded_bler)
-    # print("BER: ", uncoded_ber_phase_2)
+    print("Baseline uncoded BER: ", uncoded_ber_phase_2)
+    print("Baseline BLER: ", coded_bler)
+    sinr_linear = 10.0 ** (np.asarray(sinr_db_arr) / 10.0)
+    sum_log_sinr = np.sum(np.log(1.0 + sinr_linear))
+    print("Baseline sum_log_sinr: ", sum_log_sinr)
+
+    est_sinr = _esimate_sinr(h_freq_csi)
+
+    best_sum_log_sinr = sum_log_sinr
 
     override_sum_log_sinr = []
     override_bler = []
@@ -691,7 +697,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                 w1_beam_indices_override=w1_override,
             )
             h_freq_csi_override = tf.squeeze(h_freq_csi_override, axis=(1, 3))
-            dec_bits_override, _, _, _, _, sinr_db_arr_override = mu_mimo(
+            dec_bits_override, uncoded_ber, _, _, _, sinr_db_arr_override = mu_mimo(
                 dmimo_chans,
                 h_freq_csi_override,
                 info_bits,
@@ -705,6 +711,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             override_sum_log_sinr.append(sum_log_sinr)
             override_bler.append(coded_bler_override)
             override_sinr_db_arr.append(sinr_db_arr_override)
+
+            if sum_log_sinr > best_sum_log_sinr:
+                best_sum_log_sinr = sum_log_sinr
+                print("Updating best_sum_log_sinr to: ", best_sum_log_sinr)
+                print("Current uncoded BER: ", uncoded_ber)
+                print("Current BLER: ", coded_bler_override)
 
         override_sum_log_sinr = np.array(override_sum_log_sinr)
         override_bler = np.array(override_bler)
