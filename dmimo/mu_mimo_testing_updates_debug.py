@@ -734,36 +734,125 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         # If you want to start from some initial override, replace None with that structure.
         current_override = [[np.sort(feedback_bits[rx]['w1_beam_indices'][tx]) for tx in range(num_tx_nodes)]
                             for rx in range(num_rx_nodes)]
-        # NOTE: choosing index [0] just gives a valid structure. If you want the true baseline,
-        # you can set current_override = None and only start greedy after a first eval with None.
-        # But greedy needs a concrete override to mutate, so we seed it with something valid.
-        # Alternatively: you can call type_II_PMI_quantizer once with None, extract the chosen W1 indices,
-        # and seed current_override with those (best practice).
 
         # Evaluate initial
         best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber = _eval_override(current_override)
         print("Greedy init sum_log_sinr:", best_sum_log_sinr, "BLER:", best_bler)
 
-        max_passes = getattr(cfg, "greedy_max_passes", 1)   # set as you like
+
+        # ########################################################################################################
+        # # GREEDY APPROACH, CHANGING ALL RX-TX PAIRS -- USES PERFECT CHANNEL INTERACTIONS
+        # ########################################################################################################
+        # max_passes = getattr(cfg, "greedy_max_passes", 1)   # set as you like
+        # improved = True
+        # pass_idx = 0
+
+        # while improved and pass_idx < max_passes:
+        #     improved = False
+        #     pass_idx += 1
+
+        #     # Track best single change in this pass
+        #     best_local_delta = 0.0
+        #     best_local_override = None
+        #     best_local_metrics = None
+
+        #     # For each (rx,tx), try changing ONLY that entry
+        #     for rx in range(num_rx_nodes):
+        #         for tx in range(num_tx_nodes):
+        #             base_choice = current_override[rx][tx]
+        #             candidates = per_pair_candidates[rx][tx]
+
+        #             for cand in candidates:
+        #                 if np.all(cand == base_choice):
+        #                     continue
+
+        #                 trial_override = _deepcopy_override(current_override)
+        #                 trial_override[rx][tx] = cand
+
+        #                 sum_log_sinr, bler, sinr_db_arr, uncoded_ber = _eval_override(trial_override)
+
+        #                 delta = sum_log_sinr - best_sum_log_sinr
+        #                 if delta > best_local_delta:
+        #                     best_local_delta = delta
+        #                     best_local_override = trial_override
+        #                     best_local_metrics = (sum_log_sinr, bler, sinr_db_arr, uncoded_ber)
+
+        #     # Apply the best single change found in this pass
+        #     if best_local_override is not None:
+        #         current_override = best_local_override
+        #         best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber = best_local_metrics
+        #         improved = True
+
+        #         print(f"[Greedy pass {pass_idx}] Updating best_sum_log_sinr to:", best_sum_log_sinr)
+        #         print(f"[Greedy pass {pass_idx}] Current uncoded BER:", best_uncoded_ber)
+        #         print(f"[Greedy pass {pass_idx}] Current BLER:", best_bler)
+
+        #         override_sum_log_sinr.append(best_sum_log_sinr)
+        #         override_bler.append(best_bler)
+        #         override_sinr_db_arr.append(best_sinr_db_arr)
+
+        # # Convert logs to arrays (optional)
+        # override_sum_log_sinr = np.array(override_sum_log_sinr)
+        # override_bler = np.array(override_bler)
+
+        # print("Greedy passes executed:", pass_idx)
+        # print("Baseline/initial SINR (dB): ", sinr_db_arr)
+        # print("Best greedy SINR (dB): ", best_sinr_db_arr)
+        # print("Best greedy sum_log_sinr: ", best_sum_log_sinr)
+        # print("Best greedy BLER: ", best_bler)
+
+
+        ########################################################################################################
+        # GREEDY APPROACH, CHANGING RX-TX PAIRS FOR WORST RX -- USES PERFECT CHANNEL INTERACTIONS
+        ########################################################################################################
+
+        max_passes = getattr(cfg, "greedy_max_passes", 1)
         improved = True
         pass_idx = 0
+
+        # How many "worst" users to consider each pass
+        bottom_N = int(getattr(cfg, "greedy_bottom_N", 2))  # e.g., 1,2,3,...
+        bottom_N = max(1, min(bottom_N, num_rx_nodes))
+
+        rank_per_user = int(cfg.num_tx_streams / num_rx_nodes)  # e.g., 1 if 1 stream per node
+
+        def _worst_users_from_sinr_db(sinr_db_arr_, bottom_N_):
+            """
+            Return indices of bottom_N_ users by per-user SINR score.
+            Assumes per-stream SINRs are ordered user-by-user.
+            """
+            s = np.asarray(sinr_db_arr_, dtype=float).reshape(num_rx_nodes, rank_per_user)
+
+            # Score per user: mean SINR(dB) over that user's streams (use min if you prefer)
+            per_user_score = np.mean(s, axis=1)
+
+            # Indices sorted ascending (worst first)
+            worst_order = np.argsort(per_user_score)
+            bottom_users = worst_order[:bottom_N_].tolist()
+            return bottom_users, per_user_score
 
         while improved and pass_idx < max_passes:
             improved = False
             pass_idx += 1
 
-            # Track best single change in this pass
+            # 1) pick bottom-N users based on current SINR
+            bottom_users, per_user_sinr_db = _worst_users_from_sinr_db(best_sinr_db_arr, bottom_N)
+            print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] bottom_users={bottom_users}, per_user_sinr_dB={per_user_sinr_db}")
+
+            # 2) search ONLY changes to W1 of those bottom-N users (across all tx nodes)
             best_local_delta = 0.0
             best_local_override = None
             best_local_metrics = None
+            best_local_where = None  # (rx, tx, cand)
 
-            # For each (rx,tx), try changing ONLY that entry
-            for rx in range(num_rx_nodes):
+            for rx in bottom_users:
                 for tx in range(num_tx_nodes):
                     base_choice = current_override[rx][tx]
                     candidates = per_pair_candidates[rx][tx]
 
                     for cand in candidates:
+                        # IMPORTANT: prefer tuples everywhere, so equality is just `cand == base_choice`
+                        # If base_choice is a numpy array in your code, keep this np.all check.
                         if np.all(cand == base_choice):
                             continue
 
@@ -777,20 +866,25 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                             best_local_delta = delta
                             best_local_override = trial_override
                             best_local_metrics = (sum_log_sinr, bler, sinr_db_arr, uncoded_ber)
+                            best_local_where = (rx, tx, cand)
 
-            # Apply the best single change found in this pass
+            # 3) apply best single change (if any improvement)
             if best_local_override is not None:
                 current_override = best_local_override
                 best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber = best_local_metrics
                 improved = True
 
-                print(f"[Greedy pass {pass_idx}] Updating best_sum_log_sinr to:", best_sum_log_sinr)
-                print(f"[Greedy pass {pass_idx}] Current uncoded BER:", best_uncoded_ber)
-                print(f"[Greedy pass {pass_idx}] Current BLER:", best_bler)
+                rx_changed, tx_changed, cand_used = best_local_where
+                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Changed (rx={rx_changed}, tx={tx_changed}) -> {cand_used}")
+                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Updating best_sum_log_sinr to:", best_sum_log_sinr)
+                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Current uncoded BER:", best_uncoded_ber)
+                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Current BLER:", best_bler)
 
                 override_sum_log_sinr.append(best_sum_log_sinr)
                 override_bler.append(best_bler)
                 override_sinr_db_arr.append(best_sinr_db_arr)
+            else:
+                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] No improving move found within bottom-{bottom_N} users.")
 
         # Convert logs to arrays (optional)
         override_sum_log_sinr = np.array(override_sum_log_sinr)
@@ -801,6 +895,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         print("Best greedy SINR (dB): ", best_sinr_db_arr)
         print("Best greedy sum_log_sinr: ", best_sum_log_sinr)
         print("Best greedy BLER: ", best_bler)
+
 
     hold = 1
     # override_sum_log_sinr = []
