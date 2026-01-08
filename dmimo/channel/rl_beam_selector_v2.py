@@ -326,12 +326,14 @@ class RLBeamSelector:
     ) -> Optional[List[List[Optional[np.ndarray]]]]:
         """Update all agents with the newest feedback and return predicted beams per Rx–Tx pair."""
 
+        # Pull out raw W1 beam indices (per user, per TX) from the PMI feedback.
         w1_structures = _extract_w1_from_feedback(pmi_feedback_bits)
         if len(w1_structures) == 0:
             return None
         
         self.step_counter += 1
 
+        # Decide how many users to target while still keeping the input window bounded.
         total_users = len(w1_structures)
         selected_user_count = user_count if user_count is not None else 2
         selected_user_count = max(1, min(int(selected_user_count), total_users))
@@ -341,6 +343,7 @@ class RLBeamSelector:
 
         overrides: List[List[Optional[np.ndarray]]] = []
 
+        # Build action maps per TX so we can map each W1 beam set to its index.
         num_tx = max(
             (len(raw_w1) if isinstance(raw_w1, (list, tuple)) else 1) for raw_w1 in w1_structures
         )
@@ -364,6 +367,7 @@ class RLBeamSelector:
             tx_action_lookup.append({beam: idx for idx, beam in enumerate(action_map)})
             tx_beam_lengths.append(L)
 
+        # Convert each user's raw W1 beam set into an index within the action map.
         user_beam_sets: List[List[int]] = []
         for raw_w1 in w1_structures:
             tx_entries = raw_w1 if isinstance(raw_w1, (list, tuple)) else [raw_w1]
@@ -385,6 +389,7 @@ class RLBeamSelector:
                     beam_indices.append(0)
             user_beam_sets.append(beam_indices)
 
+        # Measure collisions (same W1 set index used by multiple users) per TX.
         tx_collision_counts = []
         for tx_idx in range(num_tx):
             tx_indices = [beam_sets[tx_idx] for beam_sets in user_beam_sets]
@@ -393,9 +398,11 @@ class RLBeamSelector:
 
         worst_tx_idx = int(np.argmax(tx_collision_counts)) if tx_collision_counts else 0
 
+        # Score users with ACK * MCS, and pick the worst-performing subset.
         user_scores = ack_array[:total_users] * mcs_array[:total_users]
         worst_user_indices = list(np.argsort(user_scores)[:selected_user_count])
 
+        # State uses indices of W1 beam sets (not raw beam IDs) plus each user's MCS.
         selected_beam_sets = [user_beam_sets[idx] for idx in worst_user_indices]
         selected_mcs = mcs_array[worst_user_indices] if len(mcs_array) > 0 else np.zeros(selected_user_count)
         state = self._build_state(selected_beam_sets, selected_mcs)
@@ -411,7 +418,7 @@ class RLBeamSelector:
         prev_action = self.prev_actions[0][worst_tx_idx]
         episode_len = getattr(agent, "memory_counter", 0)
         if not self.evaluation_only and prev_state is not None and prev_action is not None:
-            reward = float(np.sum(user_scores[worst_user_indices]))
+            reward = float(np.sum(user_scores))
             agent.store_transition(prev_state, prev_action, reward, state)
             self.log_reward(0, worst_tx_idx, reward)
             agent.activate_target_net(state)
