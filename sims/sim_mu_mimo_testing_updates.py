@@ -85,7 +85,7 @@ arguments = sys.argv[1:]
 
 
 mobility = 'high_mobility'
-drop_idx = '1'
+drop_idx = '3'
 rx_ues_arr = [2]
 num_txue_sel = 2
 
@@ -99,7 +99,8 @@ csi_prediction = True
 channel_prediction_method = "two_mode" # None, "two_mode", "weiner_filter", "deqn_plus_two_mode"
 csi_quantization_on = True
 rl_train_end_drop = 45
-rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
+# rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
+rl_checkpoint = None
 rl_evaluation_only = True
 
 def log_error(exc: Exception) -> str:

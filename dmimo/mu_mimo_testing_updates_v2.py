@@ -475,7 +475,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     mcs_indices = None
 
     if cfg.csi_quantization_on:
-        h_freq_csi = tf.reduce_mean(h_freq_csi, axis=0, keepdims=True)
+        h_freq_csi_unquantized = tf.reduce_mean(h_freq_csi_unquantized, axis=0, keepdims=True)
         if cfg.PMI_feedback_architecture == "RVQ":
             rvq = RandomVectorQuantizer(bits_per_codeword=15, vector_dim=h_freq_csi.shape[4], seed=42)
             h_freq_csi = rvq.quantize_feedback(h_freq_csi, cfg, rg_csi, donald_hack=True, quantization_debug=False)
@@ -661,7 +661,7 @@ def sim_mu_mimo_all(
     PMI_feedback_bits = []
     nodewise_bler_list = []
 
-    if rl_selector is None and "deqn" in cfg.channel_prediction_method:
+    if rl_selector is None and cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
         rl_selector = RLBeamSelector()
         checkpoint = getattr(cfg, "rl_checkpoint", None)
         if checkpoint:
