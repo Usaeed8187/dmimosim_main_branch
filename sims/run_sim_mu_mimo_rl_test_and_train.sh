@@ -5,7 +5,7 @@ set -euo pipefail
 # Configuration
 MOBILITY=${MOBILITY:-"high_mobility"}
 declare -a RX_UES_ARR=("2" "4" "6")
-declare -a NUM_TXUE_SEL_ARR=("2" "6")
+declare -a NUM_TXUE_SEL_ARR=("2" "4" "6" "8")
 MODULATION_ORDER=${MODULATION_ORDER:-4}
 CODE_RATE=${CODE_RATE:-"1/2"}
 PERFECT_CSI=${PERFECT_CSI:-False}
@@ -13,7 +13,7 @@ CSI_QUANTIZATION=${CSI_QUANTIZATION:-True}
 LINK_ADAPT=${LINK_ADAPT:-True}
 RL_MODE=${RL_MODE:-"deqn_plus_two_mode"} # "deqn", "deqn_plus_two_mode", "ddpg"
 
-PARALLEL_JOBS=${PARALLEL_JOBS:-6}
+PARALLEL_JOBS=${PARALLEL_JOBS:-12}
 
 TRAIN_DROP_START=${TRAIN_DROP_START:-4}
 TRAIN_DROP_COUNT=${TRAIN_DROP_COUNT:-42}

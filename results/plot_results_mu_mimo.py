@@ -491,14 +491,14 @@ def main() -> None:
         "--rx-ues",
         type=int,
         nargs="+",
-        default=[0, 2, 4, 6],
+        default=[2, 4, 6],
         help="UE counts that were simulated.",
     )
     parser.add_argument(
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8, 10],
+        default=[2, 6],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
@@ -536,7 +536,7 @@ def main() -> None:
     parser.add_argument(
         "--fixed-tx",
         type=int,
-        default=8,
+        default=6,
         help="RU count to hold fixed when sweeping UEs.",
     )
     parser.add_argument(

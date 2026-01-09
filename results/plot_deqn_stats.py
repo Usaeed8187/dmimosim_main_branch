@@ -25,8 +25,8 @@ import numpy as np
 
 DEFAULT_DROPS = list(range(4, 45))
 DEFAULT_MOBILITY = "high_mobility"
-DEFAULT_RX_UES = 2
-DEFAULT_TX_UES = 2
+DEFAULT_RX_UES = 4
+DEFAULT_TX_UES = 6
 DEFAULT_LINK_ADAPT = True
 DEFAULT_PERFECT_CSI = False
 DEFAULT_CSI_PREDICTION = True
@@ -235,9 +235,9 @@ def _load_rewards(path: Path) -> np.ndarray:
     data = np.load(path, allow_pickle=False)
     rewards = np.asarray(data["rewards"], dtype=float)
 
-    if rewards.ndim == 1 and rewards.size % 2 == 0:
-        rewards = rewards.reshape(-1, 2)
-    if rewards.ndim != 2 or rewards.shape[1] != 2:
+    if rewards.ndim == 2:
+        rewards = rewards[:,-1]
+    else:
         raise ValueError(f"Unexpected reward array shape {rewards.shape} in {path}")
     return rewards
 
@@ -246,12 +246,14 @@ def _load_actions(path: Path) -> np.ndarray:
     data = np.load(path, allow_pickle=False)
     actions = np.asarray(data["actions"], dtype=int)
 
-    if actions.ndim == 1 and actions.size % 3 == 0:
-        actions = actions.reshape(-1, 3)
-    if actions.ndim != 2 or actions.shape[1] != 3:
+    actions_out = np.zeros([actions.shape[0], 2])
+    if actions.ndim == 2:
+        actions_out[:, 0] = actions[:, 0]
+        actions_out[:, 1] = actions[:, -1]
+    else:
         raise ValueError(f"Unexpected action array shape {actions.shape} in {path}")
 
-    return actions
+    return actions_out 
 
 def _load_throughput(path: Path) -> float:
 
@@ -271,7 +273,7 @@ def _aggregate_rewards(files: Iterable[RewardFile]) -> Tuple[List[Tuple[int, flo
     for file_info in files:
         rewards = _load_rewards(file_info.path)
         drop_rewards = by_drop.setdefault(file_info.drop_id, [])
-        for _, reward in rewards:
+        for reward in rewards:
             drop_rewards.append(float(reward))
     series = [(drop, float(np.mean(values))) for drop, values in by_drop.items()]
     series.sort(key=lambda item: item[0])
@@ -283,7 +285,7 @@ def _aggregate_actions(files: Iterable[ActionFile]) -> Tuple[List[Tuple[int, int
     max_step = 0
     for file_info in files:
         actions = _load_actions(file_info.path)
-        for step, _, action_idx in actions:
+        for step, action_idx in actions:
             actions_series.append((int(step), int(action_idx)))
             max_step = max(max_step, int(step))
     actions_series.sort(key=lambda item: item[0])
@@ -384,7 +386,7 @@ def main() -> None:
 
     parser.add_argument("--imitation-method", type=str, default=DEFAULT_IMITATION_METHOD)
     parser.add_argument("--imitation-drop-count", type=int, default=DEFAULT_IMITATION_DROP_COUNT)
-    parser.add_argument("--rolling-window", type=int, default=10)
+    parser.add_argument("--rolling-window", type=int, default=5)
 
     parser.add_argument(
         "--output",
