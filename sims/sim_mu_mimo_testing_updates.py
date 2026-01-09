@@ -87,19 +87,20 @@ arguments = sys.argv[1:]
 mobility = 'high_mobility'
 drop_idx = '2'
 rx_ues_arr = [4]
-num_txue_sel = 10
+num_txue_sel = 2
 
 modulation_order = 4
 code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "weiner_filter" # "None", "two_mode", "weiner_filter", "deqn"
+channel_prediction_setting = "deqn_plus_two_mode" # "None", "two_mode", "weiner_filter", "deqn_plus_two_mode"
 csi_prediction = True
-channel_prediction_method = "weiner_filter" # None, "two_mode", "weiner_filter", "deqn"
+channel_prediction_method = "deqn_plus_two_mode" # None, "two_mode", "weiner_filter", "deqn_plus_two_mode"
 csi_quantization_on = True
-rl_checkpoint = None
-rl_evaluation_only = False
+rl_train_end_drop = 45
+rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
+rl_evaluation_only = True
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)

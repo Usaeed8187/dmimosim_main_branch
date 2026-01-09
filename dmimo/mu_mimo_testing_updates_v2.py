@@ -576,8 +576,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
+    print("Uncoded BER: ", uncoded_ber_phase_2)
+    print("Coded BER: ", coded_ber)
     print("BLER: ", coded_bler)
-    # print("BER: ", uncoded_ber_phase_2)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
     node_wise_acks = 1 - np.ceil(node_wise_bler)
@@ -672,7 +673,6 @@ def sim_mu_mimo_all(
         
         # print("first_slot_idx: ", first_slot_idx)
 
-        total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
 
         start_time = time.time()
@@ -680,23 +680,25 @@ def sim_mu_mimo_all(
         end_time = time.time()
         # print("Cycle time: ", end_time - start_time, " seconds\n")
         
-        uncoded_ber += bers[0]
-        ldpc_ber += bers[1]
-        uncoded_ber_list.append(bers[0])
-        ldpc_ber_list.append(bers[1])
-        
-        goodput += bits[0]
-        throughput += bits[1]
-        bitrate += bits[2]
-        
-        nodewise_goodput.append(additional_KPIs[0])
-        nodewise_throughput.append(additional_KPIs[1])
-        nodewise_bitrate.append(additional_KPIs[2])
-        ranks_list.append(additional_KPIs[3])
-        sinr_dB_list.append(additional_KPIs[4])
-        snr_dB_list.append(additional_KPIs[5])
-        PMI_feedback_bits.append(additional_KPIs[6])
-        nodewise_bler_list.append(additional_KPIs[7])
+        if first_slot_idx > cfg.start_slot_idx:
+            total_cycles += 1
+            uncoded_ber += bers[0]
+            ldpc_ber += bers[1]
+            uncoded_ber_list.append(bers[0])
+            ldpc_ber_list.append(bers[1])
+            
+            goodput += bits[0]
+            throughput += bits[1]
+            bitrate += bits[2]
+            
+            nodewise_goodput.append(additional_KPIs[0])
+            nodewise_throughput.append(additional_KPIs[1])
+            nodewise_bitrate.append(additional_KPIs[2])
+            ranks_list.append(additional_KPIs[3])
+            sinr_dB_list.append(additional_KPIs[4])
+            snr_dB_list.append(additional_KPIs[5])
+            PMI_feedback_bits.append(additional_KPIs[6])
+            nodewise_bler_list.append(additional_KPIs[7])
         
         hold = 1
 
@@ -705,6 +707,8 @@ def sim_mu_mimo_all(
     bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
     print("Average throughput: {:.2f} Mbps".format(throughput))
+    print("Average uncoded BER: {:.2f} Mbps".format(uncoded_ber / total_cycles))
+    print("Average coded BER: {:.2f} Mbps".format(ldpc_ber / total_cycles))
 
     nodewise_goodput = np.concatenate(nodewise_goodput) / (slot_time * 1e6) * overhead  # Mbps
     nodewise_throughput = np.concatenate(nodewise_throughput) / (slot_time * 1e6) * overhead  # Mbps
