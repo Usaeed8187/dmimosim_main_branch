@@ -42,7 +42,7 @@ ACTION_PATTERN = re.compile(
 
 THROUGHPUT_PATTERN = re.compile(
     r"mu_mimo_results_link_adapt_rx_UE_(\d+)_tx_UE_(\d+)"
-    r"_prediction_deqn_pmi_quantization_True"
+    r"_prediction_deqn_plus_two_mode_pmi_quantization_True"
     r"_imitation_([A-Za-z0-9_]+)_steps_(\d+)\.npz$"
 )
 
@@ -239,7 +239,7 @@ def _find_throughput_files(
         candidates: List[ThroughputFile] = []
         for path in sorted(
             drop_path.glob(
-                "mu_mimo_results_link_adapt_rx_UE_*_tx_UE_*_prediction_deqn_pmi_quantization_True_imitation_*_steps_*.npz"
+                "mu_mimo_results_link_adapt_rx_UE_*_tx_UE_*_prediction_deqn_plus_two_mode_pmi_quantization_True_imitation_*_steps_*.npz"
             )
         ):
             try:
@@ -640,7 +640,7 @@ def main() -> None:
         type=int,
         nargs="+",
         # default=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24],
-        default=list(range(1, 45)),
+        default=list(range(4, 45)),
         help="List of drop identifiers to include in the plots.",
     )
 
@@ -693,7 +693,7 @@ def main() -> None:
     parser.add_argument(
         "--rolling-window",
         type=int,
-        default=25,
+        default=10,
         help=(
             "Rolling window length (in drops) to average reward/throughput curves "
             "before plotting."
