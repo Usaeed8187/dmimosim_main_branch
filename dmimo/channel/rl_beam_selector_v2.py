@@ -126,7 +126,7 @@ def _ensure_1d_array(arr: Optional[np.ndarray]) -> np.ndarray:
 
 
 class RLBeamSelector:
-    """Lightweight manager to run DEQN agents for PMI beam predictions."""
+    """Lightweight manager to run a single DEQN agent for PMI beam predictions."""
 
     def __init__(
         self,
@@ -156,20 +156,20 @@ class RLBeamSelector:
         self.imitation_method = imitation_method
 
         self.seed_sequence = np.random.SeedSequence(random_seed) if random_seed is not None else None
-        self.agent_seeds: List[List[Optional[int]]] = []
+        self.agent_seed: Optional[int] = None
 
-        self.agents: List[List[Optional[DeepWESNQNetwork]]] = []
-        self.action_maps: List[List[List[Tuple[int, ...]]]] = []
-        self.prev_states: List[List[Optional[np.ndarray]]] = []
-        self.prev_actions: List[List[Optional[int]]] = []
-        self.state_dims: List[List[Optional[int]]] = []
+        self.agent: Optional[DeepWESNQNetwork] = None
+        self.action_maps: List[List[Tuple[int, ...]]] = []
+        self.prev_state: Optional[np.ndarray] = None
+        self.prev_action: Optional[int] = None
+        self.state_dim: Optional[int] = None
         self.reward_log: List[Tuple[int, int, float]] = []
         self.action_log: List[Tuple[int, int, int, int]] = []
         self.step_counter: int = 0
         self.evaluation_only: bool = False
 
     def set_epsilon_total_steps(self, total_steps: Optional[int]) -> None:
-        """Update the epsilon decay horizon for all agents."""
+        """Update the epsilon decay horizon for the agent."""
 
         self.epsilon_total_steps = total_steps
 
@@ -181,10 +181,8 @@ class RLBeamSelector:
     def reset_episode(self):
         """Clear per-episode state without discarding learned experience."""
 
-        for rx_idx in range(len(self.prev_states)):
-            for tx_idx in range(len(self.prev_states[rx_idx])):
-                self.prev_states[rx_idx][tx_idx] = None
-                self.prev_actions[rx_idx][tx_idx] = None
+        self.prev_state = None
+        self.prev_action = None
         
         self.reward_log.clear()
         self.action_log.clear()
@@ -216,38 +214,18 @@ class RLBeamSelector:
 
         return list(self.action_log)
 
-    def _ensure_pair_capacity(self, rx_idx: int, tx_idx: int):
-        while len(self.agents) <= rx_idx:
-            self.agents.append([])
-            self.action_maps.append([])
-            self.prev_states.append([])
-            self.prev_actions.append([])
-            self.state_dims.append([])
-            self.agent_seeds.append([])
-
-        while len(self.agents[rx_idx]) <= tx_idx:
-            self.agents[rx_idx].append(None)
-            self.action_maps[rx_idx].append([])
-            self.prev_states[rx_idx].append(None)
-            self.prev_actions[rx_idx].append(None)
-            self.state_dims[rx_idx].append(None)
-            self.agent_seeds[rx_idx].append(None)
-
     def _next_seed(self) -> int:
         if self.seed_sequence is not None:
             return int(self.seed_sequence.spawn(1)[0].entropy % 10000)
 
         return int(np.random.SeedSequence().entropy % 10000)
 
-    def _maybe_init_agent(self, rx_idx: int, tx_idx: int, state_dim: int):
-        self._ensure_pair_capacity(rx_idx, tx_idx)
+    def _maybe_init_agent(self, state_dim: int):
+        if self.agent is None:
+            if self.agent_seed is None:
+                self.agent_seed = self._next_seed()
 
-        if self.agents[rx_idx][tx_idx] is None:
-
-            if self.agent_seeds[rx_idx][tx_idx] is None:
-                self.agent_seeds[rx_idx][tx_idx] = self._next_seed()
-            
-            self.agents[rx_idx][tx_idx] = DeepWESNQNetwork(
+            self.agent = DeepWESNQNetwork(
                 self.max_actions,
                 state_dim,
                 self.input_window_size,
@@ -256,30 +234,31 @@ class RLBeamSelector:
                 n_layers=1,
                 nInternalUnits=64,
                 spectral_radius=0.3,
-                random_seed=self.agent_seeds[rx_idx][tx_idx],
+                random_seed=self.agent_seed,
             )
-            self.state_dims[rx_idx][tx_idx] = state_dim
-    
-    def _init_action_map(self, rx_idx: int, tx_idx: int, L: int) -> List[Tuple[int, ...]]:
+            self.state_dim = state_dim
 
-        self._ensure_pair_capacity(rx_idx, tx_idx)
-        
-        existing = self.action_maps[rx_idx][tx_idx]
+
+    def _init_action_map(self, tx_idx: int, L: int) -> List[Tuple[int, ...]]:
+        while len(self.action_maps) <= tx_idx:
+            self.action_maps.append([])
+
+        existing = self.action_maps[tx_idx]
 
         if not existing or len(existing[0]) != L:
-            self.action_maps[rx_idx][tx_idx] = _enumerate_beam_sets(
+            self.action_maps[tx_idx] = _enumerate_beam_sets(
                 self.N1, self.O1, self.N2, self.O2, L
             )
 
-        return self.action_maps[rx_idx][tx_idx]
+        return self.action_maps[tx_idx]
 
-    def _decode_action(self, rx_idx: int, tx_idx: int, action_idx: int) -> Optional[Tuple[int, ...]]:
+    def _decode_action(self, tx_idx: int, action_idx: int) -> Optional[Tuple[int, ...]]:
         if action_idx is None:
             return None
-        if rx_idx >= len(self.action_maps) or tx_idx >= len(self.action_maps[rx_idx]):
+        if tx_idx >= len(self.action_maps):
             return None
-        if 0 <= action_idx < len(self.action_maps[rx_idx][tx_idx]):
-            return self.action_maps[rx_idx][tx_idx][action_idx]
+        if 0 <= action_idx < len(self.action_maps[tx_idx]):
+            return self.action_maps[tx_idx][action_idx]
 
         return None
 
@@ -324,7 +303,7 @@ class RLBeamSelector:
         node_wise_acks: Optional[np.ndarray] = None,
         user_count: Optional[int] = None,
     ) -> Optional[List[List[Optional[np.ndarray]]]]:
-        """Update all agents with the newest feedback and return predicted beams per Rx–Tx pair."""
+        """Update the agent with the newest feedback and return predicted beams per Rx–Tx pair."""
 
         # Pull out raw W1 beam indices (per user, per TX) from the PMI feedback.
         w1_structures = _extract_w1_from_feedback(pmi_feedback_bits)
@@ -362,7 +341,7 @@ class RLBeamSelector:
                     if beams.size > 0:
                         L = len(beams)
                         break
-            action_map = _enumerate_beam_sets(self.N1, self.O1, self.N2, self.O2, L)
+            action_map = self._init_action_map(tx_idx, L)
             tx_action_maps.append(action_map)
             tx_action_lookup.append({beam: idx for idx, beam in enumerate(action_map)})
             tx_beam_lengths.append(L)
@@ -408,14 +387,13 @@ class RLBeamSelector:
         state = self._build_state(selected_beam_sets, selected_mcs)
 
         self.max_actions = 4 ** selected_user_count
-        self._ensure_pair_capacity(0, worst_tx_idx)
-        self._maybe_init_agent(0, worst_tx_idx, state.shape[0])
+        self._maybe_init_agent(state.shape[0])
 
-        agent = self.agents[0][worst_tx_idx]
+        agent = self.agent
         assert agent is not None
 
-        prev_state = self.prev_states[0][worst_tx_idx]
-        prev_action = self.prev_actions[0][worst_tx_idx]
+        prev_state = self.prev_state
+        prev_action = self.prev_action
         episode_len = getattr(agent, "memory_counter", 0)
         if not self.evaluation_only and prev_state is not None and prev_action is not None:
             reward = float(np.sum(user_scores))
@@ -455,8 +433,8 @@ class RLBeamSelector:
             )
 
         self.log_action(self.step_counter, 0, worst_tx_idx, predicted_idx)
-        self.prev_states[0][worst_tx_idx] = state
-        self.prev_actions[0][worst_tx_idx] = predicted_idx
+        self.prev_state = state
+        self.prev_action = predicted_idx
 
         return overrides
 
@@ -510,7 +488,7 @@ class RLBeamSelector:
         return overrides if overrides else None
 
     def save_all(self, base_path, imitation_info: Optional[str] = None) -> None:
-        """Persist all agents and associated metadata to disk.
+        """Persist the agent and associated metadata to disk.
 
         Args:
             base_path: Directory where model files will be written.
@@ -521,24 +499,18 @@ class RLBeamSelector:
         base = Path(base_path)
         base.mkdir(parents=True, exist_ok=True)
 
-        agent_files: List[List[Optional[str]]] = []
-        for rx_idx, row in enumerate(self.agents):
-            rx_files: List[Optional[str]] = []
-            for tx_idx, agent in enumerate(row):
-                if agent is None:
-                    rx_files.append(None)
-                    continue
+        agent_file: Optional[str] = None
+        if self.agent is not None:
+            agent_path = base / "agent.pkl"
+            self.agent.save(agent_path)
+            agent_file = agent_path.name
 
-                agent_path = base / f"agent_{rx_idx}_{tx_idx}.pkl"
-                agent.save(agent_path)
-                rx_files.append(agent_path.name)
-            agent_files.append(rx_files)
 
         metadata = {
             "action_maps": self.action_maps,
-            "state_dims": self.state_dims,
-            "prev_states": self.prev_states,
-            "prev_actions": self.prev_actions,
+            "state_dim": self.state_dim,
+            "prev_state": self.prev_state,
+            "prev_action": self.prev_action,
             "num_beams": self.num_beams,
             "N1": self.N1,
             "N2": self.N2,
@@ -548,8 +520,8 @@ class RLBeamSelector:
             "memory_size": self.memory_size,
             "input_window_size": self.input_window_size,
             "output_window_size": self.output_window_size,
-            "agent_files": agent_files,
-            "agent_seeds": self.agent_seeds,
+            "agent_file": agent_file,
+            "agent_seed": self.agent_seed,
         }
 
         if imitation_info:
@@ -559,7 +531,7 @@ class RLBeamSelector:
             pickle.dump(metadata, f)
 
     def load_all(self, base_path) -> None:
-        """Restore agents and metadata previously persisted with :meth:`save_all`."""
+        """Restore the agent and metadata previously persisted with :meth:`save_all`."""
 
         base = Path(base_path)
         meta_path = base / "metadata.pkl"
@@ -570,9 +542,9 @@ class RLBeamSelector:
             metadata = pickle.load(f)
 
         self.action_maps = metadata.get("action_maps", [])
-        self.state_dims = metadata.get("state_dims", [])
-        self.prev_states = metadata.get("prev_states", [])
-        self.prev_actions = metadata.get("prev_actions", [])
+        self.state_dim = metadata.get("state_dim", None)
+        self.prev_state = metadata.get("prev_state", None)
+        self.prev_action = metadata.get("prev_action", None)
         self.num_beams = metadata.get("num_beams", self.num_beams)
         self.N1 = metadata.get("N1", self.N1)
         self.N2 = metadata.get("N2", self.N2)
@@ -582,34 +554,11 @@ class RLBeamSelector:
         self.memory_size = metadata.get("memory_size", self.memory_size)
         self.input_window_size = metadata.get("input_window_size", self.input_window_size)
         self.output_window_size = metadata.get("output_window_size", self.output_window_size)
-        self.agent_seeds = metadata.get("agent_seeds", [])
+        self.agent_seed = metadata.get("agent_seed", None)
 
-        agent_files: List[List[Optional[str]]] = metadata.get("agent_files", [])
-        self.agents = []
-        for rx_idx, tx_row in enumerate(agent_files):
-            agent_row: List[Optional[DeepWESNQNetwork]] = []
-            for tx_idx, filename in enumerate(tx_row):
-                if filename is None:
-                    agent_row.append(None)
-                    continue
-
-                agent_path = base / filename
-                agent_row.append(DeepWESNQNetwork.load(agent_path))
-            self.agents.append(agent_row)
-
-        # Ensure companion arrays have matching dimensions
-        for rx_idx, tx_row in enumerate(self.action_maps):
-            for tx_idx, _ in enumerate(tx_row):
-                self._ensure_pair_capacity(rx_idx, tx_idx)
-
-        # Backfill any missing seeds for restored agents
-        for rx_idx, tx_row in enumerate(self.agents):
-            if len(self.agent_seeds) <= rx_idx:
-                self.agent_seeds.append([])
-
-            while len(self.agent_seeds[rx_idx]) < len(tx_row):
-                self.agent_seeds[rx_idx].append(None)
-
-            for tx_idx, agent in enumerate(tx_row):
-                if self.agent_seeds[rx_idx][tx_idx] is None and agent is not None:
-                    self.agent_seeds[rx_idx][tx_idx] = getattr(agent, "random_seed", None)
+        agent_file: Optional[str] = metadata.get("agent_file")
+        if agent_file is not None:
+            agent_path = base / agent_file
+            self.agent = DeepWESNQNetwork.load(agent_path)
+            if self.agent_seed is None:
+                self.agent_seed = getattr(self.agent, "random_seed", None)
