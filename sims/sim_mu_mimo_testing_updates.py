@@ -86,7 +86,7 @@ arguments = sys.argv[1:]
 
 mobility = 'high_mobility'
 drop_idx = '1'
-rx_ues_arr = [4]
+rx_ues_arr = [2]
 num_txue_sel = 2
 
 modulation_order = 4
@@ -94,9 +94,9 @@ code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "deqn_plus_two_mode" # "None", "two_mode", "weiner_filter", "deqn_plus_two_mode"
+channel_prediction_setting = "two_mode" # "None", "two_mode", "weiner_filter", "deqn_plus_two_mode"
 csi_prediction = True
-channel_prediction_method = "deqn_plus_two_mode" # None, "two_mode", "weiner_filter", "deqn_plus_two_mode"
+channel_prediction_method = "two_mode" # None, "two_mode", "weiner_filter", "deqn_plus_two_mode"
 csi_quantization_on = True
 rl_train_end_drop = 45
 rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)

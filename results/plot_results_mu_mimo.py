@@ -235,7 +235,7 @@ class ResultLoader:
 
     @staticmethod
     def _uncoded_ber_from_npz(data: np.lib.npyio.NpzFile) -> float:
-        uncoded = data.get("ldpc_ber_list")
+        uncoded = data.get("uncoded_ber_list")
         if uncoded is None:
             return float("nan")
         uncoded_array = np.asarray(uncoded, dtype=float)
