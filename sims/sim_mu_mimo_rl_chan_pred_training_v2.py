@@ -323,7 +323,6 @@ def run_simulation():
         ns3cfg.num_txue_sel = num_txue_sel
 
         folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
-        os.makedirs(os.path.join("results", folder_name), exist_ok=True)
 
         folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
         os.makedirs(folder_path, exist_ok=True)
