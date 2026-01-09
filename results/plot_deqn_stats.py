@@ -33,6 +33,7 @@ DEFAULT_CSI_PREDICTION = True
 DEFAULT_CHANNEL_PREDICTION_SETTING = "deqn_plus_two_mode"
 DEFAULT_IMITATION_METHOD = "none"
 DEFAULT_IMITATION_DROP_COUNT = 0
+DEFAULT_ROLLING_WINDOW_LEN = 20
 
 REWARD_PATTERN = re.compile(
     r"deqn_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"
@@ -386,7 +387,7 @@ def main() -> None:
 
     parser.add_argument("--imitation-method", type=str, default=DEFAULT_IMITATION_METHOD)
     parser.add_argument("--imitation-drop-count", type=int, default=DEFAULT_IMITATION_DROP_COUNT)
-    parser.add_argument("--rolling-window", type=int, default=5)
+    parser.add_argument("--rolling-window", type=int, default=DEFAULT_ROLLING_WINDOW_LEN)
 
     parser.add_argument(
         "--output",

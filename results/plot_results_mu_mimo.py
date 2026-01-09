@@ -369,7 +369,7 @@ def _default_scenarios(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="DEQN channel prediction",
+            label="DEQN beam adaptation + Two-Mode WESN prediction",
             link_adapt=link_adapt,
             prediction_method="deqn_plus_two_mode",
         ),
