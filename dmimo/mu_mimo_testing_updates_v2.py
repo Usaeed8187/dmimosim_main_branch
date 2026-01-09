@@ -707,8 +707,8 @@ def sim_mu_mimo_all(
     bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
     print("Average throughput: {:.2f} Mbps".format(throughput))
-    print("Average uncoded BER: {:.2f} Mbps".format(uncoded_ber / total_cycles))
-    print("Average coded BER: {:.2f} Mbps".format(ldpc_ber / total_cycles))
+    print("Average uncoded BER: {:.2f}".format(uncoded_ber / total_cycles))
+    print("Average coded BER: {:.2f}".format(ldpc_ber / total_cycles))
 
     nodewise_goodput = np.concatenate(nodewise_goodput) / (slot_time * 1e6) * overhead  # Mbps
     nodewise_throughput = np.concatenate(nodewise_throughput) / (slot_time * 1e6) * overhead  # Mbps

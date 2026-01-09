@@ -85,7 +85,7 @@ arguments = sys.argv[1:]
 
 
 mobility = 'high_mobility'
-drop_idx = '2'
+drop_idx = '1'
 rx_ues_arr = [4]
 num_txue_sel = 2
 
