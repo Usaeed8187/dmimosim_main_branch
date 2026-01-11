@@ -18,7 +18,7 @@ import argparse
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -33,7 +33,7 @@ DEFAULT_CSI_PREDICTION = True
 DEFAULT_CHANNEL_PREDICTION_SETTING = "deqn_plus_two_mode"
 DEFAULT_IMITATION_METHOD = "none"
 DEFAULT_IMITATION_DROP_COUNT = 0
-DEFAULT_ROLLING_WINDOW_LEN = 3
+DEFAULT_ROLLING_WINDOW_LEN = 1
 
 REWARD_PATTERN = re.compile(
     r"deqn_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"
@@ -50,6 +50,11 @@ THROUGHPUT_PATTERN = re.compile(
     r"mu_mimo_results_(?P<mcs>.+?)_rx_UE_(\d+)_tx_UE_(\d+)_"
     r"prediction_(?P<prediction>[A-Za-z0-9_]+)_pmi_quantization_(?P<quant>True|False)_"
     r"imitation_([A-Za-z0-9_]+)_steps_(\d+)\.npz$"
+)
+
+THROUGHPUT_TWO_MODE_PATTERN = re.compile(
+    r"mu_mimo_results_(?P<mcs>.+?)_rx_UE_(\d+)_tx_UE_(\d+)_"
+    r"prediction_(?P<prediction>[A-Za-z0-9_]+)_pmi_quantization_(?P<quant>True|False)\.npz$"
 )
 
 
@@ -80,8 +85,8 @@ class ThroughputFile:
     tx_ue: int
     prediction_method: str
     mcs: str
-    imitation_method: str
-    imitation_steps: int
+    imitation_method: Optional[str]
+    imitation_steps: Optional[int]
 
 
 def _extract_reward_metadata(path: Path) -> RewardFile:
@@ -113,6 +118,17 @@ def _extract_action_metadata(path: Path) -> ActionFile:
 def _extract_throughput_metadata(path: Path, drop_id: int) -> ThroughputFile:
 
     match = THROUGHPUT_PATTERN.search(path.name)
+    if match:
+        return ThroughputFile(
+            path=path,
+            drop_id=drop_id,
+            rx_ue=int(match.group(2)),
+            tx_ue=int(match.group(3)),
+            prediction_method=match.group("prediction"),
+            mcs=match.group("mcs"),
+            imitation_method=match.group(6),
+            imitation_steps=int(match.group(7)),
+        )
     if not match:
         raise ValueError(f"Cannot parse throughput metadata from {path}")
 
@@ -123,8 +139,8 @@ def _extract_throughput_metadata(path: Path, drop_id: int) -> ThroughputFile:
         tx_ue=int(match.group(3)),
         prediction_method=match.group("prediction"),
         mcs=match.group("mcs"),
-        imitation_method=match.group(6),
-        imitation_steps=int(match.group(7)),
+        imitation_method=None,
+        imitation_steps=None,
     )
 
 
@@ -194,10 +210,16 @@ def _find_action_files(
     return files
 
 def _find_throughput_files(
-    root: Path, drops: Iterable[int], mobility: str, rx_ue: int, tx_ue: int, prediction_method: str
+    root: Path,
+    drops: Iterable[int],
+    mobility: str,
+    rx_ue: int,
+    tx_ue: int,
+    prediction_methods: Iterable[str],
 ) -> List[ThroughputFile]:
 
     files: List[ThroughputFile] = []
+    prediction_set = {method for method in prediction_methods}
     for drop in drops:
         drop_path = root / f"channels_{mobility}_{drop}"
         if not drop_path.exists():
@@ -205,9 +227,15 @@ def _find_throughput_files(
             continue
 
         candidates: List[ThroughputFile] = []
-        for path in sorted(
-            drop_path.glob("mu_mimo_results_*_rx_UE_*_tx_UE_*_prediction_*_pmi_quantization_*_imitation_*_steps_*.npz")
-        ):
+        throughput_paths = list(
+            drop_path.glob(
+                "mu_mimo_results_*_rx_UE_*_tx_UE_*_prediction_*_pmi_quantization_*_imitation_*_steps_*.npz"
+            )
+        )
+        throughput_paths.extend(
+            drop_path.glob("mu_mimo_results_*_rx_UE_*_tx_UE_*_prediction_*_pmi_quantization_*.npz")
+        )
+        for path in sorted({path for path in throughput_paths}):
             try:
                 info = _extract_throughput_metadata(path, drop_id=int(drop))
             except ValueError:
@@ -215,7 +243,7 @@ def _find_throughput_files(
 
             if info.rx_ue != rx_ue or info.tx_ue != tx_ue:
                 continue
-            if info.prediction_method != prediction_method:
+            if info.prediction_method not in prediction_set:
                 continue
             candidates.append(info)
 
@@ -345,19 +373,27 @@ def plot_actions(series: List[Tuple[int, int]], max_step: int, output: Path) -> 
     plt.savefig(output, dpi=200)
     print(f"Saved action plot to {output}")
 
-def plot_throughput(series: List[Tuple[int, float]], drop_ids: List[int], output: Path) -> None:
-    if not series:
+def plot_throughput(series_by_label: List[Tuple[str, List[Tuple[int, float]]]], output: Path) -> None:
+    if not series_by_label:
         raise RuntimeError("No throughput data found to plot.")
 
-    drops, values = zip(*series)
+    drop_ids: set[int] = set()
     plt.figure(figsize=(10, 6))
 
-    plt.plot(drops, values, marker="s")
+    for label, series in series_by_label:
+        if not series:
+            continue
+        drops, values = zip(*series)
+        drop_ids.update(drops)
+        plt.plot(drops, values, marker="s", label=label)
     plt.xlabel("Drop")
     plt.ylabel("Average throughput")
     plt.title("DEQN throughput across drops")
     plt.grid(True, linestyle="--", alpha=0.6)
-    plt.xticks(drop_ids)
+    if drop_ids:
+        plt.xticks(sorted(drop_ids))
+    if len(series_by_label) > 1:
+        plt.legend()
     plt.tight_layout()
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -424,8 +460,11 @@ def main() -> None:
 
     reward_files = _find_reward_files(root, drops, args.mobility, args.rx_ue, args.tx_ue)
     action_files = _find_action_files(root, drops, args.mobility, args.rx_ue, args.tx_ue)
+    prediction_methods = {prediction_method}
+    if prediction_method != "two_mode":
+        prediction_methods.add("two_mode")
     throughput_files = _find_throughput_files(
-        root, drops, args.mobility, args.rx_ue, args.tx_ue, prediction_method
+        root, drops, args.mobility, args.rx_ue, args.tx_ue, prediction_methods
     )
 
     if not reward_files and not action_files and not throughput_files:
@@ -445,9 +484,15 @@ def main() -> None:
         print("No action files found; skipping action plot.")
 
     if throughput_files:
-        throughput_series, throughput_drops = _aggregate_throughput(throughput_files)
-        throughput_series = _apply_rolling_mean(throughput_series, args.rolling_window)
-        plot_throughput(throughput_series, throughput_drops, args.throughput_output)
+        throughput_series_by_label: List[Tuple[str, List[Tuple[int, float]]]] = []
+        for method in sorted(prediction_methods):
+            method_files = [file_info for file_info in throughput_files if file_info.prediction_method == method]
+            if not method_files:
+                continue
+            throughput_series, _ = _aggregate_throughput(method_files)
+            throughput_series = _apply_rolling_mean(throughput_series, args.rolling_window)
+            throughput_series_by_label.append((method, throughput_series))
+        plot_throughput(throughput_series_by_label, args.throughput_output)
     else:
         print("No throughput files found; skipping throughput plot.")
 
