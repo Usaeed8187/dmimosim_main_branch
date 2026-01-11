@@ -136,12 +136,14 @@ class ResultLoader:
             patterns.append(
                 f"{prefix}_prediction_{method}_pmi_quantization_{quant_str}.npz"
             )
+            patterns.append(
+                f"{prefix}_prediction_{method}_pmi_quantization_{quant_str}_imitation_none_steps_0.npz"
+            )
         else:
             patterns.append(
                 f"{prefix}_prediction_two_mode_pmi_quantization_{quant_str}.npz"
             )
             patterns.append(f"{prefix}_prediction.npz")
-        
         return patterns
 
     def _non_prediction_patterns(
@@ -484,21 +486,22 @@ def main() -> None:
         "--drops",
         type=int,
         nargs="+",
-        default=[1, 2, 3],
+        # default=[1, 2, 3],
+        default=list(range(40, 43)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
         "--rx-ues",
         type=int,
         nargs="+",
-        default=[2, 4, 6],
+        default=[4],
         help="UE counts that were simulated.",
     )
     parser.add_argument(
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[2, 6],
+        default=[2, 4, 6, 8, 10],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
@@ -536,7 +539,7 @@ def main() -> None:
     parser.add_argument(
         "--fixed-tx",
         type=int,
-        default=6,
+        default=4,
         help="RU count to hold fixed when sweeping UEs.",
     )
     parser.add_argument(

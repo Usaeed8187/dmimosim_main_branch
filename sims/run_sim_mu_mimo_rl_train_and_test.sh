@@ -4,8 +4,8 @@ set -euo pipefail
 
 # Configuration
 MOBILITY=${MOBILITY:-"high_mobility"}
-declare -a RX_UES_ARR=("2")
-declare -a NUM_TXUE_SEL_ARR=("2" "4")
+declare -a RX_UES_ARR=("4")
+declare -a NUM_TXUE_SEL_ARR=("2" "4" "6" "8" "10")
 MODULATION_ORDER=${MODULATION_ORDER:-4}
 CODE_RATE=${CODE_RATE:-"1/2"}
 PERFECT_CSI=${PERFECT_CSI:-False}
@@ -16,9 +16,9 @@ RL_MODE=${RL_MODE:-"deqn_plus_two_mode"} # "deqn", "deqn_plus_two_mode", "ddpg"
 PARALLEL_JOBS=${PARALLEL_JOBS:-12}
 
 TRAIN_DROP_START=${TRAIN_DROP_START:-4}
-TRAIN_DROP_COUNT=${TRAIN_DROP_COUNT:-86}
+TRAIN_DROP_COUNT=${TRAIN_DROP_COUNT:-42}
 TEST_DROP_START=${TEST_DROP_START:-1}
-TEST_DROP_COUNT=${TEST_DROP_COUNT:-3}
+TEST_DROP_COUNT=${TEST_DROP_COUNT:-25}
 
 TRAIN_END_DROP=$((TRAIN_DROP_START + TRAIN_DROP_COUNT - 1))
 TRAIN_DROPS=$(seq -s, ${TRAIN_DROP_START} ${TRAIN_END_DROP})
@@ -38,18 +38,18 @@ run_scenario() {
     local NUM_TXUE_SEL="$2"
     local CHECKPOINT_DIR="results/rl_models/${MOBILITY}/drop_${TRAIN_END_DROP}_rx_UE_${RX_UES}_tx_UE_${NUM_TXUE_SEL}_imitation_none_steps_0"
 
-    echo "Training ${RL_MODE} model for RX_UE=${RX_UES}, TX_UE=${NUM_TXUE_SEL} with ${TRAIN_DROP_COUNT} drops (${TRAIN_DROP_START}-${TRAIN_END_DROP}) in a single run"
-    python sims/sim_mu_mimo_rl_chan_pred_training_v2.py \
-        "${MOBILITY}" \
-        "${TRAIN_DROPS}" \
-        "${RX_UES}" \
-        "${MODULATION_ORDER}" \
-        "${CODE_RATE}" \
-        "${NUM_TXUE_SEL}" \
-        "${PERFECT_CSI}" \
-        "${RL_MODE}" \
-        "${CSI_QUANTIZATION}" \
-        "${LINK_ADAPT}"
+    # echo "Training ${RL_MODE} model for RX_UE=${RX_UES}, TX_UE=${NUM_TXUE_SEL} with ${TRAIN_DROP_COUNT} drops (${TRAIN_DROP_START}-${TRAIN_END_DROP}) in a single run"
+    # python sims/sim_mu_mimo_rl_chan_pred_training_v2.py \
+    #     "${MOBILITY}" \
+    #     "${TRAIN_DROPS}" \
+    #     "${RX_UES}" \
+    #     "${MODULATION_ORDER}" \
+    #     "${CODE_RATE}" \
+    #     "${NUM_TXUE_SEL}" \
+    #     "${PERFECT_CSI}" \
+    #     "${RL_MODE}" \
+    #     "${CSI_QUANTIZATION}" \
+    #     "${LINK_ADAPT}"
 
     if [[ ! -d "${CHECKPOINT_DIR}" ]]; then
         echo "Expected checkpoint directory not found: ${CHECKPOINT_DIR}" >&2

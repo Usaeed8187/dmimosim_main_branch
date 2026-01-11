@@ -23,17 +23,17 @@ from typing import Iterable, List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(4, 89))
+DEFAULT_DROPS = list(range(4, 46))
 DEFAULT_MOBILITY = "high_mobility"
-DEFAULT_RX_UES = 2
-DEFAULT_TX_UES = 2
+DEFAULT_RX_UES = 4
+DEFAULT_TX_UES = 4
 DEFAULT_LINK_ADAPT = True
 DEFAULT_PERFECT_CSI = False
 DEFAULT_CSI_PREDICTION = True
 DEFAULT_CHANNEL_PREDICTION_SETTING = "deqn_plus_two_mode"
 DEFAULT_IMITATION_METHOD = "none"
 DEFAULT_IMITATION_DROP_COUNT = 0
-DEFAULT_ROLLING_WINDOW_LEN = 20
+DEFAULT_ROLLING_WINDOW_LEN = 3
 
 REWARD_PATTERN = re.compile(
     r"deqn_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"

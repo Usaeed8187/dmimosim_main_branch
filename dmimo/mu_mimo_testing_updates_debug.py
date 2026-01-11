@@ -6,6 +6,7 @@ import time
 from typing import Optional
 from pathlib import Path
 import itertools
+from collections import Counter
 
 from sionna.ofdm import ResourceGrid, ResourceGridMapper, LSChannelEstimator, LMMSEEqualizer
 from sionna.mimo import StreamManagement
@@ -24,7 +25,6 @@ from dmimo.channel import standard_rc_pred_freq_mimo, default_ddpg_predictor
 from dmimo.channel.ddpg_predictor import DDPGChannelPredictor
 from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
-from dmimo.channel.rl_beam_selector import RLBeamSelector
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, QuantizedSLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
@@ -35,6 +35,81 @@ from dmimo.utils import add_frequency_offset, add_timing_offset, compute_UE_wise
 
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
+
+def _rank_txs_by_w1_collisions(
+    worst_rxs,
+    num_tx_nodes,
+    feedback_bits=None,
+    current_override=None,
+    metric="extra_duplicates",
+):
+    """
+    Rank transmitters by W1 beam collisions among worst receivers.
+
+    Args:
+        worst_rxs: list[int]
+            Receiver indices considered "worst".
+        num_tx_nodes: int
+            Number of tx nodes (same indexing as your tx loop).
+        feedback_bits: optional
+            Your quantizer output dict/list where feedback_bits[rx]['w1_beam_indices'][tx] gives beams.
+        current_override: optional
+            Nested list override[rx][tx] = iterable beam indices (after greedy updates).
+        metric: str
+            - "extra_duplicates": sum over beams of (count-1) for count>1
+              (counts how many *extra* users collide on same beam)
+            - "pair_collisions": sum over beams of nC2
+              (counts how many colliding user-pairs share the same beam)
+
+    Returns:
+        ranked: list of tuples (tx, collisions, detail)
+            Sorted by collisions descending.
+        collisions_per_tx: np.ndarray shape [num_tx_nodes]
+    """
+    assert (feedback_bits is not None) or (current_override is not None), \
+        "Provide either feedback_bits or current_override"
+
+    collisions_per_tx = np.zeros(num_tx_nodes, dtype=int)
+    detail_per_tx = [None] * num_tx_nodes
+
+    for tx in range(num_tx_nodes):
+        # gather beams used by each worst rx for this tx
+        beams_by_rx = {}
+        all_beams = []
+        for rx in worst_rxs:
+            if current_override is not None:
+                beams = list(current_override[rx][tx])
+            else:
+                beams = list(feedback_bits[rx]["w1_beam_indices"][tx])
+
+            beams = [int(b) for b in beams]
+            beams_by_rx[rx] = beams
+            all_beams.extend(beams)
+
+        cnt = Counter(all_beams)
+
+        if metric == "extra_duplicates":
+            collisions = sum((c - 1) for c in cnt.values() if c > 1)
+        elif metric == "pair_collisions":
+            collisions = sum((c * (c - 1)) // 2 for c in cnt.values() if c > 1)
+        else:
+            raise ValueError(f"Unknown metric={metric}")
+
+        collisions_per_tx[tx] = collisions
+        # Keep some debugging detail: which beams collided and how many times
+        collided_beams = {b: c for b, c in cnt.items() if c > 1}
+        detail_per_tx[tx] = {
+            "collided_beams": collided_beams,    # beam -> multiplicity among worst_rxs
+            "beams_by_rx": beams_by_rx,          # rx -> list of beams
+        }
+
+    ranked = sorted(
+        [(tx, int(collisions_per_tx[tx]), detail_per_tx[tx]) for tx in range(num_tx_nodes)],
+        key=lambda t: t[1],
+        reverse=True,
+    )
+    return ranked, collisions_per_tx
+
 
 def _enumerate_beam_sets(N1, O1, N2, O2, L):
     """
@@ -741,7 +816,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         print("Greedy init sum_log_sinr:", best_sum_log_sinr, "BLER:", best_bler)
 
         print("Greedy init node_wise_bler:", node_wise_bler)
-
+        best_node_wise_bler = node_wise_bler
 
         # ########################################################################################################
         # # GREEDY APPROACH, CHANGING ALL RX-TX PAIRS -- USES PERFECT CHANNEL INTERACTIONS
@@ -814,7 +889,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         pass_idx = 0
 
         # How many "worst" users to consider each pass
-        bottom_N = int(getattr(cfg, "greedy_bottom_N", 3))  # e.g., 1,2,3,...
+        bottom_N = int(getattr(cfg, "greedy_bottom_N", 4))  # e.g., 1,2,3,...
         bottom_N = max(1, min(bottom_N, num_rx_nodes))
 
         rank_per_user = int(cfg.num_tx_streams / num_rx_nodes)  # e.g., 1 if 1 stream per node
@@ -842,6 +917,18 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             bottom_users, per_user_sinr_db = _worst_users_from_sinr_db(best_sinr_db_arr, bottom_N)
             print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] bottom_users={bottom_users}, per_user_sinr_dB={per_user_sinr_db}")
 
+            ranked_txs, col_vec = _rank_txs_by_w1_collisions(
+                worst_rxs=bottom_users,
+                num_tx_nodes=num_tx_nodes,
+                feedback_bits=feedback_bits,        # OR use current_override=current_override
+                # current_override=current_override,  # if you want collisions based on current (updated) beams
+                metric="extra_duplicates",          # or "pair_collisions"
+            )
+
+            K = int(getattr(cfg, "greedy_num_tx_to_optimize", 1))
+            K = max(1, min(K, num_tx_nodes))
+            allowed_txs = [tx for tx, _, _ in ranked_txs[:K]]
+
             # 2) search ONLY changes to W1 of those bottom-N users (across all tx nodes)
             best_local_delta = 0.0
             best_local_override = None
@@ -849,7 +936,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             best_local_where = None  # (rx, tx, cand)
 
             for rx in bottom_users:
-                for tx in range(num_tx_nodes):
+                for tx in allowed_txs:
                     base_choice = current_override[rx][tx]
                     candidates = per_pair_candidates[rx][tx]
 
@@ -864,10 +951,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
                         sum_log_sinr, bler, sinr_db_arr, uncoded_ber, node_wise_bler = _eval_override(trial_override)
 
-
-                        delta = sum_log_sinr - best_sum_log_sinr
-                        if delta > best_local_delta:
-                            best_local_delta = delta
+                        if bler < best_bler:
                             best_local_override = trial_override
                             best_local_metrics = (sum_log_sinr, bler, sinr_db_arr, uncoded_ber, node_wise_bler)
                             best_local_where = (rx, tx, cand)
@@ -900,7 +984,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         print("Best greedy SINR (dB): ", best_sinr_db_arr)
         print("Best greedy sum_log_sinr: ", best_sum_log_sinr)
         print("Best greedy BLER: ", best_bler)
-        print("Best greedy node-wise BLER: ", best_node_wise_bler)
+        print("Best greedy node-wise BLER: ", best_node_wise_bler, "\n")
 
 
     hold = 1
@@ -987,20 +1071,19 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     userbits = (1.0 - coded_bler) * mu_mimo.num_bits_per_frame
     ratedbits_phase_2 = (1.0 - uncoded_ser) * mu_mimo.num_uncoded_bits_per_frame
 
+    userbits_after_beam_adjustment = (1.0 - best_bler) * mu_mimo.num_bits_per_frame
+
     node_wise_goodbits_phase_2 = (1.0 - node_wise_ber) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, h_freq_csi_history]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, h_freq_csi_history, userbits_after_beam_adjustment]
 
 
 def sim_mu_mimo_all(
     cfg: SimConfig,
     ns3cfg: Ns3Config,
     rc_config:RCConfig,
-    rl_selector: Optional[RLBeamSelector] = None,
-    rl_selector_2: Optional[RLBeamSelector] = None,
-    ddpg_predictor: Optional[DDPGChannelPredictor] = None,
 ):
     """"
     Simulation of MU-MIMO scenario according to the frame structure
@@ -1013,7 +1096,7 @@ def sim_mu_mimo_all(
     overhead = cfg.num_slots_p2/(cfg.num_slots_p1 + cfg.num_slots_p2)
 
     total_cycles = 0
-    uncoded_ber, ldpc_ber, goodput, throughput, bitrate = 0, 0, 0, 0, 0
+    uncoded_ber, ldpc_ber, goodput, throughput, bitrate, throughput_after_beam_adjustment = 0, 0, 0, 0, 0, 0
     nodewise_goodput = []
     nodewise_throughput = []
     nodewise_bitrate = []
@@ -1024,32 +1107,6 @@ def sim_mu_mimo_all(
     snr_dB_list = []
     PMI_feedback_bits = []
     nodewise_bler_list = []
-    pending_ddpg_actions = None
-    ddpg_history = None
-    if ddpg_predictor is None and cfg.channel_prediction_method == "ddpg":
-        ddpg_predictor = default_ddpg_predictor(
-            num_receivers=ns3cfg.num_rxue_sel,
-            fft_size=cfg.fft_size,
-        )
-
-    if rl_selector is None and cfg.channel_prediction_method == "deqn":
-        rl_selector = RLBeamSelector()
-        checkpoint = getattr(cfg, "rl_checkpoint", None)
-        if checkpoint:
-            rl_selector.load_all(Path(checkpoint))
-        rl_selector.set_evaluation_mode(bool(getattr(cfg, "rl_evaluation_only", False)))
-    pending_overrides = None
-    use_imitation_override = getattr(cfg, "use_imitation_override", False)
-
-    imitation_description = None
-    imitation_method = getattr(cfg, "imitation_method", "none")
-    imitation_drop_count = getattr(cfg, "imitation_drop_count", 0)
-    if imitation_method != "none" and imitation_drop_count > 0:
-        imitation_description = (
-            "imitation learning enabled "
-            f"(method={imitation_method}, drop_count={imitation_drop_count})"
-        )
-
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
@@ -1057,9 +1114,6 @@ def sim_mu_mimo_all(
 
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx
-
-        cfg.rl_w1_override = pending_overrides
-        cfg.ddpg_pred_channel = pending_ddpg_actions
 
         start_time = time.time()
         bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config)
@@ -1073,6 +1127,7 @@ def sim_mu_mimo_all(
         
         goodput += bits[0]
         throughput += bits[1]
+        throughput_after_beam_adjustment += additional_KPIs[-1]
         bitrate += bits[2]
         
         nodewise_goodput.append(additional_KPIs[0])
@@ -1084,27 +1139,6 @@ def sim_mu_mimo_all(
         PMI_feedback_bits.append(additional_KPIs[6])
         nodewise_bler_list.append(additional_KPIs[7])
 
-        if "deqn" in cfg.channel_prediction_method and rl_selector is not None:
-            if use_imitation_override:
-                chan_history = additional_KPIs[8]
-            else:
-                chan_history = None
-            pending_overrides = rl_selector.prepare_next_actions(
-                additional_KPIs[6],
-                additional_KPIs[4],
-                additional_KPIs[7],
-                cfg.modulation_order,
-                use_imitation_override,
-                chan_history,
-                rc_config,
-                ns3cfg,
-                cfg.num_tx_streams
-            )
-        
-        if cfg.channel_prediction_method == "ddpg" and ddpg_predictor is not None:
-            ddpg_history = additional_KPIs[8]
-            pending_ddpg_actions = ddpg_predictor.predict_channels(np.asarray(ddpg_history), sinr_db=additional_KPIs[4])
-
         hold = 1
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
@@ -1112,6 +1146,9 @@ def sim_mu_mimo_all(
     bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
     print("Average throughput: {:.2f} Mbps".format(throughput))
+
+    throughput_after_beam_adjustment = throughput_after_beam_adjustment / (total_cycles * slot_time * 1e6) * overhead  # Mbps
+    print("Average throughput after beam adjustment: {:.2f} Mbps".format(throughput_after_beam_adjustment))
 
     nodewise_goodput = np.concatenate(nodewise_goodput) / (slot_time * 1e6) * overhead  # Mbps
     nodewise_throughput = np.concatenate(nodewise_throughput) / (slot_time * 1e6) * overhead  # Mbps
@@ -1126,10 +1163,6 @@ def sim_mu_mimo_all(
         snr_dB = np.concatenate(snr_dB_list)
     else:
         snr_dB = None
-
-    if rl_selector is not None:
-        checkpoint_dir = Path("results") / "deqn_checkpoints" / Path(cfg.ns3_folder.rstrip("/")).name
-        rl_selector.save_all(checkpoint_dir, imitation_info=imitation_description)
 
     return [
         uncoded_ber / total_cycles,

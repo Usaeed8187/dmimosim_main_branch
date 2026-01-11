@@ -102,7 +102,7 @@ channel_prediction_method = "deqn_plus_two_mode" # None, "two_mode", "weiner_fil
 csi_quantization_on = True
 imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
-rl_user_count = 2
+rl_user_count = 3
 
 def _build_imitation_info() -> Optional[str]:
     if imitation_method == "none" or imitation_drop_count <= 0:

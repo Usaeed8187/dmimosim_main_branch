@@ -37,7 +37,6 @@ from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
 from dmimo.mu_mimo_testing_updates_debug import sim_mu_mimo_all
-from dmimo.channel.rl_beam_selector import RLBeamSelector
 
 # Add system path for the dmimo library
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
@@ -87,17 +86,17 @@ arguments = sys.argv[1:]
 
 mobility = 'high_mobility'
 drop_idx = '2'
-rx_ues_arr = [6]
-num_txue_sel = 10
+rx_ues_arr = [4]
+num_txue_sel = 4
 
 modulation_order = 4
 code_rate = 1 / 2
-link_adapt = True
+link_adapt = False
 
-perfect_csi = False
-channel_prediction_setting = "two_mode" # "None", "two_mode", "weiner_filter", "deqn"
-csi_prediction = True
-channel_prediction_method = "two_mode" # None, "two_mode", "weiner_filter", "deqn"
+perfect_csi = True
+channel_prediction_setting = "None" # "None", "two_mode", "weiner_filter", "deqn"
+csi_prediction = False
+channel_prediction_method = None # None, "two_mode", "weiner_filter", "deqn"
 csi_quantization_on = True
 rl_checkpoint = None
 rl_evaluation_only = False
