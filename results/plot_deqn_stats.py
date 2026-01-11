@@ -129,19 +129,21 @@ def _extract_throughput_metadata(path: Path, drop_id: int) -> ThroughputFile:
             imitation_method=match.group(6),
             imitation_steps=int(match.group(7)),
         )
-    if not match:
-        raise ValueError(f"Cannot parse throughput metadata from {path}")
+    
+    match = THROUGHPUT_TWO_MODE_PATTERN.search(path.name)
+    if match:
+        return ThroughputFile(
+            path=path,
+            drop_id=drop_id,
+            rx_ue=int(match.group(2)),
+            tx_ue=int(match.group(3)),
+            prediction_method=match.group("prediction"),
+            mcs=match.group("mcs"),
+            imitation_method=None,
+            imitation_steps=None,
+        )
 
-    return ThroughputFile(
-        path=path,
-        drop_id=drop_id,
-        rx_ue=int(match.group(2)),
-        tx_ue=int(match.group(3)),
-        prediction_method=match.group("prediction"),
-        mcs=match.group("mcs"),
-        imitation_method=None,
-        imitation_steps=None,
-    )
+    raise ValueError(f"Cannot parse throughput metadata from {path}")
 
 
 

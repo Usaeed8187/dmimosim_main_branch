@@ -38,7 +38,7 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._scheduled_rx_ue_indices = None                        # Scheduled UE antennas indices for MU-MIMO precoding
         self._ncjt_ldpc_decode_and_forward = True                   # Enable LDPC decode-and-forward at the Rx UEs for NCJT simulations
         self._channel_prediction_method = "two_mode_wesn"           # Channel prediction method: "old", "two_mode", "two_mode_tf"
-        self._rl_user_count = 3                                     # Number of worst users for transmitter-side DEQN
+        self._rl_user_count = 2                                     # Number of worst users for transmitter-side DEQN
         super().__init__(**kwargs)
 
     @property

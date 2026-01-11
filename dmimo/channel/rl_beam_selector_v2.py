@@ -131,9 +131,12 @@ class RLBeamSelector:
     def __init__(
         self,
         max_actions: int = 128,
-        memory_size: int = 200,
+        memory_size: Optional[int] = None,
         input_window_size: int = 3,
         output_window_size: int = 3,
+        drops_per_batch: int = 1,
+        num_batches_in_replay_buffer: int = 3,
+        steps_per_drop: int = 15,
         epsilon_total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
         imitation_method: Optional[str] = "none",
@@ -148,7 +151,16 @@ class RLBeamSelector:
         self.num_beams = (self.O1 * self.N1) * (self.O2 * self.N2)
         
         self.max_actions = max_actions
-        self.memory_size = memory_size
+        self.drops_per_batch = max(1, int(drops_per_batch))
+        self.num_batches_in_replay_buffer = max(1, int(num_batches_in_replay_buffer))
+        self.steps_per_drop = max(1, int(steps_per_drop))
+        self.batch_size_transitions = self.drops_per_batch * self.steps_per_drop
+        computed_memory_size = self.batch_size_transitions * self.num_batches_in_replay_buffer
+        self.memory_size = (
+            int(computed_memory_size)
+            if memory_size is None
+            else max(int(memory_size), int(computed_memory_size))
+        )
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
         self.epsilon_total_steps = epsilon_total_steps
@@ -166,6 +178,9 @@ class RLBeamSelector:
         self.reward_log: List[Tuple[int, int, float]] = []
         self.action_log: List[Tuple[int, int, int, int]] = []
         self.step_counter: int = 0
+        self.drop_counter: int = 0
+        self.last_trained_drop: int = 0
+        self.total_transitions: int = 0
         self.evaluation_only: bool = False
 
     def set_epsilon_total_steps(self, total_steps: Optional[int]) -> None:
@@ -187,6 +202,7 @@ class RLBeamSelector:
         self.reward_log.clear()
         self.action_log.clear()
         self.step_counter = 0
+        self.drop_counter += 1
 
     def log_reward(self, rx_idx: int, tx_idx: int, reward: float) -> None:
         """Record a reward emitted by the DEQN agent.
@@ -231,6 +247,8 @@ class RLBeamSelector:
                 self.input_window_size,
                 self.output_window_size,
                 self.memory_size,
+                training_batch_size=self.batch_size_transitions,
+                training_start_threshold=self.batch_size_transitions,
                 n_layers=1,
                 nInternalUnits=64,
                 spectral_radius=0.3,
@@ -398,19 +416,26 @@ class RLBeamSelector:
         if not self.evaluation_only and prev_state is not None and prev_action is not None:
             reward = float(np.sum(user_scores))
             agent.store_transition(prev_state, prev_action, reward, state)
+            self.total_transitions += 1
             self.log_reward(0, worst_tx_idx, reward)
             agent.activate_target_net(state)
 
-            episode_len = getattr(agent, "memory_counter", 0)
+            episode_len = min(self.total_transitions, self.memory_size)
             min_samples = getattr(
                 agent,
                 "training_start_threshold",
                 getattr(agent, "training_batch_size", getattr(agent, "nForgetPoints", 1)),
             )
             can_train = episode_len >= int(min_samples)
-            if can_train:
+            should_train = (
+                self.drop_counter > 0
+                and self.drops_per_batch > 0
+                and (self.drop_counter % self.drops_per_batch == 0)
+                and self.last_trained_drop != self.drop_counter
+            )
+            if can_train and should_train:
                 agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
-
+                self.last_trained_drop = self.drop_counter
 
         if not self.evaluation_only:
             epsilon_total_steps = self.epsilon_total_steps if self.epsilon_total_steps is not None else 400

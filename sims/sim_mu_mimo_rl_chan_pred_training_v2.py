@@ -103,6 +103,9 @@ csi_quantization_on = True
 imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
 rl_user_count = 3
+drops_per_batch = 1
+num_batches_in_replay_buffer = 3
+steps_per_drop = 15
 
 def _build_imitation_info() -> Optional[str]:
     if imitation_method == "none" or imitation_drop_count <= 0:
@@ -169,6 +172,7 @@ def parse_arguments():
     global csi_quantization_on, link_adapt
     global imitation_method, imitation_drop_count
     global rl_user_count
+    global drops_per_batch, num_batches_in_replay_buffer
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -205,6 +209,12 @@ def parse_arguments():
 
         if len(arguments) >= 13:
             rl_user_count = int(arguments[12])
+
+        if len(arguments) >= 14:
+            drops_per_batch = max(1, int(arguments[13]))
+
+        if len(arguments) >= 15:
+            num_batches_in_replay_buffer = max(1, int(arguments[14]))
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -257,7 +267,14 @@ def run_simulation():
     rc_config.history_len = 8
 
     shared_rl_selector = (
-        RLBeamSelector(imitation_method=imitation_method) if "deqn" in channel_prediction_method else None
+        RLBeamSelector(
+            imitation_method=imitation_method,
+            drops_per_batch=drops_per_batch,
+            num_batches_in_replay_buffer=num_batches_in_replay_buffer,
+            steps_per_drop=steps_per_drop,
+        )
+        if "deqn" in channel_prediction_method
+        else None
     )
 
     shared_ddpg_predictor = (
