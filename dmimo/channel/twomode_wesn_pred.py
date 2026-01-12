@@ -3,7 +3,7 @@ import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import tensorflow as tf
-
+import matplotlib.pyplot as plt
 from dmimo.config import Ns3Config, RCConfig
 from dmimo.channel import lmmse_channel_estimation
 

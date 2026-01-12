@@ -318,6 +318,8 @@ class RLBeamSelector:
         mcs_indices: Optional[np.ndarray] = None,
         node_wise_acks: Optional[np.ndarray] = None,
         user_count: Optional[int] = None,
+        throughput_debug: Optional[float] = None,
+        drop_idx_debug: Optional[int] = None,
     ) -> Optional[List[List[Optional[np.ndarray]]]]:
         """Update the agent with the newest feedback and return predicted beams per Rx–Tx pair."""
 
@@ -333,6 +335,7 @@ class RLBeamSelector:
         selected_user_count = user_count if user_count is not None else 2
         selected_user_count = max(1, min(int(selected_user_count), total_users))
 
+        mcs_indices = mcs_indices + 1
         mcs_array = np.asarray(mcs_indices, dtype=np.float32).flatten() if mcs_indices is not None else None
         ack_array = np.asarray(node_wise_acks, dtype=np.float32).flatten() if node_wise_acks is not None else None
 
@@ -412,7 +415,11 @@ class RLBeamSelector:
         prev_action = self.prev_action
         episode_len = getattr(agent, "memory_counter", 0)
         if not self.evaluation_only and prev_state is not None and prev_action is not None:
-            reward = float(np.sum(user_scores))
+            # reward = float(np.sum(user_scores))
+            data = np.load('results/channels_multiple_mu_mimo/channels_higher_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
+            no_rl_throughput = data['throughput']
+            reward = throughput_debug - no_rl_throughput[0]
+
             agent.store_transition(prev_state, prev_action, reward, state)
             self.total_transitions += 1
             self.log_reward(0, worst_tx_idx, reward)

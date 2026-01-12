@@ -3,9 +3,9 @@
 set -euo pipefail
 
 # Configuration
-MOBILITY=${MOBILITY:-"high_mobility"}
+MOBILITY=${MOBILITY:-"higher_mobility"}
 declare -a RX_UES_ARR=("4")
-declare -a NUM_TXUE_SEL_ARR=("2" "4" "6" "8" "10")
+declare -a NUM_TXUE_SEL_ARR=("2")
 MODULATION_ORDER=${MODULATION_ORDER:-4}
 CODE_RATE=${CODE_RATE:-"1/2"}
 PERFECT_CSI=${PERFECT_CSI:-False}
@@ -15,10 +15,10 @@ RL_MODE=${RL_MODE:-"deqn_plus_two_mode"} # "deqn", "deqn_plus_two_mode", "ddpg"
 
 PARALLEL_JOBS=${PARALLEL_JOBS:-12}
 
-TRAIN_DROP_START=${TRAIN_DROP_START:-4}
-TRAIN_DROP_COUNT=${TRAIN_DROP_COUNT:-100}
-TEST_DROP_START=${TEST_DROP_START:-1}
-TEST_DROP_COUNT=${TEST_DROP_COUNT:-3}
+TRAIN_DROP_START=${TRAIN_DROP_START:-10}
+TRAIN_DROP_COUNT=${TRAIN_DROP_COUNT:-22}
+TEST_DROP_START=${TEST_DROP_START:-10}
+TEST_DROP_COUNT=${TEST_DROP_COUNT:-13}
 
 TRAIN_END_DROP=$((TRAIN_DROP_START + TRAIN_DROP_COUNT - 1))
 TRAIN_DROPS=$(seq -s, ${TRAIN_DROP_START} ${TRAIN_END_DROP})
@@ -56,24 +56,24 @@ run_scenario() {
         return 1
     fi
 
-    echo "Testing with frozen model for drops ${TEST_DROP_START}-${TEST_END_DROP} (RX_UE=${RX_UES}, TX_UE=${NUM_TXUE_SEL})"
-    for drop in $(seq ${TEST_DROP_START} ${TEST_END_DROP}); do
-        echo "Running test drop ${drop} for RX_UE=${RX_UES}, TX_UE=${NUM_TXUE_SEL}"
-        python sims/sim_mu_mimo_testing_updates.py \
-            "${MOBILITY}" \
-            "${drop}" \
-            "${RX_UES}" \
-            "${MODULATION_ORDER}" \
-            "${CODE_RATE}" \
-            "${NUM_TXUE_SEL}" \
-            "${PERFECT_CSI}" \
-            "${RL_MODE}" \
-            "${CSI_QUANTIZATION}" \
-            "${LINK_ADAPT}" \
-            "${CHECKPOINT_DIR}" \
-            "True"
+    # echo "Testing with frozen model for drops ${TEST_DROP_START}-${TEST_END_DROP} (RX_UE=${RX_UES}, TX_UE=${NUM_TXUE_SEL})"
+    # for drop in $(seq ${TEST_DROP_START} ${TEST_END_DROP}); do
+    #     echo "Running test drop ${drop} for RX_UE=${RX_UES}, TX_UE=${NUM_TXUE_SEL}"
+    #     python sims/sim_mu_mimo_testing_updates.py \
+    #         "${MOBILITY}" \
+    #         "${drop}" \
+    #         "${RX_UES}" \
+    #         "${MODULATION_ORDER}" \
+    #         "${CODE_RATE}" \
+    #         "${NUM_TXUE_SEL}" \
+    #         "${PERFECT_CSI}" \
+    #         "${RL_MODE}" \
+    #         "${CSI_QUANTIZATION}" \
+    #         "${LINK_ADAPT}" \
+    #         "${CHECKPOINT_DIR}" \
+    #         "True"
             
-    done
+    # done
 }
 
 terminate_all_jobs() {

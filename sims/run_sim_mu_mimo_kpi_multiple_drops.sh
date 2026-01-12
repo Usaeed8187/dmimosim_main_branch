@@ -2,9 +2,9 @@
 
 # Array of arguments
 # declare -a mobilities=("low_mobility" "medium_mobility" "high_mobility")
-declare -a mobilities=("high_mobility")
+declare -a mobilities=("higher_mobility")
 # declare -a drop_idx=("26" "27" "28" "29" "30" "31" "32" "33" "34" "35" "36" "37" "38" "39" "43" "44" "45")
-declare -a drop_idx=($(seq 45 100))
+declare -a drop_idx=($(seq 1 45))
 declare -a rx_ues_arr=("4")
 declare -a num_txue_sel_arr=("2")
 declare -a modulation_orders=("2" "4")

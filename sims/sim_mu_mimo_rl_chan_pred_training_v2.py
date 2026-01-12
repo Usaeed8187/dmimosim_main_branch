@@ -84,11 +84,11 @@ for root, dirs, files in os.walk(source_dir):
 script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
-mobility = 'high_mobility'
+mobility = 'higher_mobility'
 # drop_idx = '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24'
-drop_idx = ','.join(str(i) for i in range(4, 45))
+drop_idx = ','.join(str(i) for i in range(14, 31))
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
-rx_ues_arr = [2]
+rx_ues_arr = [4]
 num_txue_sel = 2
 
 modulation_order = 4
@@ -320,6 +320,7 @@ def run_simulation():
         cfg.use_imitation_override = warm_start_active
         cfg.imitation_drop_count = imitation_drop_count
         cfg.rl_user_count = rl_user_count
+        cfg.drop_idx = int(drop_idx)
 
         if shared_rl_selector is not None:
             time_steps_per_drop = math.ceil(
@@ -445,7 +446,6 @@ def run_simulation():
                 else:
                     file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, imitation_tag))
                 npz_payload = {
-                    "cfg": cfg,
                     "ns3cfg": ns3cfg,
                     "ber": ber,
                     "ldpc_ber": ldpc_ber,
@@ -473,7 +473,6 @@ def run_simulation():
                     file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, imitation_tag))
                 
                 npz_payload = {
-                    "cfg": cfg,
                     "ns3cfg": ns3cfg,
                     "ber": ber,
                     "ldpc_ber": ldpc_ber,
