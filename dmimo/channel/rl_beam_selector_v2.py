@@ -138,6 +138,7 @@ class RLBeamSelector:
         epsilon_total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
         imitation_method: Optional[str] = "none",
+        worst_tx_count: int = 1,
     ):
         
         self.O2 = 1
@@ -164,6 +165,7 @@ class RLBeamSelector:
         self.epsilon_total_steps = epsilon_total_steps
         
         self.imitation_method = imitation_method
+        self.worst_tx_count = max(1, int(worst_tx_count))
 
         self.seed_sequence = np.random.SeedSequence(random_seed) if random_seed is not None else None
         self.agent_seed: Optional[int] = None
@@ -174,7 +176,7 @@ class RLBeamSelector:
         self.prev_action: Optional[int] = None
         self.state_dim: Optional[int] = None
         self.reward_log: List[Tuple[int, int, float]] = []
-        self.action_log: List[Tuple[int, int, int, int]] = []
+        self.action_log: List[Tuple[int, int, Tuple[int, ...], int]] = []
         self.step_counter: int = 0
         self.drop_counter: int = 0
         self.last_trained_drop: int = 0
@@ -218,12 +220,21 @@ class RLBeamSelector:
 
         return list(self.reward_log)
     
-    def log_action(self, step: int, rx_idx: int, tx_idx: int, action_idx: Optional[int]) -> None:
+    def log_action(
+        self,
+        step: int,
+        rx_idx: int,
+        tx_indices: List[int],
+        action_idx: Optional[int],
+    ) -> None:
         """Record the chosen action index for a given step and agent pair."""
 
-        self.action_log.append((int(step), int(rx_idx), int(tx_idx), int(action_idx) if action_idx is not None else -1))
+        tx_tuple = tuple(int(tx_idx) for tx_idx in tx_indices)
+        self.action_log.append(
+            (int(step), int(rx_idx), tx_tuple, int(action_idx) if action_idx is not None else -1)
+        )
 
-    def get_action_log(self) -> List[Tuple[int, int, int, int]]:
+    def get_action_log(self) -> List[Tuple[int, int, Tuple[int, ...], int]]:
         """Return a copy of the action log accumulated so far."""
 
         return list(self.action_log)
@@ -292,10 +303,10 @@ class RLBeamSelector:
             return np.array([], dtype=np.float32)
         return np.concatenate(state_parts)
 
-    def _decode_action_vector(self, action_idx: int, user_count: int) -> List[int]:
+    def _decode_action_vector(self, action_idx: int, digit_count: int) -> List[int]:
         digits: List[int] = []
         remaining = int(action_idx)
-        for _ in range(user_count):
+        for _ in range(digit_count):
             digits.append(remaining % 4)
             remaining //= 4
         return digits
@@ -394,7 +405,11 @@ class RLBeamSelector:
             collisions = len(tx_indices) - len(set(tx_indices))
             tx_collision_counts.append(collisions)
 
-        worst_tx_idx = int(np.argmax(tx_collision_counts)) if tx_collision_counts else 0
+        if tx_collision_counts:
+            worst_tx_count = min(self.worst_tx_count, num_tx)
+            worst_tx_indices = list(np.argsort(tx_collision_counts)[-worst_tx_count:])
+        else:
+            worst_tx_indices = [0]
 
         # Score users with ACK * MCS, and pick the worst-performing subset.
         user_scores = ack_array[:total_users] * mcs_array[:total_users]
@@ -405,7 +420,8 @@ class RLBeamSelector:
         selected_mcs = mcs_array[worst_user_indices] if len(mcs_array) > 0 else np.zeros(selected_user_count)
         state = self._build_state(selected_beam_sets, selected_mcs)
 
-        self.max_actions = 4 ** selected_user_count
+        action_digit_count = selected_user_count * len(worst_tx_indices)
+        self.max_actions = 4 ** action_digit_count
         self._maybe_init_agent(state.shape[0])
 
         agent = self.agent
@@ -422,7 +438,8 @@ class RLBeamSelector:
 
             agent.store_transition(prev_state, prev_action, reward, state)
             self.total_transitions += 1
-            self.log_reward(0, worst_tx_idx, reward)
+            for tx_idx in worst_tx_indices:
+                self.log_reward(0, tx_idx, reward)
             agent.activate_target_net(state)
 
             episode_len = min(self.total_transitions, self.memory_size)
@@ -448,21 +465,23 @@ class RLBeamSelector:
 
         predicted_idx = None
         predicted_idx = agent.choose_action(state)
-        action_vector = self._decode_action_vector(predicted_idx, selected_user_count)
+        action_vector = self._decode_action_vector(predicted_idx, action_digit_count)
 
-        worst_action_map = tx_action_maps[worst_tx_idx]
         overrides = [[None for _ in range(num_tx)] for _ in range(total_users)]
 
-        for idx, user_idx in enumerate(worst_user_indices):
-            current_idx = user_beam_sets[user_idx][worst_tx_idx]
-            candidates = self._build_candidate_indices(current_idx, worst_action_map)
-            chosen_idx = candidates[action_vector[idx]]
-            beam_tuple = worst_action_map[chosen_idx] if worst_action_map else None
-            overrides[user_idx][worst_tx_idx] = (
-                _tuple_to_list(beam_tuple) if beam_tuple is not None else None
-            )
+        for tx_pos, tx_idx in enumerate(worst_tx_indices):
+            worst_action_map = tx_action_maps[tx_idx]
+            for user_pos, user_idx in enumerate(worst_user_indices):
+                current_idx = user_beam_sets[user_idx][tx_idx]
+                candidates = self._build_candidate_indices(current_idx, worst_action_map)
+                action_idx = action_vector[tx_pos * selected_user_count + user_pos]
+                chosen_idx = candidates[action_idx]
+                beam_tuple = worst_action_map[chosen_idx] if worst_action_map else None
+                overrides[user_idx][tx_idx] = (
+                    _tuple_to_list(beam_tuple) if beam_tuple is not None else None
+                )
 
-        self.log_action(self.step_counter, 0, worst_tx_idx, predicted_idx)
+        self.log_action(self.step_counter, 0, worst_tx_indices, predicted_idx)
         self.prev_state = state
         self.prev_action = predicted_idx
 
