@@ -576,9 +576,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    print("Uncoded BER: ", uncoded_ber_phase_2)
-    print("Coded BER: ", coded_ber)
-    print("BLER: ", coded_bler)
+    # print("Uncoded BER: ", uncoded_ber_phase_2)
+    # print("Coded BER: ", coded_ber)
+    # print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
     node_wise_acks = 1 - np.ceil(node_wise_bler)
@@ -706,9 +706,9 @@ def sim_mu_mimo_all(
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
 
-    print("Average throughput: {:.2f} Mbps".format(throughput))
-    print("Average uncoded BER: {:.2f}".format(uncoded_ber / total_cycles))
-    print("Average coded BER: {:.2f}".format(ldpc_ber / total_cycles))
+    # print("Average throughput: {:.2f} Mbps".format(throughput))
+    # print("Average uncoded BER: {:.2f}".format(uncoded_ber / total_cycles))
+    # print("Average coded BER: {:.2f}".format(ldpc_ber / total_cycles))
 
     nodewise_goodput = np.concatenate(nodewise_goodput) / (slot_time * 1e6) * overhead  # Mbps
     nodewise_throughput = np.concatenate(nodewise_throughput) / (slot_time * 1e6) * overhead  # Mbps

@@ -326,7 +326,7 @@ def run_simulation():
                 (cfg.total_slots - cfg.start_slot_idx)
                 / (cfg.num_slots_p1 + cfg.num_slots_p2)
             ) - 1
-            epsilon_total_steps = math.ceil(len(drop_list) * time_steps_per_drop / 2)
+            epsilon_total_steps = math.ceil(len(drop_list) * time_steps_per_drop)
             shared_rl_selector.set_epsilon_total_steps(epsilon_total_steps)
 
         if cfg.perfect_csi:

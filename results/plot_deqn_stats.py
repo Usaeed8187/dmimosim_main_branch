@@ -23,10 +23,10 @@ from typing import Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(4, 46))
+DEFAULT_DROPS = list(range(1, 46))
 DEFAULT_MOBILITY = "high_mobility"
 DEFAULT_RX_UES = 4
-DEFAULT_TX_UES = 4
+DEFAULT_TX_UES = 2
 DEFAULT_LINK_ADAPT = True
 DEFAULT_PERFECT_CSI = False
 DEFAULT_CSI_PREDICTION = True

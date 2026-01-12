@@ -3,8 +3,6 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 import itertools
 import pickle
-from dmimo.channel import weiner_filter_pred
-from dmimo.channel.twomode_wesn_pred import predict_all_links
 
 import numpy as np
 
@@ -462,31 +460,6 @@ class RLBeamSelector:
         self.prev_action = predicted_idx
 
         return overrides
-
-    def pred(self, h_freq_csi_history, rc_config, ns3cfg, num_tx_streams):
-        
-        # Predicting using the CSI method to immitate
-        if self.imitation_method == "two_mode":
-
-            h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg, max_workers=8)
-        elif self.imitation_method == "weiner_filter":
-
-            weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
-            h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len-1))
-
-        # Quantizing the predicted CSI
-        type_II_PMI_quantizer = quantized_CSI_feedback(method='5G', 
-                                                            codebook_selection_method=None,
-                                                            num_tx_streams=num_tx_streams,
-                                                            architecture='dMIMO_phase2_type_II_CB2',
-                                                            rbs_per_subband=4,
-                                                            snrdb=10)
-        _, PMI_feedback_bits = type_II_PMI_quantizer(
-            h_freq_csi,
-            return_feedback_bits=True,
-        )
-
-        return PMI_feedback_bits
 
     def extract_w1_override(self, pmi_feedback_bits):
         """Return the w1_beam_indices structure from PMI feedback bits."""

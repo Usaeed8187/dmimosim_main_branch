@@ -501,7 +501,7 @@ def main() -> None:
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8, 10],
+        default=[2],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
