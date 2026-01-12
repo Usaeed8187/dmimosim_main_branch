@@ -175,8 +175,8 @@ class RLBeamSelector:
         self.prev_state: Optional[np.ndarray] = None
         self.prev_action: Optional[int] = None
         self.state_dim: Optional[int] = None
-        self.reward_log: List[Tuple[int, int, float]] = []
-        self.action_log: List[Tuple[int, int, Tuple[int, ...], int]] = []
+        self.reward_log: List[float] = []
+        self.action_log: List[int] = []
         self.step_counter: int = 0
         self.drop_counter: int = 0
         self.last_trained_drop: int = 0
@@ -204,37 +204,29 @@ class RLBeamSelector:
         self.step_counter = 0
         self.drop_counter += 1
 
-    def log_reward(self, rx_idx: int, tx_idx: int, reward: float) -> None:
+    def log_reward(self, reward: float) -> None:
         """Record a reward emitted by the DEQN agent.
 
         Args:
-            rx_idx: Receiver index associated with the reward.
-            tx_idx: Transmitter index associated with the reward.
             reward: Reward value produced for the state/action pair.
         """
 
-        self.reward_log.append((rx_idx, tx_idx, float(reward)))
+        self.reward_log.append(float(reward))
 
-    def get_reward_log(self) -> List[Tuple[int, int, float]]:
+    def get_reward_log(self) -> List[float]:
         """Return a copy of the reward log accumulated so far."""
 
         return list(self.reward_log)
     
     def log_action(
         self,
-        step: int,
-        rx_idx: int,
-        tx_indices: List[int],
         action_idx: Optional[int],
     ) -> None:
         """Record the chosen action index for a given step and agent pair."""
 
-        tx_tuple = tuple(int(tx_idx) for tx_idx in tx_indices)
-        self.action_log.append(
-            (int(step), int(rx_idx), tx_tuple, int(action_idx) if action_idx is not None else -1)
-        )
+        self.action_log.append(int(action_idx) if action_idx is not None else -1)
 
-    def get_action_log(self) -> List[Tuple[int, int, Tuple[int, ...], int]]:
+    def get_action_log(self) -> List[int]:
         """Return a copy of the action log accumulated so far."""
 
         return list(self.action_log)
@@ -438,8 +430,7 @@ class RLBeamSelector:
 
             agent.store_transition(prev_state, prev_action, reward, state)
             self.total_transitions += 1
-            for tx_idx in worst_tx_indices:
-                self.log_reward(0, tx_idx, reward)
+            self.log_reward(reward)
             agent.activate_target_net(state)
 
             episode_len = min(self.total_transitions, self.memory_size)
@@ -481,7 +472,7 @@ class RLBeamSelector:
                     _tuple_to_list(beam_tuple) if beam_tuple is not None else None
                 )
 
-        self.log_action(self.step_counter, 0, worst_tx_indices, predicted_idx)
+        self.log_action(predicted_idx)
         self.prev_state = state
         self.prev_action = predicted_idx
 
