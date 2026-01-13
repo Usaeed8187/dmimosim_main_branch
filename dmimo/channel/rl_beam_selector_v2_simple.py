@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 from typing import List, Optional, Tuple
 import itertools
@@ -134,7 +135,7 @@ class RLBeamSelector:
         output_window_size: int = 3,
         drops_per_batch: int = 1,
         num_batches_in_replay_buffer: int = 3,
-        steps_per_drop: int = 15,
+        train_every_n_steps: int = 1,
         epsilon_total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
         imitation_method: Optional[str] = "none",
@@ -153,8 +154,8 @@ class RLBeamSelector:
         self.max_actions = 2
         self.drops_per_batch = max(1, int(drops_per_batch))
         self.num_batches_in_replay_buffer = max(1, int(num_batches_in_replay_buffer))
-        self.steps_per_drop = max(1, int(steps_per_drop))
-        self.batch_size_transitions = self.drops_per_batch * self.steps_per_drop
+        self.train_every_n_steps = max(1, int(train_every_n_steps))
+        self.batch_size_transitions = self.drops_per_batch * self.train_every_n_steps
         computed_memory_size = self.batch_size_transitions * self.num_batches_in_replay_buffer
         self.memory_size = (
             int(computed_memory_size)
@@ -181,8 +182,10 @@ class RLBeamSelector:
         self.step_counter: int = 0
         self.drop_counter: int = 0
         self.last_trained_drop: int = 0
+        self.last_trained_step: int = 0
         self.total_transitions: int = 0
         self.evaluation_only: bool = False
+        self.trivial_state: bool = True
 
     def set_epsilon_total_steps(self, total_steps: Optional[int]) -> None:
         """Update the epsilon decay horizon for the agent."""
@@ -412,6 +415,9 @@ class RLBeamSelector:
         selected_beam_sets = [user_beam_sets[idx] for idx in worst_user_indices]
         selected_mcs = mcs_array[worst_user_indices] if len(mcs_array) > 0 else np.zeros(selected_user_count)
         state = self._build_state(selected_beam_sets, selected_mcs)
+        if self.trivial_state:
+            prev_action_val = 0 if self.prev_action is None else int(self.prev_action)
+            state = np.array([float(prev_action_val)], dtype=np.float32)
 
         action_digit_count = 1
         self.max_actions = 2
@@ -424,7 +430,10 @@ class RLBeamSelector:
         prev_action = self.prev_action
         episode_len = getattr(agent, "memory_counter", 0)
         if not self.evaluation_only and prev_state is not None and prev_action is not None:
-            reward = 1.0 if prev_action == 0 else -1.0
+            if self.trivial_state:
+                reward = 1.0 if prev_action == 0 else 0.0
+            else:
+                reward = 1.0 if prev_action == 0 else -1.0
 
             agent.store_transition(prev_state, prev_action, reward, state)
             self.total_transitions += 1
@@ -439,14 +448,13 @@ class RLBeamSelector:
             )
             can_train = episode_len >= int(min_samples)
             should_train = (
-                self.drop_counter > 0
-                and self.drops_per_batch > 0
-                and (self.drop_counter % self.drops_per_batch == 0)
-                and self.last_trained_drop != self.drop_counter
+                self.train_every_n_steps > 0
+                and (self.step_counter % self.train_every_n_steps == 0)
+                and self.last_trained_step != self.step_counter
             )
             if can_train and should_train:
                 agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
-                self.last_trained_drop = self.drop_counter
+                self.last_trained_step = self.step_counter
 
         if not self.evaluation_only:
             epsilon_total_steps = self.epsilon_total_steps if self.epsilon_total_steps is not None else 400

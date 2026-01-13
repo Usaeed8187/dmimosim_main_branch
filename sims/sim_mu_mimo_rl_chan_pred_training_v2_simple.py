@@ -104,7 +104,7 @@ imitation_drop_count = 0
 rl_user_count = 2
 drops_per_batch = 1
 num_batches_in_replay_buffer = 3
-steps_per_drop = 15
+train_every_n_steps = 1
 
 def _build_imitation_info() -> Optional[str]:
     if imitation_method == "none" or imitation_drop_count <= 0:
@@ -266,7 +266,7 @@ def run_simulation():
             imitation_method=imitation_method,
             drops_per_batch=drops_per_batch,
             num_batches_in_replay_buffer=num_batches_in_replay_buffer,
-            steps_per_drop=steps_per_drop,
+            train_every_n_steps=train_every_n_steps,
         )
         if "deqn" in channel_prediction_method
         else None

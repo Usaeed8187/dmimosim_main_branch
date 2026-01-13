@@ -11,7 +11,7 @@ method = 'deqn'
 rx_UEs = 4
 tx_UEs = 2
 
-drops = np.arange(14,30)
+drops = np.arange(1,29)
 
 rewards = []
 for drop_idx in drops:
