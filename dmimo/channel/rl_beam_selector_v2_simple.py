@@ -188,7 +188,8 @@ class RLBeamSelector:
         
         self.reward_log.clear()
         self.action_log.clear()
-        self.drop_counter += 1
+
+        self.transition_idx = 0
 
     def log_reward(self, reward: float) -> None:
         """Record a reward emitted by the DEQN agent.
@@ -323,7 +324,6 @@ class RLBeamSelector:
             "O1": self.O1,
             "O2": self.O2,
             "max_actions": self.max_actions,
-            "memory_size": self.memory_size,
             "input_window_size": self.input_window_size,
             "output_window_size": self.output_window_size,
             "agent_file": agent_file,
@@ -357,7 +357,6 @@ class RLBeamSelector:
         self.O1 = metadata.get("O1", self.O1)
         self.O2 = metadata.get("O2", self.O2)
         self.max_actions = metadata.get("max_actions", self.max_actions)
-        self.memory_size = metadata.get("memory_size", self.memory_size)
         self.input_window_size = metadata.get("input_window_size", self.input_window_size)
         self.output_window_size = metadata.get("output_window_size", self.output_window_size)
         self.agent_seed = metadata.get("agent_seed", None)
