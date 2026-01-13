@@ -161,7 +161,7 @@ class RLBeamSelector:
         self.action_maps: List[List[Tuple[int, ...]]] = []
         self.prev_state: Optional[np.ndarray] = None
         self.prev_action: Optional[int] = None
-        self.state_dim: Optional[int] = None
+        self.state_dim: Optional[int] = 1
         self.reward_log: List[float] = []
         self.action_log: List[int] = []
         self.step_counter: int = 0
@@ -169,6 +169,8 @@ class RLBeamSelector:
         self.transition_idx: int = 0
         self.evaluation_only: bool = False
         self.trivial_state: bool = True
+
+        self._maybe_init_agent(self.state_dim)
 
     def set_epsilon_total_steps(self, total_steps: Optional[int]) -> None:
         """Update the epsilon decay horizon for the agent."""
@@ -179,15 +181,6 @@ class RLBeamSelector:
         """Enable or disable training during beam selection."""
 
         self.evaluation_only = evaluation_only
-
-    def reset_episode(self):
-        """Clear per-episode state without discarding learned experience."""
-
-        self.prev_state = None
-        self.prev_action = None
-        
-        self.reward_log.clear()
-        self.action_log.clear()
 
     def log_reward(self, reward: float) -> None:
         """Record a reward emitted by the DEQN agent.
@@ -241,7 +234,15 @@ class RLBeamSelector:
                 random_seed=self.agent_seed,
             )
             self.state_dim = state_dim
+    
+    def reset_episode(self):
+        """Clear per-episode state without discarding learned experience."""
 
+        self.prev_state = None
+        self.prev_action = None
+        
+        self.reward_log.clear()
+        self.action_log.clear()
 
     def prepare_next_actions(
         self,
@@ -257,34 +258,30 @@ class RLBeamSelector:
         prev_action_val = 0 if self.prev_action is None else int(self.prev_action)
         state = np.array([float(prev_action_val)], dtype=np.float32)
 
-        action_digit_count = 1
-        self.max_actions = 2
-        self._maybe_init_agent(state.shape[0])
+        if self.prev_state is not None and self.prev_action is not None:
 
-        agent = self.agent
-        assert agent is not None
+            reward = 1.0 if self.prev_action == 0 else 0.0
 
-        prev_state = self.prev_state
-        prev_action = self.prev_action
-
-        if not self.evaluation_only and prev_state is not None and prev_action is not None:
-            reward = 1.0 if prev_action == 0 else 0.0
-
-            agent.store_transition(prev_state, prev_action, reward, state)
+            self.agent.activate_target_net(state)
+            self.agent.store_transition(self.prev_state, self.prev_action, reward, state)
             self.log_reward(reward)
-            agent.activate_target_net(state)
-            self.transition_idx += 1
-
-            if self.transition_idx >= agent.training_start_threshold and (self.transition_idx % self.batch_size) == 0:
             
-                agent.learn_new(self.batch_size, self.transition_idx, method="double")
+            if (self.transition_idx + 1) >= self.agent.training_start_threshold and ((self.transition_idx+1) % self.batch_size) == 0:
+            
+                self.agent.learn_new(self.batch_size, self.transition_idx, method="double")
+                # print("Learning event")
 
-            if (self.transition_idx % self.epsilon_update_period) == 0:
+            if ((self.transition_idx+1) % self.epsilon_update_period) == 0:
                 self.epsilon = min(self.e_greedy_end, self.epsilon + self.e_increase)
-                agent.epsilon = self.epsilon
-                print("agent.epsilon = ", agent.epsilon)
+                self.agent.epsilon = self.epsilon
+                # print("agent.epsilon = ", self.agent.epsilon)
 
-        action = agent.choose_action(state)
+            action = self.agent.choose_action(state)
+
+            self.transition_idx += 1
+            # print("self.transition_idx: ", self.transition_idx)
+        else:
+            action = 0
 
         self.log_action(action)
         self.prev_state = state
