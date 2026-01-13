@@ -7,8 +7,6 @@ import pickle
 
 import numpy as np
 
-from dmimo.mimo.quantized_CSI_feedback import quantized_CSI_feedback
-
 # Make the ICML_DEQN_clean folder importable
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEQN_PATH = REPO_ROOT / "ICML_DEQN_clean"
