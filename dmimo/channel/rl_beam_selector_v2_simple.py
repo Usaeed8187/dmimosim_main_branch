@@ -127,14 +127,10 @@ class RLBeamSelector:
 
     def __init__(
         self,
-        max_actions: int = 2,
-        memory_size: Optional[int] = None,
+        batch_size: Optional[int] = None,
         input_window_size: int = 3,
         output_window_size: int = 3,
-        drops_per_batch: int = 1,
-        num_batches_in_replay_buffer: int = 3,
-        train_every_n_steps: int = 1,
-        epsilon_total_steps: Optional[int] = None,
+        total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
         imitation_method: Optional[str] = "none",
         worst_tx_count: int = 1,
@@ -150,19 +146,15 @@ class RLBeamSelector:
         
         # Test goal: converge quickly on trivial deterministic rewards.
         self.max_actions = 2
-        self.drops_per_batch = max(1, int(drops_per_batch))
-        self.num_batches_in_replay_buffer = max(1, int(num_batches_in_replay_buffer))
-        self.train_every_n_steps = max(1, int(train_every_n_steps))
-        self.batch_size_transitions = self.drops_per_batch * self.train_every_n_steps
-        computed_memory_size = self.batch_size_transitions * self.num_batches_in_replay_buffer
-        self.memory_size = (
-            int(computed_memory_size)
-            if memory_size is None
-            else max(int(memory_size), int(computed_memory_size))
-        )
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
-        self.epsilon_total_steps = epsilon_total_steps
+        self.total_steps = total_steps
+        self.batch_size = batch_size
+        self.epsilon_update_period = batch_size
+        self.e_greedy_start = 0.7
+        self.e_greedy_end = 0.9
+        self.epsilon = self.e_greedy_start
+        self.e_increase = (self.e_greedy_end - self.e_greedy_start) / max(1, (total_steps // batch_size) - 1)
         
         self.imitation_method = imitation_method
         self.worst_tx_count = max(1, int(worst_tx_count))
@@ -178,10 +170,8 @@ class RLBeamSelector:
         self.reward_log: List[float] = []
         self.action_log: List[int] = []
         self.step_counter: int = 0
-        self.drop_counter: int = 0
-        self.last_trained_drop: int = 0
         self.last_trained_step: int = 0
-        self.total_transitions: int = 0
+        self.transition_idx: int = 0
         self.evaluation_only: bool = False
         self.trivial_state: bool = True
 
@@ -203,7 +193,6 @@ class RLBeamSelector:
         
         self.reward_log.clear()
         self.action_log.clear()
-        self.step_counter = 0
         self.drop_counter += 1
 
     def log_reward(self, reward: float) -> None:
@@ -250,8 +239,8 @@ class RLBeamSelector:
                 self.input_window_size,
                 self.output_window_size,
                 self.memory_size,
-                training_batch_size=self.batch_size_transitions,
-                training_start_threshold=self.batch_size_transitions,
+                training_batch_size=self.batch_size,
+                training_start_threshold=self.batch_size,
                 n_layers=1,
                 nInternalUnits=64,
                 spectral_radius=0.3,
@@ -259,63 +248,6 @@ class RLBeamSelector:
             )
             self.state_dim = state_dim
 
-
-    def _init_action_map(self, tx_idx: int, L: int) -> List[Tuple[int, ...]]:
-        while len(self.action_maps) <= tx_idx:
-            self.action_maps.append([])
-
-        existing = self.action_maps[tx_idx]
-
-        if not existing or len(existing[0]) != L:
-            self.action_maps[tx_idx] = _enumerate_beam_sets(
-                self.N1, self.O1, self.N2, self.O2, L
-            )
-
-        return self.action_maps[tx_idx]
-
-    def _decode_action(self, tx_idx: int, action_idx: int) -> Optional[Tuple[int, ...]]:
-        if action_idx is None:
-            return None
-        if tx_idx >= len(self.action_maps):
-            return None
-        if 0 <= action_idx < len(self.action_maps[tx_idx]):
-            return self.action_maps[tx_idx][action_idx]
-
-        return None
-
-    def _build_state(self, user_beam_sets: List[List[int]], mcs_values: np.ndarray) -> np.ndarray:
-        state_parts: List[np.ndarray] = []
-        for user_idx, beam_set in enumerate(user_beam_sets):
-            beam_arr = np.asarray(beam_set, dtype=np.float32)
-            mcs_val = (
-                np.array([mcs_values[user_idx]], dtype=np.float32)
-                if user_idx < len(mcs_values)
-                else np.array([0.0], dtype=np.float32)
-            )
-            state_parts.append(np.concatenate([beam_arr, mcs_val]))
-        if not state_parts:
-            return np.array([], dtype=np.float32)
-        return np.concatenate(state_parts)
-
-    def _decode_action_vector(self, action_idx: int, digit_count: int) -> List[int]:
-        digits: List[int] = []
-        remaining = int(action_idx)
-        for _ in range(digit_count):
-            digits.append(remaining % 2)
-            remaining //= 2
-        return digits
-
-    def _build_candidate_indices(self, current_idx: int, action_map: List[Tuple[int, ...]]) -> List[int]:
-        candidates = [current_idx]
-        for idx in range(len(action_map)):
-            if idx == current_idx:
-                continue
-            candidates.append(idx)
-            if len(candidates) == 2:
-                break
-        while len(candidates) < 2:
-            candidates.append(current_idx)
-        return candidates
 
     def prepare_next_actions(
         self,
@@ -328,94 +260,8 @@ class RLBeamSelector:
     ) -> Optional[List[List[Optional[np.ndarray]]]]:
         """Update the agent with the newest feedback and return predicted beams per Rx–Tx pair."""
 
-        # Pull out raw W1 beam indices (per user, per TX) from the PMI feedback.
-        w1_structures = _extract_w1_from_feedback(pmi_feedback_bits)
-        if len(w1_structures) == 0:
-            return None
-        
-        self.step_counter += 1
-
-        # Decide how many users to target while still keeping the input window bounded.
-        total_users = len(w1_structures)
-        selected_user_count = 1
-
-        mcs_indices = mcs_indices + 1
-        mcs_array = np.asarray(mcs_indices, dtype=np.float32).flatten() if mcs_indices is not None else None
-        ack_array = np.asarray(node_wise_acks, dtype=np.float32).flatten() if node_wise_acks is not None else None
-
-        overrides: List[List[Optional[np.ndarray]]] = []
-
-        # Build action maps per TX so we can map each W1 beam set to its index.
-        num_tx = max(
-            (len(raw_w1) if isinstance(raw_w1, (list, tuple)) else 1) for raw_w1 in w1_structures
-        )
-        tx_action_maps: List[List[Tuple[int, ...]]] = []
-        tx_action_lookup: List[dict] = []
-        tx_beam_lengths: List[int] = []
-
-        for tx_idx in range(num_tx):
-            self.N1 = 4 if tx_idx == 0 else 2
-            self.num_beams = (self.O1 * self.N1) * (self.O2 * self.N2)
-            L = self.N1
-            for raw_w1 in w1_structures:
-                tx_entries = raw_w1 if isinstance(raw_w1, (list, tuple)) else [raw_w1]
-                if tx_idx < len(tx_entries):
-                    beams = _flatten_w1_indices(tx_entries[tx_idx])
-                    if beams.size > 0:
-                        L = len(beams)
-                        break
-            action_map = self._init_action_map(tx_idx, L)
-            tx_action_maps.append(action_map)
-            tx_action_lookup.append({beam: idx for idx, beam in enumerate(action_map)})
-            tx_beam_lengths.append(L)
-
-        # Convert each user's raw W1 beam set into an index within the action map.
-        user_beam_sets: List[List[int]] = []
-        for raw_w1 in w1_structures:
-            tx_entries = raw_w1 if isinstance(raw_w1, (list, tuple)) else [raw_w1]
-
-            beam_indices: List[int] = []
-            for tx_idx in range(num_tx):
-                beams = (
-                    _flatten_w1_indices(tx_entries[tx_idx]).astype(int)
-                    if tx_idx < len(tx_entries)
-                    else np.array([], dtype=int)
-                )
-
-                L = tx_beam_lengths[tx_idx]
-                action_lookup = tx_action_lookup[tx_idx]
-                if beams.size >= L and L > 0:
-                    beam_tuple = tuple(sorted(beams[:L]))
-                    beam_indices.append(action_lookup.get(beam_tuple, 0))
-                else:
-                    beam_indices.append(0)
-            user_beam_sets.append(beam_indices)
-
-        # Measure collisions (same W1 set index used by multiple users) per TX.
-        tx_collision_counts = []
-        for tx_idx in range(num_tx):
-            tx_indices = [beam_sets[tx_idx] for beam_sets in user_beam_sets]
-            collisions = len(tx_indices) - len(set(tx_indices))
-            tx_collision_counts.append(collisions)
-
-        if tx_collision_counts:
-            worst_tx_count = min(self.worst_tx_count, num_tx)
-            worst_tx_indices = list(np.argsort(tx_collision_counts)[-worst_tx_count:])
-        else:
-            worst_tx_indices = [0]
-        worst_tx_indices = worst_tx_indices[:1]
-
-        # Score users with ACK * MCS, and pick the worst-performing subset.
-        user_scores = ack_array[:total_users] * mcs_array[:total_users]
-        worst_user_indices = list(np.argsort(user_scores)[:selected_user_count])
-
-        # State uses indices of W1 beam sets (not raw beam IDs) plus each user's MCS.
-        selected_beam_sets = [user_beam_sets[idx] for idx in worst_user_indices]
-        selected_mcs = mcs_array[worst_user_indices] if len(mcs_array) > 0 else np.zeros(selected_user_count)
-        state = self._build_state(selected_beam_sets, selected_mcs)
-        if self.trivial_state:
-            prev_action_val = 0 if self.prev_action is None else int(self.prev_action)
-            state = np.array([float(prev_action_val)], dtype=np.float32)
+        prev_action_val = 0 if self.prev_action is None else int(self.prev_action)
+        state = np.array([float(prev_action_val)], dtype=np.float32)
 
         action_digit_count = 1
         self.max_actions = 2
@@ -426,84 +272,32 @@ class RLBeamSelector:
 
         prev_state = self.prev_state
         prev_action = self.prev_action
-        episode_len = getattr(agent, "memory_counter", 0)
+
         if not self.evaluation_only and prev_state is not None and prev_action is not None:
-            if self.trivial_state:
-                reward = 1.0 if prev_action == 0 else 0.0
-            else:
-                reward = 1.0 if prev_action == 0 else -1.0
+            reward = 1.0 if prev_action == 0 else 0.0
 
             agent.store_transition(prev_state, prev_action, reward, state)
-            self.total_transitions += 1
+            self.transition_idx += 1
             self.log_reward(reward)
             agent.activate_target_net(state)
 
-            episode_len = min(self.total_transitions, self.memory_size)
-            min_samples = getattr(
-                agent,
-                "training_start_threshold",
-                getattr(agent, "training_batch_size", getattr(agent, "nForgetPoints", 1)),
-            )
-            can_train = episode_len >= int(min_samples)
-            should_train = (
-                self.train_every_n_steps > 0
-                and (self.step_counter % self.train_every_n_steps == 0)
-                and self.last_trained_step != self.step_counter
-            )
-            if can_train and should_train:
-                agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
-                self.last_trained_step = self.step_counter
+            if (self.transition_idx % agent.training_start_threshold) == 0:
+            
+                agent.learn_new(self.batch_size, self.transition_idx, method="double")
+                agent.epsilon = self.epsilon
 
         if not self.evaluation_only:
-            epsilon_total_steps = self.epsilon_total_steps if self.epsilon_total_steps is not None else 400
-            agent.update_epsilon(episode_len, epsilon_total_steps)
+            if (self.transition_idx % self.epsilon_update_period) == 0:
+                self.epsilon = min(self.e_greedy_end, self.epsilon + self.e_increase)
 
-        predicted_idx = agent.choose_action(state)
-        action_vector = self._decode_action_vector(predicted_idx, action_digit_count)
+        action = agent.choose_action(state)
 
-        overrides = [[None for _ in range(num_tx)] for _ in range(total_users)]
-
-        for tx_pos, tx_idx in enumerate(worst_tx_indices):
-            worst_action_map = tx_action_maps[tx_idx]
-            for user_pos, user_idx in enumerate(worst_user_indices):
-                current_idx = user_beam_sets[user_idx][tx_idx]
-                candidates = self._build_candidate_indices(current_idx, worst_action_map)
-                action_idx = action_vector[tx_pos * selected_user_count + user_pos]
-                chosen_idx = candidates[action_idx]
-                beam_tuple = worst_action_map[chosen_idx] if worst_action_map else None
-                overrides[user_idx][tx_idx] = (
-                    _tuple_to_list(beam_tuple) if beam_tuple is not None else None
-                )
-
-        self.log_action(predicted_idx)
+        self.log_action(action)
         self.prev_state = state
-        self.prev_action = predicted_idx
+        self.prev_action = action
 
-        return overrides
+        return None
 
-    def extract_w1_override(self, pmi_feedback_bits):
-        """Return the w1_beam_indices structure from PMI feedback bits."""
-
-        if pmi_feedback_bits is None:
-            return None
-
-        overrides = []
-        pmi_entries = pmi_feedback_bits if isinstance(pmi_feedback_bits, list) else [pmi_feedback_bits]
-        for rx_entry in pmi_entries:
-            if isinstance(rx_entry, dict):
-                overrides.append(rx_entry.get("w1_beam_indices"))
-            elif isinstance(rx_entry, (list, tuple)):
-                tx_list = []
-                for tx_entry in rx_entry:
-                    if isinstance(tx_entry, dict):
-                        tx_list.append(tx_entry.get("w1_beam_indices"))
-                    else:
-                        tx_list.append(None)
-                overrides.append(tx_list)
-            else:
-                overrides.append(None)
-
-        return overrides if overrides else None
 
     def save_all(self, base_path, imitation_info: Optional[str] = None) -> None:
         """Persist the agent and associated metadata to disk.
