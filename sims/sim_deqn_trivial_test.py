@@ -110,7 +110,7 @@ def run_trivial_deqn(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Trivial DEQN convergence test.")
-    parser.add_argument("--batch-size", type=int, default=3, help="Training batch size.")
+    parser.add_argument("--batch-size", type=int, default=1, help="Training batch size.")
     parser.add_argument("--total-episodes", type=int, default=50, help="Total steps.")
     parser.add_argument("--seed", type=int, default=10, help="Random seed.")
     parser.add_argument("--n-internal-units", type=int, default=16, help="WESN internal units.")
