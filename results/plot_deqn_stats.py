@@ -23,7 +23,7 @@ from typing import Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 37))
+DEFAULT_DROPS = list(range(1, 46))
 DEFAULT_MOBILITY = "higher_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
@@ -33,7 +33,7 @@ DEFAULT_CSI_PREDICTION = True
 DEFAULT_CHANNEL_PREDICTION_SETTING = "deqn_plus_two_mode"
 DEFAULT_IMITATION_METHOD = "none"
 DEFAULT_IMITATION_DROP_COUNT = 0
-DEFAULT_ROLLING_WINDOW_LEN = 10
+DEFAULT_ROLLING_WINDOW_LEN = 5
 
 REWARD_PATTERN = re.compile(
     r"deqn_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"
@@ -266,10 +266,11 @@ def _load_rewards(path: Path) -> np.ndarray:
     data = np.load(path, allow_pickle=False)
     rewards = np.asarray(data["rewards"], dtype=float)
 
-    if rewards.ndim == 2:
-        rewards = rewards[:,-1]
-    else:
-        raise ValueError(f"Unexpected reward array shape {rewards.shape} in {path}")
+    if rewards.ndim == 1:
+        return rewards
+    if rewards.ndim == 2 and rewards.shape[1] >= 1:
+        return rewards[:, -1]
+    raise ValueError(f"Unexpected reward array shape {rewards.shape} in {path}")
     return rewards
 
 def _load_actions(path: Path) -> np.ndarray:
@@ -277,14 +278,15 @@ def _load_actions(path: Path) -> np.ndarray:
     data = np.load(path, allow_pickle=False)
     actions = np.asarray(data["actions"], dtype=int)
 
-    actions_out = np.zeros([actions.shape[0], 2])
-    if actions.ndim == 2:
+    if actions.ndim == 1:
+        steps = np.arange(1, actions.shape[0] + 1, dtype=int)
+        return np.column_stack((steps, actions))
+    if actions.ndim == 2 and actions.shape[1] >= 2:
+        actions_out = np.zeros([actions.shape[0], 2], dtype=int)
         actions_out[:, 0] = actions[:, 0]
         actions_out[:, 1] = actions[:, -1]
-    else:
-        raise ValueError(f"Unexpected action array shape {actions.shape} in {path}")
-
-    return actions_out 
+        return actions_out
+    raise ValueError(f"Unexpected action array shape {actions.shape} in {path}")
 
 def _load_throughput(path: Path) -> float:
 

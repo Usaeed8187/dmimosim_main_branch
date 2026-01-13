@@ -128,7 +128,7 @@ class RLBeamSelector:
 
     def __init__(
         self,
-        max_actions: int = 128,
+        max_actions: int = 2,
         memory_size: Optional[int] = None,
         input_window_size: int = 3,
         output_window_size: int = 3,
@@ -138,7 +138,7 @@ class RLBeamSelector:
         epsilon_total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
         imitation_method: Optional[str] = "none",
-        worst_tx_count: int = 2,
+        worst_tx_count: int = 1,
     ):
         
         self.O2 = 1
@@ -149,7 +149,8 @@ class RLBeamSelector:
         self.N1 = 1
         self.num_beams = (self.O1 * self.N1) * (self.O2 * self.N2)
         
-        self.max_actions = max_actions
+        # Test goal: converge quickly on trivial deterministic rewards.
+        self.max_actions = 2
         self.drops_per_batch = max(1, int(drops_per_batch))
         self.num_batches_in_replay_buffer = max(1, int(num_batches_in_replay_buffer))
         self.steps_per_drop = max(1, int(steps_per_drop))
@@ -299,8 +300,8 @@ class RLBeamSelector:
         digits: List[int] = []
         remaining = int(action_idx)
         for _ in range(digit_count):
-            digits.append(remaining % 4)
-            remaining //= 4
+            digits.append(remaining % 2)
+            remaining //= 2
         return digits
 
     def _build_candidate_indices(self, current_idx: int, action_map: List[Tuple[int, ...]]) -> List[int]:
@@ -309,9 +310,9 @@ class RLBeamSelector:
             if idx == current_idx:
                 continue
             candidates.append(idx)
-            if len(candidates) == 4:
+            if len(candidates) == 2:
                 break
-        while len(candidates) < 4:
+        while len(candidates) < 2:
             candidates.append(current_idx)
         return candidates
 
@@ -335,8 +336,7 @@ class RLBeamSelector:
 
         # Decide how many users to target while still keeping the input window bounded.
         total_users = len(w1_structures)
-        selected_user_count = user_count if user_count is not None else 2
-        selected_user_count = max(1, min(int(selected_user_count), total_users))
+        selected_user_count = 1
 
         mcs_indices = mcs_indices + 1
         mcs_array = np.asarray(mcs_indices, dtype=np.float32).flatten() if mcs_indices is not None else None
@@ -402,6 +402,7 @@ class RLBeamSelector:
             worst_tx_indices = list(np.argsort(tx_collision_counts)[-worst_tx_count:])
         else:
             worst_tx_indices = [0]
+        worst_tx_indices = worst_tx_indices[:1]
 
         # Score users with ACK * MCS, and pick the worst-performing subset.
         user_scores = ack_array[:total_users] * mcs_array[:total_users]
@@ -412,9 +413,8 @@ class RLBeamSelector:
         selected_mcs = mcs_array[worst_user_indices] if len(mcs_array) > 0 else np.zeros(selected_user_count)
         state = self._build_state(selected_beam_sets, selected_mcs)
 
-        action_digit_count = selected_user_count * len(worst_tx_indices)
-        self.max_actions = 4 ** action_digit_count
-        print(f"DEQN action space size: {self.max_actions}")
+        action_digit_count = 1
+        self.max_actions = 2
         self._maybe_init_agent(state.shape[0])
 
         agent = self.agent
@@ -424,10 +424,7 @@ class RLBeamSelector:
         prev_action = self.prev_action
         episode_len = getattr(agent, "memory_counter", 0)
         if not self.evaluation_only and prev_state is not None and prev_action is not None:
-            # reward = float(np.sum(user_scores))
-            data = np.load('results/channels_multiple_mu_mimo/channels_higher_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
-            no_rl_throughput = data['throughput']
-            reward = throughput_debug - no_rl_throughput[0]
+            reward = 1.0 if prev_action == 0 else -1.0
 
             agent.store_transition(prev_state, prev_action, reward, state)
             self.total_transitions += 1
@@ -455,7 +452,6 @@ class RLBeamSelector:
             epsilon_total_steps = self.epsilon_total_steps if self.epsilon_total_steps is not None else 400
             agent.update_epsilon(episode_len, epsilon_total_steps)
 
-        predicted_idx = None
         predicted_idx = agent.choose_action(state)
         action_vector = self._decode_action_vector(predicted_idx, action_digit_count)
 

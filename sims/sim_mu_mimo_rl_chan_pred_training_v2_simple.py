@@ -33,9 +33,8 @@ if gpus and gpu_num != "":
 tf.get_logger().setLevel('ERROR')
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
-from dmimo.mu_mimo_testing_updates_v2 import sim_mu_mimo_all
-from dmimo.channel.rl_beam_selector_v2 import RLBeamSelector
-from dmimo.channel import default_ddpg_predictor
+from dmimo.mu_mimo_testing_updates_v2_simple import sim_mu_mimo_all
+from dmimo.channel.rl_beam_selector_v2_simple import RLBeamSelector
 from sionna.ofdm import ResourceGrid
 from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
 
@@ -86,7 +85,7 @@ arguments = sys.argv[1:]
 
 mobility = 'higher_mobility'
 # drop_idx = '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24'
-drop_idx = ','.join(str(i) for i in range(14, 31))
+drop_idx = ','.join(str(i) for i in range(1, 45))
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [4]
 num_txue_sel = 2
@@ -95,10 +94,10 @@ modulation_order = 4
 code_rate = 1 / 2
 link_adapt = True
 
-perfect_csi = False
-channel_prediction_setting = "deqn_plus_two_mode" # "None", "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", "ddpg"
+perfect_csi = True
+channel_prediction_setting = "deqn" # "None", "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", "ddpg"
 csi_prediction = True
-channel_prediction_method = "deqn_plus_two_mode" # None, "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", ddpg
+channel_prediction_method = "deqn" # None, "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", ddpg
 csi_quantization_on = True
 imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
@@ -223,10 +222,6 @@ def parse_arguments():
             csi_prediction = True
             channel_prediction_method = channel_prediction_setting
 
-        if perfect_csi:
-            csi_prediction = False
-            channel_prediction_method = None
-
         drop_list = _parse_drop_indices(drop_idx)
 
         print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
@@ -277,16 +272,6 @@ def run_simulation():
         else None
     )
 
-    shared_ddpg_predictor = (
-        default_ddpg_predictor(
-            num_receivers=int(max(rx_ues_arr)+2),
-            fft_size=SimConfig().fft_size,
-            evaluation_only=imitation_method == "none",
-        )
-        if channel_prediction_method == "ddpg"
-        else None
-    )
-
     for drop_number, drop_idx in enumerate(drop_list, start=1):
         start_time = time.time()
         # Simulation settings
@@ -329,9 +314,6 @@ def run_simulation():
             ) - 1
             epsilon_total_steps = math.ceil(len(drop_list) * time_steps_per_drop)
             shared_rl_selector.set_epsilon_total_steps(epsilon_total_steps)
-
-        if cfg.perfect_csi:
-            cfg.csi_prediction = False
 
         if cfg.link_adapt:
             MCS_string = "link_adapt"

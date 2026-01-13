@@ -33,8 +33,8 @@ if gpus and gpu_num != "":
 tf.get_logger().setLevel('ERROR')
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
-from dmimo.mu_mimo_testing_updates_v2 import sim_mu_mimo_all
-from dmimo.channel.rl_beam_selector_v2 import RLBeamSelector
+from dmimo.mu_mimo_testing_updates_v3 import sim_mu_mimo_all
+from dmimo.channel.rl_tx_selector import RLTxUESelector
 from dmimo.channel import default_ddpg_predictor
 from sionna.ofdm import ResourceGrid
 from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
@@ -102,7 +102,7 @@ channel_prediction_method = "deqn_plus_two_mode" # None, "two_mode", "weiner_fil
 csi_quantization_on = True
 imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
-rl_user_count = 2
+rl_user_count = 3
 drops_per_batch = 1
 num_batches_in_replay_buffer = 3
 steps_per_drop = 15
@@ -267,7 +267,7 @@ def run_simulation():
     rc_config.history_len = 8
 
     shared_rl_selector = (
-        RLBeamSelector(
+        RLTxUESelector(
             imitation_method=imitation_method,
             drops_per_batch=drops_per_batch,
             num_batches_in_replay_buffer=num_batches_in_replay_buffer,
