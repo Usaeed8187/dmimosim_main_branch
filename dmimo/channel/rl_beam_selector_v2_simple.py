@@ -189,8 +189,6 @@ class RLBeamSelector:
         self.reward_log.clear()
         self.action_log.clear()
 
-        self.transition_idx = 0
-
     def log_reward(self, reward: float) -> None:
         """Record a reward emitted by the DEQN agent.
 
@@ -273,11 +271,11 @@ class RLBeamSelector:
             reward = 1.0 if prev_action == 0 else 0.0
 
             agent.store_transition(prev_state, prev_action, reward, state)
-            self.transition_idx += 1
             self.log_reward(reward)
             agent.activate_target_net(state)
+            self.transition_idx += 1
 
-            if (self.transition_idx % agent.training_start_threshold) == 0:
+            if self.transition_idx >= agent.training_start_threshold and (self.transition_idx % self.batch_size) == 0:
             
                 agent.learn_new(self.batch_size, self.transition_idx, method="double")
 
