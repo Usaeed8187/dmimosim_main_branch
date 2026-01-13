@@ -9,10 +9,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import matplotlib.pyplot as plt
 
 repo_root = Path(__file__).resolve().parents[1]
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
+icml_root = repo_root / "ICML_DEQN_clean"
+if str(icml_root) not in sys.path:
+    sys.path.insert(0, str(icml_root))
 
 import numpy as np
 from ICML_DEQN_clean.DQN_RC_new_WESN import DeepWESNQNetwork
@@ -35,7 +39,7 @@ def run_trivial_deqn(
     learning_method = "double"
 
     e_greedy_start = 0.7
-    e_greedy_end = 0.9
+    e_greedy_end = 0.95
     e_increase = (e_greedy_end - e_greedy_start) / max(1, (total_episodes // batch_size) - 1)
     epsilon = e_greedy_start
     epsilon_update_period = batch_size
@@ -83,6 +87,14 @@ def run_trivial_deqn(
 
         observation = next_observation
 
+    window_len = 5
+    kernel = np.ones(window_len, dtype=float) / float(window_len)
+    smoothed_rewards = np.convolve(np.asarray(rewards, dtype=float), kernel, mode="valid")
+
+    plt.figure()
+    plt.plot(smoothed_rewards)
+    plt.savefig('b')
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
         output_path,
@@ -98,8 +110,8 @@ def run_trivial_deqn(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Trivial DEQN convergence test.")
-    parser.add_argument("--batch-size", type=int, default=200, help="Training batch size.")
-    parser.add_argument("--total-episodes", type=int, default=2000, help="Total steps.")
+    parser.add_argument("--batch-size", type=int, default=3, help="Training batch size.")
+    parser.add_argument("--total-episodes", type=int, default=50, help="Total steps.")
     parser.add_argument("--seed", type=int, default=10, help="Random seed.")
     parser.add_argument("--n-internal-units", type=int, default=16, help="WESN internal units.")
     parser.add_argument("--spectral-radius", type=float, default=0.9, help="WESN spectral radius.")

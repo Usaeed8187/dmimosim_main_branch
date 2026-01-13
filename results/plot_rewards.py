@@ -11,13 +11,19 @@ method = 'deqn'
 rx_UEs = 4
 tx_UEs = 2
 
-drops = np.arange(1,32)
+drops = np.arange(1,87)
 
 rewards = []
 for drop_idx in drops:
     data = np.load('{}channels_{}_{}/{}_rewards_drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0.npz'.format(base_dir, mobility, drop_idx,method,drop_idx,rx_UEs,tx_UEs))
-    rewards.append(np.mean(data["rewards"]))
+    rewards.append(data["rewards"])
+
+rewards = np.concatenate(rewards)
+
+window_len = 50
+kernel = np.ones(window_len, dtype=float) / float(window_len)
+rewards = np.convolve(np.asarray(rewards, dtype=float), kernel, mode="valid")
 
 plt.figure()
-plt.plot(drops, rewards)
+plt.plot(rewards)
 plt.savefig('a')
