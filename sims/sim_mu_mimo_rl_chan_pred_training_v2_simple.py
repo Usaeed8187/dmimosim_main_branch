@@ -85,7 +85,7 @@ arguments = sys.argv[1:]
 
 mobility = 'high_mobility'
 # drop_idx = '1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24'
-drop_idx = ','.join(str(i) for i in range(1, 101))
+drop_idx = ','.join(str(i) for i in range(1, 51))
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [4]
 num_txue_sel = 2
@@ -102,9 +102,7 @@ csi_quantization_on = True
 imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
 rl_user_count = 2
-drops_per_batch = 1
-num_batches_in_replay_buffer = 3
-train_every_n_steps = 1
+batch_size = 3
 
 def _build_imitation_info() -> Optional[str]:
     if imitation_method == "none" or imitation_drop_count <= 0:
@@ -171,7 +169,7 @@ def parse_arguments():
     global csi_quantization_on, link_adapt
     global imitation_method, imitation_drop_count
     global rl_user_count
-    global drops_per_batch, num_batches_in_replay_buffer
+    global batch_size
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -208,12 +206,6 @@ def parse_arguments():
 
         if len(arguments) >= 13:
             rl_user_count = int(arguments[12])
-
-        if len(arguments) >= 14:
-            drops_per_batch = max(1, int(arguments[13]))
-
-        if len(arguments) >= 15:
-            num_batches_in_replay_buffer = max(1, int(arguments[14]))
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -261,12 +253,22 @@ def run_simulation():
     rc_config.num_neurons = 16
     rc_config.history_len = 8
 
+    total_slots = 99
+    start_slot = 35
+    csi_delay = 4
+
+    cfg_tmp = SimConfig()
+
+    time_steps_per_drop = math.ceil(
+                (total_slots - start_slot)
+                / (cfg_tmp.num_slots_p1 + cfg_tmp.num_slots_p2)
+            ) - 1
+    total_steps = len(drop_list) * time_steps_per_drop
+
     shared_rl_selector = (
         RLBeamSelector(
-            imitation_method=imitation_method,
-            drops_per_batch=drops_per_batch,
-            num_batches_in_replay_buffer=num_batches_in_replay_buffer,
-            train_every_n_steps=train_every_n_steps,
+            batch_size=batch_size,
+            total_steps=total_steps,
         )
         if "deqn" in channel_prediction_method
         else None
@@ -276,13 +278,13 @@ def run_simulation():
         start_time = time.time()
         # Simulation settings
         cfg = SimConfig()
-        cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
-        cfg.total_slots = 99       # total number of slots in ns-3 channels
-        cfg.start_slot_idx = 35     # starting slots (must be greater than csi_delay + 5)
-        cfg.csi_delay = 4           # feedback delay in number of subframe
+        cfg.rb_size = 12                    # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
+        cfg.total_slots = total_slots       # total number of slots in ns-3 channels
+        cfg.start_slot_idx = start_slot     # starting slots (must be greater than csi_delay + 5)
+        cfg.csi_delay = csi_delay           #feedback delay in number of subframe
         cfg.perfect_csi = perfect_csi
-        cfg.rank_adapt = False      # enable/disable rank adaptation
-        cfg.link_adapt = link_adapt      # enable/disable link adaptation,. .
+        cfg.rank_adapt = False              # enable/disable rank adaptation
+        cfg.link_adapt = link_adapt         # enable/disable link adaptation,. .
         cfg.csi_prediction = csi_prediction
         cfg.use_perfect_csi_history_for_prediction = False
         cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"
@@ -306,14 +308,6 @@ def run_simulation():
         cfg.imitation_drop_count = imitation_drop_count
         cfg.rl_user_count = rl_user_count
         cfg.drop_idx = int(drop_idx)
-
-        if shared_rl_selector is not None:
-            time_steps_per_drop = math.ceil(
-                (cfg.total_slots - cfg.start_slot_idx)
-                / (cfg.num_slots_p1 + cfg.num_slots_p2)
-            ) - 1
-            epsilon_total_steps = math.ceil(len(drop_list) * time_steps_per_drop)
-            shared_rl_selector.set_epsilon_total_steps(epsilon_total_steps)
 
         if cfg.link_adapt:
             MCS_string = "link_adapt"

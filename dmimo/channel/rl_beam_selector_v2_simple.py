@@ -132,8 +132,6 @@ class RLBeamSelector:
         output_window_size: int = 3,
         total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
-        imitation_method: Optional[str] = "none",
-        worst_tx_count: int = 1,
     ):
         
         self.O2 = 1
@@ -156,9 +154,6 @@ class RLBeamSelector:
         self.epsilon = self.e_greedy_start
         self.e_increase = (self.e_greedy_end - self.e_greedy_start) / max(1, (total_steps // batch_size) - 1)
         
-        self.imitation_method = imitation_method
-        self.worst_tx_count = max(1, int(worst_tx_count))
-
         self.seed_sequence = np.random.SeedSequence(random_seed) if random_seed is not None else None
         self.agent_seed: Optional[int] = None
 
@@ -238,12 +233,12 @@ class RLBeamSelector:
                 state_dim,
                 self.input_window_size,
                 self.output_window_size,
-                self.memory_size,
+                self.batch_size,
                 training_batch_size=self.batch_size,
                 training_start_threshold=self.batch_size,
                 n_layers=1,
-                nInternalUnits=64,
-                spectral_radius=0.3,
+                nInternalUnits=16,
+                spectral_radius=0.9,
                 random_seed=self.agent_seed,
             )
             self.state_dim = state_dim
@@ -284,11 +279,10 @@ class RLBeamSelector:
             if (self.transition_idx % agent.training_start_threshold) == 0:
             
                 agent.learn_new(self.batch_size, self.transition_idx, method="double")
-                agent.epsilon = self.epsilon
 
-        if not self.evaluation_only:
             if (self.transition_idx % self.epsilon_update_period) == 0:
                 self.epsilon = min(self.e_greedy_end, self.epsilon + self.e_increase)
+                agent.epsilon = self.epsilon
 
         action = agent.choose_action(state)
 
