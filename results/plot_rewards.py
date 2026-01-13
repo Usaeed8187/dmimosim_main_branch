@@ -4,14 +4,14 @@ import matplotlib.pyplot as plt
 
 base_dir = 'results/channels_multiple_mu_mimo/'
  
-mobility = 'higher_mobility'
+mobility = 'high_mobility'
 
 method = 'deqn'
 
 rx_UEs = 4
 tx_UEs = 2
 
-drops = np.arange(1,29)
+drops = np.arange(1,101)
 
 rewards = []
 for drop_idx in drops:
