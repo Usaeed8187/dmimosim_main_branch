@@ -284,6 +284,7 @@ class RLBeamSelector:
             if (self.transition_idx % self.epsilon_update_period) == 0:
                 self.epsilon = min(self.e_greedy_end, self.epsilon + self.e_increase)
                 agent.epsilon = self.epsilon
+                print("agent.epsilon = ", agent.epsilon)
 
         action = agent.choose_action(state)
 
