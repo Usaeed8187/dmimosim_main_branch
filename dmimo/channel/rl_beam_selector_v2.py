@@ -387,7 +387,7 @@ class RLBeamSelector:
             worst_tx_indices = [0]
 
         # Score users with ACK * MCS, and pick the worst-performing subset.
-        user_scores = ack_array[:total_users] * mcs_array[:total_users]
+        user_scores = ack_array * mcs_array
         worst_user_indices = list(np.argsort(user_scores)[:selected_user_count])
 
         # State uses indices of W1 beam sets (not raw beam IDs) plus each user's MCS.
@@ -404,11 +404,11 @@ class RLBeamSelector:
         assert agent is not None
 
         if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
-            # reward = float(np.sum(user_scores))
+            reward = float(np.mean(user_scores - self.prev_mcs_arr))
             # data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
             # no_rl_throughput = data['throughput']
-            target_throughput = 
-            reward = throughput_debug - target_throughput
+            # target_throughput = 1
+            # reward = throughput_debug - target_throughput
             # if self.prev_action == 0:
             #     reward = 1
             # else:
@@ -450,6 +450,7 @@ class RLBeamSelector:
         self.log_action(predicted_idx)
         self.prev_state = state
         self.prev_action = predicted_idx
+        self.prev_mcs_arr = mcs_array
 
         return overrides
 
