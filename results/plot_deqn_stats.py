@@ -23,8 +23,8 @@ from typing import Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 5))
-DEFAULT_MOBILITY = "higher_mobility"
+DEFAULT_DROPS = list(range(1, 8))
+DEFAULT_MOBILITY = "high_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
 DEFAULT_LINK_ADAPT = True
@@ -271,7 +271,6 @@ def _load_rewards(path: Path) -> np.ndarray:
     if rewards.ndim == 2 and rewards.shape[1] >= 1:
         return rewards[:, -1]
     raise ValueError(f"Unexpected reward array shape {rewards.shape} in {path}")
-    return rewards
 
 def _load_actions(path: Path) -> np.ndarray:
 
