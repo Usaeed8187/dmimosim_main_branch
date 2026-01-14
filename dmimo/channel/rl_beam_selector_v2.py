@@ -6,8 +6,6 @@ import pickle
 
 import numpy as np
 
-from dmimo.mimo.quantized_CSI_feedback import quantized_CSI_feedback
-
 # Make the ICML_DEQN_clean folder importable
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEQN_PATH = REPO_ROOT / "ICML_DEQN_clean"
@@ -505,7 +503,6 @@ class RLBeamSelector:
             "O1": self.O1,
             "O2": self.O2,
             "max_actions": self.max_actions,
-            "memory_size": self.memory_size,
             "input_window_size": self.input_window_size,
             "output_window_size": self.output_window_size,
             "agent_file": agent_file,
@@ -539,7 +536,6 @@ class RLBeamSelector:
         self.O1 = metadata.get("O1", self.O1)
         self.O2 = metadata.get("O2", self.O2)
         self.max_actions = metadata.get("max_actions", self.max_actions)
-        self.memory_size = metadata.get("memory_size", self.memory_size)
         self.input_window_size = metadata.get("input_window_size", self.input_window_size)
         self.output_window_size = metadata.get("output_window_size", self.output_window_size)
         self.agent_seed = metadata.get("agent_seed", None)
