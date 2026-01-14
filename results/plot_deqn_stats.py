@@ -23,7 +23,7 @@ from typing import Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 5))
+DEFAULT_DROPS = list(range(1, 9))
 DEFAULT_MOBILITY = "high_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
@@ -287,17 +287,17 @@ def _load_actions(path: Path) -> np.ndarray:
         return actions_out
     raise ValueError(f"Unexpected action array shape {actions.shape} in {path}")
 
-def _load_throughput(path: Path) -> float:
+def _load_throughput(path: Path) -> np.ndarray:
 
     data = np.load(path, allow_pickle=True)
-    if "throughput" not in data:
-        raise ValueError(f"Throughput array missing from {path}")
+    if "per_step_throughput" not in data:
+        raise ValueError(f"Per-step throughput array missing from {path}")
 
-    throughput = np.asarray(data["throughput"], dtype=float).ravel()
-    if throughput.size == 0:
-        raise ValueError(f"Empty throughput array in {path}")
+    per_step_throughput = np.asarray(data["per_step_throughput"], dtype=float).ravel()
+    if per_step_throughput.size == 0:
+        raise ValueError(f"Empty per-step throughput array in {path}")
 
-    return float(np.nanmean(throughput))
+    return per_step_throughput
 
 def _aggregate_rewards(files: Iterable[RewardFile]) -> Tuple[List[Tuple[int, float]], List[int]]:
     ordered_files = sorted(files, key=lambda info: (info.drop_id, info.path.name))
@@ -324,10 +324,17 @@ def _aggregate_actions(files: Iterable[ActionFile]) -> Tuple[List[Tuple[int, int
     return actions_series, max_step
 
 def _aggregate_throughput(files: Iterable[ThroughputFile]) -> Tuple[List[Tuple[int, float]], List[int]]:
-    series = [(file_info.drop_id, _load_throughput(file_info.path)) for file_info in files]
-    series.sort(key=lambda item: item[0])
-    drop_ids = [drop for drop, _ in series]
-    return series, drop_ids
+    ordered_files = sorted(files, key=lambda info: (info.drop_id, info.path.name))
+    series: List[Tuple[int, float]] = []
+    step_idx = 1
+
+    for file_info in ordered_files:
+        throughput_values = _load_throughput(file_info.path)
+        for value in throughput_values:
+            series.append((step_idx, float(value)))
+            step_idx += 1
+    step_ids = [step for step, _ in series]
+    return series, step_ids
 
 def _apply_rolling_mean(series: List[Tuple[int, float]], window: int) -> List[Tuple[int, float]]:
     if window <= 1 or len(series) < window:
@@ -380,21 +387,22 @@ def plot_throughput(series_by_label: List[Tuple[str, List[Tuple[int, float]]]], 
     if not series_by_label:
         raise RuntimeError("No throughput data found to plot.")
 
-    drop_ids: set[int] = set()
+    step_ids: set[int] = set()
     plt.figure(figsize=(10, 6))
 
     for label, series in series_by_label:
         if not series:
             continue
-        drops, values = zip(*series)
-        drop_ids.update(drops)
-        plt.plot(drops, values, marker="s", label=label)
-    plt.xlabel("Drop")
-    plt.ylabel("Average throughput")
-    plt.title("DEQN throughput across drops")
+        steps, values = zip(*series)
+        step_ids.update(steps)
+        plt.plot(steps, values, marker="s", label=label)
+    plt.xlabel("Step")
+    plt.ylabel("Per-step throughput")
+    plt.title("DEQN throughput across steps")
     plt.grid(True, linestyle="--", alpha=0.6)
-    if drop_ids:
-        plt.xticks(sorted(drop_ids))
+    if step_ids:
+        plt.xticks(sorted(step_ids))
+
     if len(series_by_label) > 1:
         plt.legend()
     plt.tight_layout()
