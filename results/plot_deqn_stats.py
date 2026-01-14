@@ -23,7 +23,7 @@ from typing import Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 9))
+DEFAULT_DROPS = list(range(1, 44))
 DEFAULT_MOBILITY = "high_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
@@ -33,7 +33,7 @@ DEFAULT_CSI_PREDICTION = True
 DEFAULT_CHANNEL_PREDICTION_SETTING = "deqn_plus_two_mode"
 DEFAULT_IMITATION_METHOD = "none"
 DEFAULT_IMITATION_DROP_COUNT = 0
-DEFAULT_ROLLING_WINDOW_LEN = 15
+DEFAULT_ROLLING_WINDOW_LEN = 100
 
 REWARD_PATTERN = re.compile(
     r"deqn_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"
@@ -345,7 +345,21 @@ def _apply_rolling_mean(series: List[Tuple[int, float]], window: int) -> List[Tu
     new_drops = drops[window - 1 :]
     return list(zip(new_drops, smoothed.tolist()))
 
-def plot_rewards(series: List[Tuple[int, float]], step_ids: List[int], output: Path) -> None:
+def _select_tick_steps(step_ids: Iterable[int], stride: int) -> List[int]:
+    if stride <= 1:
+        return sorted(set(step_ids))
+    unique_steps = sorted(set(step_ids))
+    if not unique_steps:
+        return []
+    return list(range(unique_steps[0], unique_steps[-1] + 1, stride))
+
+
+def plot_rewards(
+    series: List[Tuple[int, float]],
+    step_ids: List[int],
+    output: Path,
+    tick_stride: int,
+) -> None:
     if not series:
         raise RuntimeError("No reward data found to plot.")
 
@@ -357,7 +371,7 @@ def plot_rewards(series: List[Tuple[int, float]], step_ids: List[int], output: P
     plt.ylabel("Average reward")
     plt.title("DEQN average reward across steps")
     plt.grid(True, linestyle="--", alpha=0.6)
-    plt.xticks(step_ids)
+    plt.xticks(_select_tick_steps(step_ids, tick_stride))
     plt.tight_layout()
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -383,7 +397,11 @@ def plot_actions(series: List[Tuple[int, int]], max_step: int, output: Path) -> 
     plt.savefig(output, dpi=200)
     print(f"Saved action plot to {output}")
 
-def plot_throughput(series_by_label: List[Tuple[str, List[Tuple[int, float]]]], output: Path) -> None:
+def plot_throughput(
+    series_by_label: List[Tuple[str, List[Tuple[int, float]]]],
+    output: Path,
+    tick_stride: int,
+) -> None:
     if not series_by_label:
         raise RuntimeError("No throughput data found to plot.")
 
@@ -401,7 +419,7 @@ def plot_throughput(series_by_label: List[Tuple[str, List[Tuple[int, float]]]], 
     plt.title("DEQN throughput across steps")
     plt.grid(True, linestyle="--", alpha=0.6)
     if step_ids:
-        plt.xticks(sorted(step_ids))
+        plt.xticks(_select_tick_steps(step_ids, tick_stride))
 
     if len(series_by_label) > 1:
         plt.legend()
@@ -484,7 +502,7 @@ def main() -> None:
     if reward_files:
         reward_series, reward_drops = _aggregate_rewards(reward_files)
         reward_series = _apply_rolling_mean(reward_series, args.rolling_window)
-        plot_rewards(reward_series, reward_drops, args.output)
+        plot_rewards(reward_series, reward_drops, args.output, args.rolling_window)
     else:
         print("No reward files found; skipping reward plot.")
 
@@ -503,7 +521,11 @@ def main() -> None:
             throughput_series, _ = _aggregate_throughput(method_files)
             throughput_series = _apply_rolling_mean(throughput_series, args.rolling_window)
             throughput_series_by_label.append((method, throughput_series))
-        plot_throughput(throughput_series_by_label, args.throughput_output)
+        plot_throughput(
+            throughput_series_by_label,
+            args.throughput_output,
+            args.rolling_window,
+        )   
     else:
         print("No throughput files found; skipping throughput plot.")
 
