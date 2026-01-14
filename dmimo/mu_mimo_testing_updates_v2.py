@@ -503,7 +503,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                         PMI_feedback_bits,
                         mcs_indices=last_mcs_indices,
                         node_wise_acks=last_node_wise_acks,
-                        user_count=getattr(cfg, "rl_user_count", 2),
                         throughput_debug=last_throughput,
                         drop_idx_debug=cfg.drop_idx
                     )

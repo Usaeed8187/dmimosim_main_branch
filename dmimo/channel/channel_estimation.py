@@ -90,7 +90,7 @@ def estimate_freq_time_cov(dmimo_chans: dMIMOChannels, rg: ResourceGrid, start_s
 def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_idx, cache_slots=5, ebno_db=12.0,
                              cfo_vals=[0], sto_vals=[0], freq_cov_mat=None, lmmse_interpolator=None):
     # Only allow channel estimation from slot 1 onward
-    assert slot_idx > 0, "Current slot index must be a positive integer"
+    assert slot_idx >= 0, "Current slot index must be a positive integer"
 
     num_bits_per_symbol = 2  # use QPSK modulation
     binary_source = BinarySource()

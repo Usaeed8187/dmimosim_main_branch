@@ -164,8 +164,6 @@ class RLBeamSelector:
         self.state_dim: Optional[int] = 1
         self.reward_log: List[float] = []
         self.action_log: List[int] = []
-        self.step_counter: int = 0
-        self.last_trained_step: int = 0
         self.transition_idx: int = 0
         self.evaluation_only: bool = False
         self.trivial_state: bool = True

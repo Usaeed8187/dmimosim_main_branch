@@ -142,6 +142,7 @@ class standard_rc_pred_freq_mimo:
 
         first_csi_history_idx = first_slot_idx - (csi_delay * self.history_len)
         channel_history_slots = np.arange(first_csi_history_idx, first_slot_idx, csi_delay)
+        hold = 1
 
         # Initialize or rebuild buffer when unavailable or mismatched
         if (
@@ -172,6 +173,8 @@ class standard_rc_pred_freq_mimo:
             self.csi_history_buffer = np.concatenate([self.csi_history_buffer[1:], new_entry], axis=0)
             self.csi_history_slots = channel_history_slots
             return self.csi_history_buffer
+        
+        hold = 1 
 
         # Fallback: rebuild buffer if slot progression is unexpected
         h_freq_csi_list = [

@@ -128,17 +128,14 @@ class RLBeamSelector:
 
     def __init__(
         self,
-        max_actions: int = 128,
-        memory_size: Optional[int] = None,
+        batch_size: Optional[int] = None,
         input_window_size: int = 3,
         output_window_size: int = 3,
-        drops_per_batch: int = 1,
-        num_batches_in_replay_buffer: int = 3,
-        steps_per_drop: int = 15,
-        epsilon_total_steps: Optional[int] = None,
+        total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
         imitation_method: Optional[str] = "none",
-        worst_tx_count: int = 2,
+        worst_tx_count: int = 1,
+        worst_rx_count: int = 2,
     ):
         
         self.O2 = 1
@@ -149,23 +146,19 @@ class RLBeamSelector:
         self.N1 = 1
         self.num_beams = (self.O1 * self.N1) * (self.O2 * self.N2)
         
-        self.max_actions = max_actions
-        self.drops_per_batch = max(1, int(drops_per_batch))
-        self.num_batches_in_replay_buffer = max(1, int(num_batches_in_replay_buffer))
-        self.steps_per_drop = max(1, int(steps_per_drop))
-        self.batch_size_transitions = self.drops_per_batch * self.steps_per_drop
-        computed_memory_size = self.batch_size_transitions * self.num_batches_in_replay_buffer
-        self.memory_size = (
-            int(computed_memory_size)
-            if memory_size is None
-            else max(int(memory_size), int(computed_memory_size))
-        )
+        self.batch_size = batch_size
+        self.epsilon_update_period = batch_size
+        self.e_greedy_start = 0.7
+        self.e_greedy_end = 0.9
+        self.epsilon = self.e_greedy_start
+        self.e_increase = (self.e_greedy_end - self.e_greedy_start) / max(1, (total_steps // batch_size) - 1)
+
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
-        self.epsilon_total_steps = epsilon_total_steps
         
         self.imitation_method = imitation_method
         self.worst_tx_count = max(1, int(worst_tx_count))
+        self.worst_rx_count = max(1, int(worst_rx_count))
 
         self.seed_sequence = np.random.SeedSequence(random_seed) if random_seed is not None else None
         self.agent_seed: Optional[int] = None
@@ -177,10 +170,7 @@ class RLBeamSelector:
         self.state_dim: Optional[int] = None
         self.reward_log: List[float] = []
         self.action_log: List[int] = []
-        self.step_counter: int = 0
-        self.drop_counter: int = 0
-        self.last_trained_drop: int = 0
-        self.total_transitions: int = 0
+        self.transition_idx: int = 0
         self.evaluation_only: bool = False
 
     def set_epsilon_total_steps(self, total_steps: Optional[int]) -> None:
@@ -201,8 +191,6 @@ class RLBeamSelector:
         
         self.reward_log.clear()
         self.action_log.clear()
-        self.step_counter = 0
-        self.drop_counter += 1
 
     def log_reward(self, reward: float) -> None:
         """Record a reward emitted by the DEQN agent.
@@ -247,12 +235,12 @@ class RLBeamSelector:
                 state_dim,
                 self.input_window_size,
                 self.output_window_size,
-                self.memory_size,
-                training_batch_size=self.batch_size_transitions,
-                training_start_threshold=self.batch_size_transitions,
+                self.batch_size,
+                training_batch_size=self.batch_size,
+                training_start_threshold=self.batch_size,
                 n_layers=1,
-                nInternalUnits=64,
-                spectral_radius=0.3,
+                nInternalUnits=16,
+                spectral_radius=0.9,
                 random_seed=self.agent_seed,
             )
             self.state_dim = state_dim
@@ -331,8 +319,6 @@ class RLBeamSelector:
         if len(w1_structures) == 0:
             return None
         
-        self.step_counter += 1
-
         # Decide how many users to target while still keeping the input window bounded.
         total_users = len(w1_structures)
         selected_user_count = user_count if user_count is not None else 2
@@ -414,50 +400,36 @@ class RLBeamSelector:
 
         action_digit_count = selected_user_count * len(worst_tx_indices)
         self.max_actions = 4 ** action_digit_count
-        print(f"DEQN action space size: {self.max_actions}")
+        # print(f"DEQN action space size: {self.max_actions}")
         self._maybe_init_agent(state.shape[0])
 
         agent = self.agent
         assert agent is not None
 
-        prev_state = self.prev_state
-        prev_action = self.prev_action
-        episode_len = getattr(agent, "memory_counter", 0)
-        if not self.evaluation_only and prev_state is not None and prev_action is not None:
+        if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
             # reward = float(np.sum(user_scores))
             data = np.load('results/channels_multiple_mu_mimo/channels_higher_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
             no_rl_throughput = data['throughput']
             reward = throughput_debug - no_rl_throughput[0]
-
-            agent.store_transition(prev_state, prev_action, reward, state)
-            self.total_transitions += 1
-            self.log_reward(reward)
+            
             agent.activate_target_net(state)
+            agent.store_transition(self.prev_state, self.prev_action, reward, state)
+            self.log_reward(reward)
 
-            episode_len = min(self.total_transitions, self.memory_size)
-            min_samples = getattr(
-                agent,
-                "training_start_threshold",
-                getattr(agent, "training_batch_size", getattr(agent, "nForgetPoints", 1)),
-            )
-            can_train = episode_len >= int(min_samples)
-            should_train = (
-                self.drop_counter > 0
-                and self.drops_per_batch > 0
-                and (self.drop_counter % self.drops_per_batch == 0)
-                and self.last_trained_drop != self.drop_counter
-            )
-            if can_train and should_train:
-                agent.learn_new(episode_len, max(episode_len - 1, 0), method="double")
-                self.last_trained_drop = self.drop_counter
+            if (self.transition_idx + 1) >= self.agent.training_start_threshold and ((self.transition_idx+1) % self.batch_size) == 0:
+                agent.learn_new(self.batch_size, self.transition_idx, method="double")
 
-        if not self.evaluation_only:
-            epsilon_total_steps = self.epsilon_total_steps if self.epsilon_total_steps is not None else 400
-            agent.update_epsilon(episode_len, epsilon_total_steps)
+            if ((self.transition_idx+1) % self.epsilon_update_period) == 0:
+                self.epsilon = min(self.e_greedy_end, self.epsilon + self.e_increase)
+                self.agent.epsilon = self.epsilon
 
-        predicted_idx = None
-        predicted_idx = agent.choose_action(state)
-        action_vector = self._decode_action_vector(predicted_idx, action_digit_count)
+            predicted_idx = agent.choose_action(state)
+            action_vector = self._decode_action_vector(predicted_idx, action_digit_count)
+
+            self.transition_idx += 1
+        else:
+            predicted_idx = 0
+            action_vector = self._decode_action_vector(predicted_idx, action_digit_count)
 
         overrides = [[None for _ in range(num_tx)] for _ in range(total_users)]
 
