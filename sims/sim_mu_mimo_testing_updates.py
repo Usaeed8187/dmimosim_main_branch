@@ -89,7 +89,7 @@ drop_idx = '3'
 rx_ues_arr = [4]
 num_txue_sel = 2
 
-modulation_order = 4
+modulation_order = 2
 code_rate = 1 / 2
 link_adapt = True
 
@@ -357,7 +357,7 @@ def run_simulation():
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
                     nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
-                    ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])
+                    ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13])
         else:
             if cfg.scheduling:
                 file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
@@ -367,7 +367,7 @@ def run_simulation():
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
                     nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], 
-                    ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12])
+                    ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13])
 
 
 if __name__ == "__main__":

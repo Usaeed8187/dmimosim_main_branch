@@ -309,6 +309,7 @@ class RLBeamSelector:
         node_wise_acks: Optional[np.ndarray] = None,
         throughput_debug: Optional[float] = None,
         drop_idx_debug: Optional[int] = None,
+        last_target_throughput: Optional[float] = None,
     ) -> Optional[List[List[Optional[np.ndarray]]]]:
         """Update the agent with the newest feedback and return predicted beams per Rx–Tx pair."""
 
@@ -404,15 +405,21 @@ class RLBeamSelector:
         assert agent is not None
 
         if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
-            reward = float(np.mean(user_scores - self.prev_mcs_arr))
-            # data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
-            # no_rl_throughput = data['throughput']
-            # target_throughput = 1
-            # reward = throughput_debug - target_throughput
+            
+            # reward = (throughput_debug - last_target_throughput) / last_target_throughput
+            
+            # reward = float(np.mean(throughput_debug - self.prev_mcs_arr))
+            
+            data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
+            no_rl_throughput = data['per_step_throughput']
+            reward = throughput_debug - no_rl_throughput[self.transition_idx % 15]
+            
             # if self.prev_action == 0:
             #     reward = 1
             # else:
             #     reward = 0
+
+            # print("reward = ", reward)
             
             agent.activate_target_net(state)
             agent.store_transition(self.prev_state, self.prev_action, reward, state)
