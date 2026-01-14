@@ -448,6 +448,7 @@ def run_simulation():
                     "ldpc_ber_list": rst_zf[10],
                     "sinr_dB": rst_zf[11],
                     "snr_dB": rst_zf[12],
+                    "per_step_throughput": rst_zf[13],
                 }
 
                 if imitation_info:
@@ -475,6 +476,7 @@ def run_simulation():
                     "ldpc_ber_list": rst_zf[10],
                     "sinr_dB": rst_zf[11],
                     "snr_dB": rst_zf[12],
+                    "per_step_throughput": rst_zf[13],
                 }
 
                 if imitation_info:

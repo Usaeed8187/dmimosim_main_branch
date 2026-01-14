@@ -666,6 +666,7 @@ def sim_mu_mimo_all(
     snr_dB_list = []
     PMI_feedback_bits = []
     nodewise_bler_list = []
+    per_step_throughput = []
 
     if rl_selector is None and cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
         rl_selector = RLBeamSelector()
@@ -696,6 +697,7 @@ def sim_mu_mimo_all(
             goodput += bits[0]
             throughput += bits[1]
             bitrate += bits[2]
+            per_step_throughput.append(bits[1] / (slot_time * 1e6) * overhead)
             
             nodewise_goodput.append(additional_KPIs[0])
             nodewise_throughput.append(additional_KPIs[1])
@@ -734,6 +736,8 @@ def sim_mu_mimo_all(
         checkpoint_dir = Path("results") / "deqn_checkpoints" / Path(cfg.ns3_folder.rstrip("/")).name
         rl_selector.save_all(checkpoint_dir)
 
+    per_step_throughput = np.array(per_step_throughput)
+
     return [
         uncoded_ber / total_cycles,
         ldpc_ber / total_cycles,
@@ -748,4 +752,5 @@ def sim_mu_mimo_all(
         ldpc_ber_list,
         sinr_dB,
         snr_dB,
+        per_step_throughput
     ]
