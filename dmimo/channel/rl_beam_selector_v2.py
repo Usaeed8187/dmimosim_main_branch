@@ -165,6 +165,7 @@ class RLBeamSelector:
         self.action_maps: List[List[Tuple[int, ...]]] = []
         self.prev_state: Optional[np.ndarray] = None
         self.prev_action: Optional[int] = None
+        self.prev_mcs_arr = None
         self.state_dim: Optional[int] = None
         self.reward_log: List[float] = []
         self.action_log: List[int] = []
@@ -233,7 +234,7 @@ class RLBeamSelector:
                 state_dim,
                 self.input_window_size,
                 self.output_window_size,
-                self.batch_size*10,
+                self.batch_size,
                 training_batch_size=self.batch_size,
                 training_start_threshold=self.batch_size,
                 n_layers=1,
@@ -390,13 +391,13 @@ class RLBeamSelector:
         worst_user_indices = list(np.argsort(user_scores)[:selected_user_count])
 
         # State uses indices of W1 beam sets (not raw beam IDs) plus each user's MCS.
-        selected_beam_sets = [user_beam_sets[idx] for idx in worst_user_indices]
-        selected_mcs = mcs_array[worst_user_indices] if len(mcs_array) > 0 else np.zeros(selected_user_count)
-        state = self._build_state(selected_beam_sets, selected_mcs)
+        # selected_beam_sets = [user_beam_sets[idx] for idx in worst_user_indices]
+        # selected_mcs = mcs_array[worst_user_indices] if len(mcs_array) > 0 else np.zeros(selected_user_count)
+        state = self._build_state(user_beam_sets, mcs_array)
 
         action_digit_count = selected_user_count * len(worst_tx_indices)
         self.max_actions = 4 ** action_digit_count
-        print(f"DEQN action space size: {self.max_actions}")
+        # print(f"DEQN action space size: {self.max_actions}")
         self._maybe_init_agent(state.shape[0])
 
         agent = self.agent
@@ -404,9 +405,14 @@ class RLBeamSelector:
 
         if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
             # reward = float(np.sum(user_scores))
-            data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
-            no_rl_throughput = data['throughput']
-            reward = throughput_debug - no_rl_throughput[0]
+            # data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
+            # no_rl_throughput = data['throughput']
+            target_throughput = 
+            reward = throughput_debug - target_throughput
+            # if self.prev_action == 0:
+            #     reward = 1
+            # else:
+            #     reward = 0
             
             agent.activate_target_net(state)
             agent.store_transition(self.prev_state, self.prev_action, reward, state)

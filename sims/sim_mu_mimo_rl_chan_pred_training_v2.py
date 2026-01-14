@@ -90,20 +90,20 @@ drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.str
 rx_ues_arr = [4]
 num_txue_sel = 2
 
-modulation_order = 4
+modulation_order = 2
 code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "deqn_plus_two_mode" # "None", "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", "ddpg"
+channel_prediction_setting = "deqn_plus_two_mode" # "None", "two_mode", "weiner_filter", "deqn_plus_two_mode"
 csi_prediction = True
-channel_prediction_method = "deqn_plus_two_mode" # None, "two_mode", "weiner_filter", "deqn", "deqn_plus_two_mode", ddpg
+channel_prediction_method = "deqn_plus_two_mode" # None, "two_mode", "weiner_filter", "deqn_plus_two_mode"
 csi_quantization_on = True
 imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
 worst_tx_count = 1
 worst_rx_count = 1
-batch_size = 15
+batch_size = 3
 
 def _build_imitation_info() -> Optional[str]:
     if imitation_method == "none" or imitation_drop_count <= 0:

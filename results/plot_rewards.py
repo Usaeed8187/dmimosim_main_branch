@@ -11,7 +11,7 @@ method = 'deqn'
 rx_UEs = 4
 tx_UEs = 2
 
-drops = np.arange(1,51)
+drops = np.arange(1,5)
 
 rewards = []
 for drop_idx in drops:
@@ -20,7 +20,7 @@ for drop_idx in drops:
 
 rewards = np.concatenate(rewards)
 
-window_len = 50
+window_len = 15
 kernel = np.ones(window_len, dtype=float) / float(window_len)
 rewards = np.convolve(np.asarray(rewards, dtype=float), kernel, mode="valid")
 
