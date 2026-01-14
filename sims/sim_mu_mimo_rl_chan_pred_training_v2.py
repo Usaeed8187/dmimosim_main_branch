@@ -262,13 +262,13 @@ def run_simulation():
     rc_config.history_len = 8
     
     total_slots = 99
-    start_slot = 32
+    start_slot_idx = 33
     csi_delay = 4
 
     cfg_tmp = SimConfig()
 
     time_steps_per_drop = math.ceil(
-                (total_slots - start_slot)
+                (total_slots - start_slot_idx)
                 / (cfg_tmp.num_slots_p1 + cfg_tmp.num_slots_p2)
             ) - 1
     total_steps = len(drop_list) * time_steps_per_drop
@@ -288,13 +288,13 @@ def run_simulation():
         start_time = time.time()
         # Simulation settings
         cfg = SimConfig()
-        cfg.rb_size = 12                    # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
-        cfg.total_slots = total_slots       # total number of slots in ns-3 channels
-        cfg.start_slot_idx = start_slot     # starting slots (must be greater than csi_delay + 5)
-        cfg.csi_delay = csi_delay           # feedback delay in number of subframe
+        cfg.rb_size = 12                        # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
+        cfg.total_slots = total_slots           # total number of slots in ns-3 channels
+        cfg.start_slot_idx = start_slot_idx     # starting slots (must be greater than csi_delay + 5)
+        cfg.csi_delay = csi_delay               # feedback delay in number of subframe
         cfg.perfect_csi = perfect_csi
-        cfg.rank_adapt = False              # enable/disable rank adaptation
-        cfg.link_adapt = link_adapt         # enable/disable link adaptation,. .
+        cfg.rank_adapt = False                  # enable/disable rank adaptation
+        cfg.link_adapt = link_adapt             # enable/disable link adaptation,. .
         cfg.csi_prediction = csi_prediction
         cfg.use_perfect_csi_history_for_prediction = False
         cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"

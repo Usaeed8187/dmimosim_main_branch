@@ -5,7 +5,7 @@ This script targets the single-agent TX-side RL strategy used by
 ``sims/sim_mu_mimo_testing_updates.py``. It loads DEQN rewards/actions saved as
 ``deqn_rewards_drop_<drop>_rx_UE_<rx>_tx_UE_<tx>_imitation_<method>_steps_<n>.npz``
 and ``deqn_actions_drop_<drop>_rx_UE_<rx>_tx_UE_<tx>_imitation_<method>_steps_<n>.npz``
-then plots per-drop average reward plus step-wise action selections.
+then plots per-step average reward plus step-wise action selections.
 
 Throughput is loaded from files named like:
 ``mu_mimo_results_<mcs>_rx_UE_<rx>_tx_UE_<tx>_prediction_<method>_pmi_quantization_<bool>_imitation_<method>_steps_<n>.npz``.
@@ -23,7 +23,7 @@ from typing import Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 46))
+DEFAULT_DROPS = list(range(1, 5))
 DEFAULT_MOBILITY = "higher_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
@@ -33,7 +33,7 @@ DEFAULT_CSI_PREDICTION = True
 DEFAULT_CHANNEL_PREDICTION_SETTING = "deqn_plus_two_mode"
 DEFAULT_IMITATION_METHOD = "none"
 DEFAULT_IMITATION_DROP_COUNT = 0
-DEFAULT_ROLLING_WINDOW_LEN = 5
+DEFAULT_ROLLING_WINDOW_LEN = 1
 
 REWARD_PATTERN = re.compile(
     r"deqn_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"
@@ -301,17 +301,17 @@ def _load_throughput(path: Path) -> float:
     return float(np.nanmean(throughput))
 
 def _aggregate_rewards(files: Iterable[RewardFile]) -> Tuple[List[Tuple[int, float]], List[int]]:
-    by_drop: dict[int, List[float]] = {}
+    by_step: dict[int, List[float]] = {}
 
     for file_info in files:
         rewards = _load_rewards(file_info.path)
-        drop_rewards = by_drop.setdefault(file_info.drop_id, [])
-        for reward in rewards:
-            drop_rewards.append(float(reward))
-    series = [(drop, float(np.mean(values))) for drop, values in by_drop.items()]
+        for step_idx, reward in enumerate(rewards, start=1):
+            step_rewards = by_step.setdefault(step_idx, [])
+            step_rewards.append(float(reward))
+    series = [(step, float(np.mean(values))) for step, values in by_step.items()]
     series.sort(key=lambda item: item[0])
-    drop_ids = [drop for drop, _ in series]
-    return series, drop_ids
+    step_ids = [step for step, _ in series]
+    return series, step_ids
 
 def _aggregate_actions(files: Iterable[ActionFile]) -> Tuple[List[Tuple[int, int]], int]:
     actions_series: List[Tuple[int, int]] = []
@@ -339,19 +339,19 @@ def _apply_rolling_mean(series: List[Tuple[int, float]], window: int) -> List[Tu
     new_drops = drops[window - 1 :]
     return list(zip(new_drops, smoothed.tolist()))
 
-def plot_rewards(series: List[Tuple[int, float]], drop_ids: List[int], output: Path) -> None:
+def plot_rewards(series: List[Tuple[int, float]], step_ids: List[int], output: Path) -> None:
     if not series:
         raise RuntimeError("No reward data found to plot.")
 
-    drops, values = zip(*series)
+    steps, values = zip(*series)
 
     plt.figure(figsize=(10, 6))
-    plt.plot(drops, values, marker="o")
-    plt.xlabel("Drop")
+    plt.plot(steps, values, marker="o")
+    plt.xlabel("Step")
     plt.ylabel("Average reward")
-    plt.title("DEQN average reward across drops")
+    plt.title("DEQN average reward across steps")
     plt.grid(True, linestyle="--", alpha=0.6)
-    plt.xticks(drop_ids)
+    plt.xticks(step_ids)
     plt.tight_layout()
 
     output.parent.mkdir(parents=True, exist_ok=True)
