@@ -233,7 +233,7 @@ class RLBeamSelector:
                 state_dim,
                 self.input_window_size,
                 self.output_window_size,
-                self.batch_size,
+                self.batch_size*10,
                 training_batch_size=self.batch_size,
                 training_start_threshold=self.batch_size,
                 n_layers=1,
@@ -306,7 +306,6 @@ class RLBeamSelector:
         pmi_feedback_bits,
         mcs_indices: Optional[np.ndarray] = None,
         node_wise_acks: Optional[np.ndarray] = None,
-        user_count: Optional[int] = None,
         throughput_debug: Optional[float] = None,
         drop_idx_debug: Optional[int] = None,
     ) -> Optional[List[List[Optional[np.ndarray]]]]:
@@ -319,8 +318,7 @@ class RLBeamSelector:
         
         # Decide how many users to target while still keeping the input window bounded.
         total_users = len(w1_structures)
-        selected_user_count = user_count if user_count is not None else 2
-        selected_user_count = max(1, min(int(selected_user_count), total_users))
+        selected_user_count = self.worst_rx_count
 
         mcs_indices = mcs_indices + 1
         mcs_array = np.asarray(mcs_indices, dtype=np.float32).flatten() if mcs_indices is not None else None
@@ -398,7 +396,7 @@ class RLBeamSelector:
 
         action_digit_count = selected_user_count * len(worst_tx_indices)
         self.max_actions = 4 ** action_digit_count
-        # print(f"DEQN action space size: {self.max_actions}")
+        print(f"DEQN action space size: {self.max_actions}")
         self._maybe_init_agent(state.shape[0])
 
         agent = self.agent
@@ -406,7 +404,7 @@ class RLBeamSelector:
 
         if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
             # reward = float(np.sum(user_scores))
-            data = np.load('results/channels_multiple_mu_mimo/channels_higher_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
+            data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
             no_rl_throughput = data['throughput']
             reward = throughput_debug - no_rl_throughput[0]
             

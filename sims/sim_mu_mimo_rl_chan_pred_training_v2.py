@@ -102,8 +102,8 @@ csi_quantization_on = True
 imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
 worst_tx_count = 1
-worst_rx_count = 2
-batch_size = 3
+worst_rx_count = 1
+batch_size = 15
 
 def _build_imitation_info() -> Optional[str]:
     if imitation_method == "none" or imitation_drop_count <= 0:

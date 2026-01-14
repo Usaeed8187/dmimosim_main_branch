@@ -23,7 +23,7 @@ from typing import Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 8))
+DEFAULT_DROPS = list(range(1, 50))
 DEFAULT_MOBILITY = "high_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
@@ -300,15 +300,15 @@ def _load_throughput(path: Path) -> float:
     return float(np.nanmean(throughput))
 
 def _aggregate_rewards(files: Iterable[RewardFile]) -> Tuple[List[Tuple[int, float]], List[int]]:
-    by_step: dict[int, List[float]] = {}
+    ordered_files = sorted(files, key=lambda info: (info.drop_id, info.path.name))
+    series: List[Tuple[int, float]] = []
+    step_idx = 1
 
-    for file_info in files:
+    for file_info in ordered_files:
         rewards = _load_rewards(file_info.path)
-        for step_idx, reward in enumerate(rewards, start=1):
-            step_rewards = by_step.setdefault(step_idx, [])
-            step_rewards.append(float(reward))
-    series = [(step, float(np.mean(values))) for step, values in by_step.items()]
-    series.sort(key=lambda item: item[0])
+        for reward in rewards:
+            series.append((step_idx, float(reward)))
+            step_idx += 1
     step_ids = [step for step, _ in series]
     return series, step_ids
 
