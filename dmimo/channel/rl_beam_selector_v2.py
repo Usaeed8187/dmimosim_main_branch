@@ -308,8 +308,8 @@ class RLBeamSelector:
         mcs_indices: Optional[np.ndarray] = None,
         node_wise_acks: Optional[np.ndarray] = None,
         throughput_debug: Optional[float] = None,
-        drop_idx_debug: Optional[int] = None,
-        last_target_throughput: Optional[float] = None,
+        num_transitions: Optional[int] = None,
+        no_rl_throughput: Optional[float] = None,
     ) -> Optional[List[List[Optional[np.ndarray]]]]:
         """Update the agent with the newest feedback and return predicted beams per Rx–Tx pair."""
 
@@ -410,9 +410,7 @@ class RLBeamSelector:
             
             # reward = float(np.mean(throughput_debug - self.prev_mcs_arr))
             
-            data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(drop_idx_debug, total_users-2, num_tx-1))
-            no_rl_throughput = data['per_step_throughput']
-            reward = throughput_debug - no_rl_throughput[self.transition_idx % 15]
+            reward = throughput_debug - no_rl_throughput
             
             # if self.prev_action == 0:
             #     reward = 1

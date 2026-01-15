@@ -505,8 +505,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                         mcs_indices=last_mcs_indices,
                         node_wise_acks=last_node_wise_acks,
                         throughput_debug=last_throughput,
-                        drop_idx_debug=cfg.drop_idx,
-                        last_target_throughput=last_target_throughput
+                        num_transitions=cfg.num_transitions,
+                        no_rl_throughput=cfg.curr_no_rl_throughput
                     )
 
             if w1_override is not None:
@@ -681,6 +681,15 @@ def sim_mu_mimo_all(
         rl_selector.set_evaluation_mode(bool(getattr(cfg, "rl_evaluation_only", False)))
     cfg.rl_selector = rl_selector
 
+
+    if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
+        data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(cfg.drop_idx, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel))
+        no_rl_throughput = data['per_step_throughput']
+        cfg.num_transitions = len(no_rl_throughput) - 1
+        assert(len(no_rl_throughput) == len(np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2))-1)
+
+    cfg.curr_no_rl_throughput = no_rl_throughput[0]
+
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
         # print("first_slot_idx: ", first_slot_idx)
@@ -693,7 +702,11 @@ def sim_mu_mimo_all(
         # print("Cycle time: ", end_time - start_time, " seconds\n")
         
         if first_slot_idx > cfg.start_slot_idx:
+
             total_cycles += 1
+
+            cfg.curr_no_rl_throughput = no_rl_throughput[total_cycles]
+            
             uncoded_ber += bers[0]
             ldpc_ber += bers[1]
             uncoded_ber_list.append(bers[0])
