@@ -663,7 +663,6 @@ def sim_mu_mimo_all(
     heuristic_throughput_sum = 0.0
 
     heuristic_tx_ue_mask = None
-    _ = None
     if len(tx_selection_masks) > 0:
         heuristic_cfg = cfg.clone()
         heuristic_ns3cfg = ns3cfg.clone()
