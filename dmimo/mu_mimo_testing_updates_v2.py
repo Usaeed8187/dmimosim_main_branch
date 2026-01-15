@@ -583,7 +583,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
     # print("Uncoded BER: ", uncoded_ber_phase_2)
     # print("Coded BER: ", coded_ber)
-    # print("BLER: ", coded_bler)
+    print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
     node_wise_acks = 1 - np.ceil(node_wise_bler)
