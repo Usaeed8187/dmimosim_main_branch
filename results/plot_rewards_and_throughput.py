@@ -21,10 +21,10 @@ for drop_idx in drops:
     rewards.append(rl_rewards_data["rewards"])
 
     rl_tput_data = np.load('{}channels_{}_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_deqn_plus_two_mode_pmi_quantization_True_imitation_none_steps_0.npz'.format(base_dir, mobility, drop_idx, rx_UEs,tx_UEs))
-    rl_throughput.append(rl_tput_data['per_step_throughput'])
+    rl_throughput.append(rl_tput_data['per_step_throughput'][1:])
 
     sl_tput_data = np.load('{}channels_{}_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(base_dir, mobility, drop_idx, rx_UEs,tx_UEs))
-    sl_throughput.append(sl_tput_data['per_step_throughput'])
+    sl_throughput.append(sl_tput_data['per_step_throughput'][1:])
 
     hold = 1
 

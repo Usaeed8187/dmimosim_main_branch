@@ -685,8 +685,8 @@ def sim_mu_mimo_all(
     if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
         data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(cfg.drop_idx, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel))
         no_rl_throughput = data['per_step_throughput']
-        cfg.num_transitions = len(no_rl_throughput) - 1
         assert(len(no_rl_throughput) == len(np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2))-1)
+        cfg.num_transitions = len(no_rl_throughput) - 1
 
     cfg.curr_no_rl_throughput = no_rl_throughput[0]
 
@@ -703,9 +703,9 @@ def sim_mu_mimo_all(
         
         if first_slot_idx > cfg.start_slot_idx:
 
-            total_cycles += 1
-
             cfg.curr_no_rl_throughput = no_rl_throughput[total_cycles]
+
+            total_cycles += 1
             
             uncoded_ber += bers[0]
             ldpc_ber += bers[1]
