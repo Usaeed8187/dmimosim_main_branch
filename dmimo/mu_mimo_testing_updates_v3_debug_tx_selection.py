@@ -337,24 +337,20 @@ def sim_mu_mimo(
         cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
         cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
 
-    tmp_num_rxue_sel = ns3cfg.num_rxue_sel
-    tmp_num_txue_sel = ns3cfg.num_txue_sel
     tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
+    fixed_rx_ue_mask = np.zeros(ns3cfg.num_rxue)
+    fixed_rx_ue_mask[:ns3cfg.num_rxue_sel] = 1
+    
     if use_heuristic_selection:
         selected_tx_ue_mask = tx_ue_mask
-        selected_rx_ue_mask = rx_ue_mask
+        selected_rx_ue_mask = fixed_rx_ue_mask
     elif tx_ue_mask_override is not None or rx_ue_mask_override is not None:
         selected_tx_ue_mask = tx_ue_mask_override if tx_ue_mask_override is not None else tx_ue_mask
-        selected_rx_ue_mask = rx_ue_mask_override if rx_ue_mask_override is not None else rx_ue_mask
-    elif not cfg.scheduling:
-        selected_rx_ue_mask = np.zeros(ns3cfg.num_rxue)
-        selected_tx_ue_mask = np.zeros(ns3cfg.num_txue)
-        selected_rx_ue_mask[:tmp_num_rxue_sel] = 1
-        selected_tx_ue_mask[:tmp_num_txue_sel] = 1
+        selected_rx_ue_mask = fixed_rx_ue_mask
     else:
         raise Exception("Scheduling not supported in this version.")
 
-    ns3cfg.update_ue_selection(selected_tx_ue_mask, selected_rx_ue_mask)
+    ns3cfg.update_ue_selection(selected_tx_ue_mask, fixed_rx_ue_mask)
     print("\n ns3cfg.txue_mask: ", ns3cfg.txue_mask)
     print("ns3cfg.rxue_mask: ", ns3cfg.rxue_mask)
 
@@ -557,7 +553,6 @@ def sim_mu_mimo(
         tx_squad = TxSquad(cfg, ns3cfg, mu_mimo.num_bits_per_frame)
         txs_chans = dMIMOChannels(ns3cfg, "TxSquad", add_noise=True)
         info_bits_new, txs_ber, txs_bler = tx_squad(txs_chans, info_bits)
-        # print("BER: {}  BLER: {}".format(txs_ber, txs_bler))
         assert txs_ber <= 1e-3, "TxSquad transmission BER too high"
 
     # Saving Rx SNRs
@@ -623,7 +618,7 @@ def sim_mu_mimo(
     overhead = cfg.num_slots_p2/(cfg.num_slots_p1 + cfg.num_slots_p2)
     cfg.last_throughput = userbits / (cfg.slot_duration * 1e6) * overhead  # Mbps
     cfg.last_target_throughput = mu_mimo.num_bits_per_frame / (cfg.slot_duration * 1e6) * overhead  # Mbps
-    # print("cfg.last_throughput: ", cfg.last_throughput)
+    print("throughput: ", cfg.last_throughput)
     # print("cfg.last_target_throughput: ", cfg.last_target_throughput)
 
     node_wise_goodbits_phase_2 = (1.0 - node_wise_ber) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
@@ -710,7 +705,7 @@ def sim_mu_mimo_all(
         cfg.first_slot_idx = first_slot_idx
 
         start_time = time.time()
-        bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config)
+        bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config, use_heuristic_selection=True)
         end_time = time.time()
         # print("Cycle time: ", end_time - start_time, " seconds\n")
         

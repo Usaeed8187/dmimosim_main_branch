@@ -90,8 +90,8 @@ rx_ues_arr = [4]
 num_txue_sel = 2
 
 modulation_order = 2
-code_rate = 1 / 2
-link_adapt = True
+code_rate = 0.5
+link_adapt = False
 
 perfect_csi = True
 channel_prediction_setting = "None" # "None", "two_mode", "weiner_filter", "deqn_plus_two_mode"
