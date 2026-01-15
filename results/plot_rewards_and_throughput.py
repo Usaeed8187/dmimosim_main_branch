@@ -11,7 +11,7 @@ method = 'deqn'
 rx_UEs = 4
 tx_UEs = 2
 
-drops = np.arange(1,90)
+drops = np.arange(1,9)
 
 rewards = []
 rl_throughput = []
