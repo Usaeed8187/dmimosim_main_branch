@@ -3,6 +3,7 @@ import tensorflow as tf
 from tensorflow.python.keras import Model
 import matplotlib.pyplot as plt
 import time
+from itertools import combinations
 from typing import Optional
 from pathlib import Path
 
@@ -311,7 +312,18 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_sinr_db, return_mcs_inde
     return rank_feedback_report, mcs_feedback_report
 
 
-def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
+def _selected_ue_indices(ue_mask):
+    return np.where(ue_mask > 0)[0] + 1
+
+
+def sim_mu_mimo(
+    cfg: SimConfig,
+    ns3cfg: Ns3Config,
+    rc_config: RCConfig,
+    tx_ue_mask_override=None,
+    rx_ue_mask_override=None,
+    use_heuristic_selection=False,
+):
     """
     Simulation of MU-MIMO scenarios using different settings
 
@@ -325,33 +337,48 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
         cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
 
-    # Reset UE selection. Start with all TX and RX UEs selected.
     tmp_num_rxue_sel = ns3cfg.num_rxue_sel
     tmp_num_txue_sel = ns3cfg.num_txue_sel
-    ns3cfg.reset_ue_selection()
     tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
-    ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+    if use_heuristic_selection:
+        selected_tx_ue_mask = tx_ue_mask
+        selected_rx_ue_mask = rx_ue_mask
+    elif tx_ue_mask_override is not None or rx_ue_mask_override is not None:
+        selected_tx_ue_mask = tx_ue_mask_override if tx_ue_mask_override is not None else tx_ue_mask
+        selected_rx_ue_mask = rx_ue_mask_override if rx_ue_mask_override is not None else rx_ue_mask
+    elif not cfg.scheduling:
+        selected_rx_ue_mask = np.zeros(ns3cfg.num_rxue)
+        selected_tx_ue_mask = np.zeros(ns3cfg.num_txue)
+        selected_rx_ue_mask[:tmp_num_rxue_sel] = 1
+        selected_tx_ue_mask[:tmp_num_txue_sel] = 1
+    else:
+        raise Exception("Scheduling not supported in this version.")
+
+    ns3cfg.update_ue_selection(selected_tx_ue_mask, selected_rx_ue_mask)
+    print("\n ns3cfg.txue_mask: ", ns3cfg.txue_mask)
+    print("ns3cfg.rxue_mask: ", ns3cfg.rxue_mask)
+
+    # CFO and STO settings
+    if cfg.gen_sync_errors:
+        cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
+        cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
 
     if not cfg.scheduling:
-        rx_ue_mask = np.zeros(10)
-        tx_ue_mask = np.zeros(10)
-        rx_ue_mask[:tmp_num_rxue_sel] = 1
-        tx_ue_mask[:tmp_num_txue_sel] = 1
-        ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+        ue_indices = [[0, 1], [2, 3]]  # Assuming gNB was scheduled
+        scheduled_rx_UEs = _selected_ue_indices(selected_rx_ue_mask)
 
-        ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
-        scheduled_rx_UEs = np.arange(1, tmp_num_rxue_sel+1)
         for ue_idx in scheduled_rx_UEs:
             start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
             end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
             ue_indices.append(list(np.arange(start, end)))
         cfg.scheduled_rx_ue_indices = np.array(ue_indices)
-        cfg.num_scheduled_ues = cfg.scheduled_rx_ue_indices.shape[0]-2
+        cfg.num_scheduled_ues = cfg.scheduled_rx_ue_indices.shape[0] - 2
         if not cfg.rank_adapt:
-            cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
+            cfg.num_tx_streams = (cfg.num_scheduled_ues + 2 ) * cfg.ue_ranks[0]
 
-        ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
-        scheduled_tx_UEs = np.arange(1, tmp_num_txue_sel+1)
+        ue_indices = [[0, 1], [2, 3]]  # Assuming gNB was scheduled
+        scheduled_tx_UEs = _selected_ue_indices(selected_tx_ue_mask)
+
         for ue_idx in scheduled_tx_UEs:
             start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
             end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
@@ -468,10 +495,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                 batch_size=cfg.num_slots_p2)
     
     # Pick the selected UE's channels
-    h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)
-    h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_tx_ue_indices, (-1,)), axis=4)
     h_freq_csi_unquantized = h_freq_csi
-        
+
     PMI_feedback_bits = None
     mcs_indices = None
 
@@ -590,41 +615,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     cfg.last_mcs_indices = mcs_indices
     cfg.last_node_wise_acks = node_wise_acks
 
-    # RxSquad transmission (P3)
-    if cfg.enable_rxsquad is True:
-        rxcfg = cfg.clone()
-        rxcfg.csi_delay = 4
-        rxcfg.decoder = "lmmse"
-        rxcfg.perfect_csi = False
-        rxcfg.first_slot_idx = cfg.first_slot_idx + cfg.num_slots_p2
-        num_ue_bits_per_frame = mu_mimo.num_bits_per_frame * (cfg.num_scheduled_ues / (cfg.num_scheduled_ues + 2))
-
-        rx_ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
-        rx_ns3cfg.update_ue_selection(None, rx_ue_mask)
-        rxs_chans = dMIMOChannels(rx_ns3cfg, "RxSquad", add_noise=False)
-        rx_squad = RxSquad(rxcfg, ns3cfg, num_ue_bits_per_frame, rxs_chans)
-        print("Each RxSquad UE transmitting {} streams, each with modulation order {}".format(rx_squad.num_streams_per_tx, rx_squad.num_bits_per_symbol_per_UE))
-
-        forwarding_bits = dec_bits[:,:,-(cfg.num_scheduled_ues * cfg.ue_ranks[0]):, : , :]
-        dec_bits_phase_3, \
-        node_wise_uncoded_ber_phase_3, \
-        uncoded_ber_phase_3, \
-        node_wise_coded_ber_phase_3, \
-        coded_ber_phase_3, \
-        node_wise_coded_bler_phase_3, \
-        coded_bler_phase_3 = rx_squad(rxs_chans, forwarding_bits)
-        # print("PHASE 3 STATS\nUNCODED BER: {}\nCODED BER: {}\nBLER: {}".format(uncoded_ber_phase_3 , coded_ber_phase_3, coded_bler_phase_3))
-        # if uncoded_ber_phase_3 >= 1e-2 or coded_ber_phase_3 >= 1e-2:
-        #     print("Warning: High RxSquad transmission BER")
-        
-        dec_bits_phase_3 = tf.reshape(dec_bits_phase_3, [dec_bits_phase_3.shape[0], forwarding_bits.shape[0], forwarding_bits.shape[1], forwarding_bits.shape[3], forwarding_bits.shape[4]])
-        dec_bits_phase_3 = tf.transpose(dec_bits_phase_3, perm=[1, 2, 0, 3, 4])
-        gNB_bits_phase_2 = dec_bits[:,:,:-(cfg.num_scheduled_ues * cfg.ue_ranks[0]), : , :]
-        end_to_end_dec_bits = tf.concat([gNB_bits_phase_2, dec_bits_phase_3], axis=2)
-
-        coded_ber = compute_ber(info_bits, end_to_end_dec_bits).numpy()
-        coded_bler = compute_bler(info_bits, end_to_end_dec_bits).numpy()
-
     # Goodput and throughput estimation
     goodbits = (1.0 - coded_ber) * mu_mimo.num_bits_per_frame
     userbits = (1.0 - coded_bler) * mu_mimo.num_bits_per_frame
@@ -660,6 +650,30 @@ def sim_mu_mimo_all(
     overhead = cfg.num_slots_p2/(cfg.num_slots_p1 + cfg.num_slots_p2)
 
     total_cycles = 0
+    base_num_txue_sel = ns3cfg.num_txue_sel
+    base_num_rxue_sel = ns3cfg.num_rxue_sel
+    tx_selection_masks = []
+    if base_num_txue_sel > 0:
+        for selection in combinations(range(ns3cfg.num_txue), base_num_txue_sel):
+            selection_mask = np.zeros(ns3cfg.num_txue)
+            selection_mask[list(selection)] = 1
+            tx_selection_masks.append(selection_mask)
+    tx_selection_masks = np.array(tx_selection_masks)
+    tx_selection_throughput_sum = np.zeros(len(tx_selection_masks))
+    heuristic_throughput_sum = 0.0
+
+    heuristic_tx_ue_mask = None
+    _ = None
+    if len(tx_selection_masks) > 0:
+        heuristic_cfg = cfg.clone()
+        heuristic_ns3cfg = ns3cfg.clone()
+        heuristic_ns3cfg.reset_ue_selection()
+        heuristic_ns3cfg.num_txue_sel = base_num_txue_sel
+        heuristic_ns3cfg.num_rxue_sel = base_num_rxue_sel
+        heuristic_tx_ue_mask, _ = update_node_selection(heuristic_cfg, heuristic_ns3cfg)
+    fixed_rx_ue_mask = np.zeros(ns3cfg.num_rxue)
+    fixed_rx_ue_mask[:ns3cfg.num_rxue_sel] = 1
+
     uncoded_ber, ldpc_ber, goodput, throughput, bitrate = 0, 0, 0, 0, 0
     nodewise_goodput = []
     nodewise_throughput = []
@@ -726,6 +740,22 @@ def sim_mu_mimo_all(
             snr_dB_list.append(additional_KPIs[5])
             PMI_feedback_bits.append(additional_KPIs[6])
             nodewise_bler_list.append(additional_KPIs[7])
+
+            if len(tx_selection_masks) > 0:
+                for idx, selection_mask in enumerate(tx_selection_masks):
+                    sweep_cfg = cfg.clone()
+                    sweep_ns3cfg = ns3cfg.clone()
+                    sweep_cfg.first_slot_idx = first_slot_idx
+                    _, sweep_bits, _ = sim_mu_mimo(
+                        sweep_cfg,
+                        sweep_ns3cfg,
+                        rc_config,
+                        tx_ue_mask_override=selection_mask,
+                        rx_ue_mask_override=fixed_rx_ue_mask,
+                    )
+                    tx_selection_throughput_sum[idx] += sweep_bits[1]
+                    if heuristic_tx_ue_mask is not None and np.array_equal(selection_mask, heuristic_tx_ue_mask):
+                        heuristic_throughput_sum += sweep_bits[1]
         
         hold = 1
 
@@ -757,6 +787,13 @@ def sim_mu_mimo_all(
 
     per_step_throughput = np.array(per_step_throughput)
 
+    if total_cycles > 0:
+        tx_selection_throughput = tx_selection_throughput_sum / (total_cycles * slot_time * 1e6) * overhead
+        heuristic_throughput = heuristic_throughput_sum / (total_cycles * slot_time * 1e6) * overhead
+    else:
+        tx_selection_throughput = None
+        heuristic_throughput = None
+
     return [
         uncoded_ber / total_cycles,
         ldpc_ber / total_cycles,
@@ -771,5 +808,8 @@ def sim_mu_mimo_all(
         ldpc_ber_list,
         sinr_dB,
         snr_dB,
-        per_step_throughput
+        per_step_throughput,
+        tx_selection_masks,
+        tx_selection_throughput,
+        heuristic_throughput
     ]
