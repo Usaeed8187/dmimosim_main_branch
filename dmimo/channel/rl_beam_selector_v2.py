@@ -281,6 +281,11 @@ class RLBeamSelector:
         if not state_parts:
             return np.array([], dtype=np.float32)
         return np.concatenate(state_parts)
+    
+    # def _build_state(self, mcs_values: Optional[np.ndarray]) -> np.ndarray:
+    #     if mcs_values is None:
+    #         return np.array([], dtype=np.float32)
+    #     return np.asarray(mcs_values, dtype=np.float32).flatten()
 
     def _decode_action_vector(self, action_idx: int, digit_count: int) -> List[int]:
         digits: List[int] = []
@@ -395,6 +400,9 @@ class RLBeamSelector:
         # selected_beam_sets = [user_beam_sets[idx] for idx in worst_user_indices]
         # selected_mcs = mcs_array[worst_user_indices] if len(mcs_array) > 0 else np.zeros(selected_user_count)
         state = self._build_state(user_beam_sets, mcs_array)
+
+        # # State uses only the MCS values.
+        # state = self._build_state(mcs_array)
 
         action_digit_count = selected_user_count * len(worst_tx_indices)
         self.max_actions = 4 ** action_digit_count

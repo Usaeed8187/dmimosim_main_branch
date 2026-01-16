@@ -36,6 +36,69 @@ from dmimo.utils import add_frequency_offset, add_timing_offset, compute_UE_wise
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
 
+def _scale_csi_by_snr(h_freq_csi, snr_dB_arr):
+    h_scaled = tf.convert_to_tensor(h_freq_csi)
+    if h_scaled.shape.rank is not None and h_scaled.shape.rank > 4:
+        squeeze_axes = [idx for idx, dim in enumerate(h_scaled.shape) if dim == 1]
+        if squeeze_axes:
+            h_scaled = tf.squeeze(h_scaled, axis=squeeze_axes)
+    snr_lin = tf.cast(10.0 ** (tf.convert_to_tensor(snr_dB_arr) / 10.0), h_scaled.dtype)
+    snr_lin = tf.reshape(snr_lin, [-1, 1, 1, 1])
+    return h_scaled * snr_lin
+
+
+def _proxy_mutual_information(h_scaled, tx_ant_indices):
+    h_sel = tf.gather(h_scaled, tx_ant_indices, axis=1)
+    h_sel = tf.transpose(h_sel, [2, 3, 0, 1])
+    gram = tf.matmul(h_sel, h_sel, adjoint_b=True)
+    eye = tf.eye(gram.shape[-1], batch_shape=gram.shape[:-2], dtype=gram.dtype)
+    mi = tf.linalg.logdet(eye + gram)
+    mi = tf.math.real(mi) / tf.math.log(tf.cast(2.0, mi.dtype))
+    return tf.reduce_mean(mi).numpy()
+
+
+def compute_tx_selection_proxy_mi(
+    h_freq_csi,
+    snr_dB_arr,
+    num_txue,
+    num_txue_sel,
+    gnb_tx_ant=4,
+    tx_ue_ant=2,
+):
+    if num_txue_sel <= 0:
+        return np.empty((0, num_txue)), np.empty((0,)), None
+
+    h_scaled = _scale_csi_by_snr(h_freq_csi, snr_dB_arr)
+    total_tx_ant = int(h_scaled.shape[1])
+    max_txue = max((total_tx_ant - gnb_tx_ant) // tx_ue_ant, 0)
+    usable_txue = min(num_txue, max_txue)
+    if usable_txue <= 0 or num_txue_sel > usable_txue:
+        return np.empty((0, num_txue)), np.empty((0,)), None
+
+    gnb_indices = list(range(gnb_tx_ant))
+    tx_ue_indices = [
+        list(range(gnb_tx_ant + ue_idx * tx_ue_ant, gnb_tx_ant + (ue_idx + 1) * tx_ue_ant))
+        for ue_idx in range(usable_txue)
+    ]
+
+    selection_masks = []
+    selection_mi = []
+    for selection in combinations(range(usable_txue), num_txue_sel):
+        selection_mask = np.zeros(num_txue)
+        selection_mask[list(selection)] = 1
+        selection_masks.append(selection_mask)
+
+        tx_ant_indices = gnb_indices[:]
+        for ue_idx in selection:
+            tx_ant_indices.extend(tx_ue_indices[ue_idx])
+        selection_mi.append(_proxy_mutual_information(h_scaled, tx_ant_indices))
+
+    selection_masks = np.array(selection_masks)
+    selection_mi = np.array(selection_mi)
+    best_mask = selection_masks[np.argmax(selection_mi)] if selection_mi.size > 0 else None
+    return selection_masks, selection_mi, best_mask
+
+
 class MU_MIMO(Model):
 
     def __init__(self, cfg: SimConfig, rg_csi: ResourceGrid, **kwargs):
@@ -562,6 +625,17 @@ def sim_mu_mimo(
     rx_snr_lin = np.mean(rx_snr_lin, axis=-1)
     snr_dB_arr = 10*np.log10(rx_snr_lin)
 
+    tx_selection_proxy = None
+    if ns3cfg.num_txue_sel > 0:
+        tx_selection_proxy = compute_tx_selection_proxy_mi(
+            h_freq_csi,
+            snr_dB_arr,
+            num_txue=ns3cfg.num_txue,
+            num_txue_sel=ns3cfg.num_txue_sel,
+            gnb_tx_ant=4,
+            tx_ue_ant=mu_mimo.num_ue_ant,
+        )
+
     # MU-MIMO transmission (P2)
     dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_db_arr = mu_mimo(dmimo_chans, h_freq_csi, info_bits, snr_dB_arr)
     
@@ -625,7 +699,8 @@ def sim_mu_mimo(
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, tx_selection_proxy]
+
 
 
 def sim_mu_mimo_all(
