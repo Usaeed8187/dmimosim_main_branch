@@ -574,8 +574,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         most_frequent_value = values[np.argmax(counts)]
         cfg.code_rate = most_frequent_value
 
-        # print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order)
-        # print("Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
+        print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order)
+        print("Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
 
     # Update error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
@@ -583,7 +583,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
     # print("Uncoded BER: ", uncoded_ber_phase_2)
     # print("Coded BER: ", coded_ber)
-    # print("BLER: ", coded_bler)
+    print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
     node_wise_acks = 1 - np.ceil(node_wise_bler)
@@ -633,7 +633,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     overhead = cfg.num_slots_p2/(cfg.num_slots_p1 + cfg.num_slots_p2)
     cfg.last_throughput = userbits / (cfg.slot_duration * 1e6) * overhead  # Mbps
     cfg.last_target_throughput = mu_mimo.num_bits_per_frame / (cfg.slot_duration * 1e6) * overhead  # Mbps
-    # print("cfg.last_throughput: ", cfg.last_throughput)
+    print("cfg.last_throughput: ", cfg.last_throughput)
     # print("cfg.last_target_throughput: ", cfg.last_target_throughput)
 
     node_wise_goodbits_phase_2 = (1.0 - node_wise_ber) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)

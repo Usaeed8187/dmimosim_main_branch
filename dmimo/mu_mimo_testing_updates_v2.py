@@ -688,7 +688,9 @@ def sim_mu_mimo_all(
         assert(len(no_rl_throughput) == len(np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2))-1)
         cfg.num_transitions = len(no_rl_throughput) - 1
 
-    cfg.curr_no_rl_throughput = no_rl_throughput[0]
+        cfg.curr_no_rl_throughput = no_rl_throughput[0]
+    else:
+        cfg.curr_no_rl_throughput = None
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
@@ -703,7 +705,8 @@ def sim_mu_mimo_all(
         
         if first_slot_idx > cfg.start_slot_idx:
 
-            cfg.curr_no_rl_throughput = no_rl_throughput[total_cycles]
+            if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
+                cfg.curr_no_rl_throughput = no_rl_throughput[total_cycles]
 
             total_cycles += 1
             

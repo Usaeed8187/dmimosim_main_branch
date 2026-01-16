@@ -86,7 +86,7 @@ arguments = sys.argv[1:]
 
 mobility = 'higher_mobility'
 drop_idx = '3'
-rx_ues_arr = [4]
+rx_ues_arr = [2]
 num_txue_sel = 2
 
 modulation_order = 2

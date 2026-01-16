@@ -74,7 +74,7 @@ class linkAdaptation(Layer):
                 refer_sinr_db = np.array([0.2, 4.3, 5.9, 8.1, 10.3, 14.1, 18.7, 21.0])
                 
                 mcs_candidates = np.array([np.array([2,0.3]), np.array([2,0.6]), 
-                                        np.array([4,0.37]), np.array([4,0.5]), np.array([4,0.6]), np.array([4,0.6]),
+                                        np.array([4,0.37]), np.array([4,0.5]), np.array([4,0.6]), np.array([4,0.66]),
                                         np.array([6,0.55]), np.array([6,0.75]), np.array([6,0.85])])
             else:
 
@@ -186,7 +186,7 @@ class linkAdaptation(Layer):
                 refer_sinr_db = np.array([0.2, 4.3, 5.9, 8.1, 10.3, 14.1, 18.7, 21.0])
                 
                 mcs_candidates = np.array([np.array([2,0.3]), np.array([2,0.6]), 
-                                        np.array([4,0.37]), np.array([4,0.5]), np.array([4,0.6]), np.array([4,0.6]),
+                                        np.array([4,0.37]), np.array([4,0.5]), np.array([4,0.6]), np.array([4,0.66]),
                                         np.array([6,0.55]), np.array([6,0.75]), np.array([6,0.85])])
             else:
 
@@ -276,7 +276,7 @@ class linkAdaptation(Layer):
             if sinr_eff_list[idx] > refer_sinr_db[idx]:
                 mcs_idx += 1
         
-        mcs_idx = np.max([mcs_idx-1, 0])
+        # mcs_idx = np.max([mcs_idx-1, 0])
 
         [curr_qam_order, curr_code_rate] = mcs_candidates[mcs_idx, :]
 
