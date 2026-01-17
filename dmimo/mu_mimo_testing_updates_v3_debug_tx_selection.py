@@ -96,8 +96,168 @@ def compute_tx_selection_proxy_mi(
     selection_masks = np.array(selection_masks)
     selection_mi = np.array(selection_mi)
     best_mask = selection_masks[np.argmax(selection_mi)] if selection_mi.size > 0 else None
+
     return selection_masks, selection_mi, best_mask
 
+def _build_csi_resource_grid(cfg, num_txs_ant):
+    csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
+    csi_guard_carriers_1 = (cfg.fft_size - csi_effective_subcarriers) // 2
+    csi_guard_carriers_2 = (cfg.fft_size - csi_effective_subcarriers) - csi_guard_carriers_1
+    return ResourceGrid(
+        num_ofdm_symbols=14,
+        fft_size=cfg.fft_size,
+        subcarrier_spacing=cfg.subcarrier_spacing,
+        num_tx=1,
+        num_streams_per_tx=num_txs_ant,
+        cyclic_prefix_length=cfg.cyclic_prefix_len,
+        num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
+        dc_null=False,
+        pilot_pattern="kronecker",
+        pilot_ofdm_symbol_indices=[2, 11],
+    )
+
+
+def _estimate_h_freq_csi(cfg, ns3cfg, rc_config, dmimo_chans, rg_csi):
+    freq_cov_mat = getattr(cfg, "freq_cov_mat", None)
+    lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
+    h_freq_csi_history = None
+
+    if cfg.perfect_csi is True:
+        h_freq_csi, rx_snr_db, _ = dmimo_chans.load_channel(
+            slot_idx=cfg.first_slot_idx,
+            batch_size=cfg.num_slots_p2,
+        )
+    elif cfg.csi_prediction is True:
+        rc_predictor = getattr(cfg, "rc_predictor", None)
+
+        if rc_predictor is None:
+            rc_predictor = standard_rc_pred_freq_mimo("MU_MIMO", cfg.num_tx_streams, rc_config, ns3cfg)
+            cfg.rc_predictor = rc_predictor
+        if cfg.first_slot_idx == cfg.start_slot_idx:
+            rc_predictor.reset_csi_history()
+
+        if cfg.use_perfect_csi_history_for_prediction:
+            h_freq_csi_history = rc_predictor.get_ideal_csi_history(
+                cfg.first_slot_idx,
+                cfg.csi_delay,
+                dmimo_chans,
+            )
+        else:
+            h_freq_csi_history = rc_predictor.get_csi_history(
+                cfg.first_slot_idx,
+                cfg.csi_delay,
+                rg_csi,
+                dmimo_chans,
+                cfo_vals=cfg.random_cfo_vals,
+                sto_vals=cfg.random_sto_vals,
+                estimated_channels_dir=cfg.estimated_channels_dir,
+                freq_cov_mat=freq_cov_mat,
+                lmmse_interpolator=lmmse_interpolator,
+            )
+
+        if "two_mode" in cfg.channel_prediction_method:
+            if "two_mode_tf" in cfg.channel_prediction_method:
+                h_freq_csi = predict_all_links_tf(h_freq_csi_history, rc_config, ns3cfg)
+            else:
+                h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg, max_workers=8)
+        elif cfg.channel_prediction_method == "old":
+            h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
+        elif "weiner_filter" in cfg.channel_prediction_method:
+            weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
+            h_freq_csi = np.asarray(
+                weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len - 1)
+            )
+        elif cfg.channel_prediction_method == "ddpg":
+            ddpg_actions = getattr(cfg, "ddpg_pred_channel", None)
+            h_freq_csi = h_freq_csi_history[-1, ...] if ddpg_actions is None else ddpg_actions
+        else:
+            raise ValueError("Channel prediction method not implemented here.")
+    else:
+        h_freq_csi, _ = lmmse_channel_estimation(
+            dmimo_chans,
+            rg_csi,
+            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+            cfo_vals=cfg.random_cfo_vals,
+            sto_vals=cfg.random_sto_vals,
+            freq_cov_mat=freq_cov_mat,
+            lmmse_interpolator=lmmse_interpolator,
+        )
+
+    _, rx_snr_db, _ = dmimo_chans.load_channel(
+        slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+        batch_size=cfg.num_slots_p2,
+    )
+    return h_freq_csi, rx_snr_db
+
+
+def _quantize_csi_feedback(cfg, h_freq_csi_unquantized, rg_csi, rx_snr_db):
+    
+    h_freq_csi_unquantized = tf.reduce_mean(h_freq_csi_unquantized, axis=0, keepdims=True)
+    
+    if cfg.PMI_feedback_architecture == "RVQ":
+        rvq = RandomVectorQuantizer(bits_per_codeword=15, vector_dim=h_freq_csi_unquantized.shape[4], seed=42)
+        h_freq_csi = rvq.quantize_feedback(
+            h_freq_csi_unquantized,
+            cfg,
+            rg_csi,
+            donald_hack=True,
+            quantization_debug=False,
+        )
+        return h_freq_csi, None
+    else:
+        type_II_PMI_quantizer = quantized_CSI_feedback(
+            method="5G",
+            codebook_selection_method=None,
+            num_tx_streams=cfg.num_tx_streams,
+            architecture=cfg.PMI_feedback_architecture,
+            rbs_per_subband=4,
+            snrdb=rx_snr_db,
+        )
+        h_freq_csi, PMI_feedback_bits = type_II_PMI_quantizer(
+            h_freq_csi_unquantized,
+            return_feedback_bits=True,
+        )
+
+    return h_freq_csi, PMI_feedback_bits
+
+
+def _compute_snr_db_arr(rx_snr_db, num_rxue_sel):
+    rx_snr_lin = 10.0 ** (rx_snr_db / 10.0)
+    rx_snr_lin = np.mean(rx_snr_lin, axis=(0, 1, 3))
+    rx_snr_lin = np.reshape(rx_snr_lin, [num_rxue_sel + 2, -1])
+    rx_snr_lin = np.mean(rx_snr_lin, axis=-1)
+    return 10 * np.log10(rx_snr_lin)
+
+
+def _select_tx_ue_mask_proxy_mi(cfg, ns3cfg, rc_config, fixed_rx_ue_mask):
+    if ns3cfg.num_txue_sel <= 0 or ns3cfg.num_txue <= 0:
+        return None
+
+    selection_cfg = cfg.clone()
+    selection_ns3cfg = ns3cfg.clone()
+    full_tx_mask = np.ones(selection_ns3cfg.num_txue)
+    selection_ns3cfg.update_ue_selection(full_tx_mask, fixed_rx_ue_mask)
+
+    dmimo_chans = dMIMOChannels(selection_ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+    num_txs_ant = 2 * selection_ns3cfg.num_txue_sel + selection_ns3cfg.num_bs_ant
+    rg_csi = _build_csi_resource_grid(selection_cfg, num_txs_ant)
+    h_freq_csi, rx_snr_db = _estimate_h_freq_csi(selection_cfg, selection_ns3cfg, rc_config, dmimo_chans, rg_csi)
+
+    h_freq_csi_unquantized = h_freq_csi
+    if selection_cfg.csi_quantization_on:
+        h_freq_csi, _ = _quantize_csi_feedback(selection_cfg, h_freq_csi_unquantized, rg_csi, rx_snr_db)
+        h_freq_csi = tf.squeeze(h_freq_csi, axis=(1, 3))
+
+    snr_dB_arr = _compute_snr_db_arr(rx_snr_db, selection_ns3cfg.num_rxue_sel)
+    _, _, best_mask = compute_tx_selection_proxy_mi(
+        h_freq_csi,
+        snr_dB_arr,
+        num_txue=selection_ns3cfg.num_txue,
+        num_txue_sel=ns3cfg.num_txue_sel,
+        gnb_tx_ant=selection_ns3cfg.num_bs_ant,
+        tx_ue_ant=selection_ns3cfg.num_ue_ant,
+    )
+    return best_mask
 
 class MU_MIMO(Model):
 
@@ -386,6 +546,7 @@ def sim_mu_mimo(
     tx_ue_mask_override=None,
     rx_ue_mask_override=None,
     use_heuristic_selection=False,
+    tx_ue_selection_method=None,
 ):
     """
     Simulation of MU-MIMO scenarios using different settings
@@ -400,31 +561,30 @@ def sim_mu_mimo(
         cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
         cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
 
-    tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
     fixed_rx_ue_mask = np.zeros(ns3cfg.num_rxue)
     fixed_rx_ue_mask[:ns3cfg.num_rxue_sel] = 1
-    
-    if use_heuristic_selection:
+
+    selection_method = tx_ue_selection_method or getattr(cfg, "tx_ue_selection_method", "rx_power")
+    tx_ue_mask = None
+
+    if selection_method == "proxy_mi":
+        selected_tx_ue_mask = _select_tx_ue_mask_proxy_mi(cfg, ns3cfg, rc_config, fixed_rx_ue_mask)
+        if selected_tx_ue_mask is None:
+            tx_ue_mask, _ = update_node_selection(cfg, ns3cfg)
+            selected_tx_ue_mask = tx_ue_mask
+    elif selection_method == "rx_power":
+        tx_ue_mask, _ = update_node_selection(cfg, ns3cfg)
         selected_tx_ue_mask = tx_ue_mask
-        selected_rx_ue_mask = fixed_rx_ue_mask
-    elif tx_ue_mask_override is not None or rx_ue_mask_override is not None:
-        selected_tx_ue_mask = tx_ue_mask_override if tx_ue_mask_override is not None else tx_ue_mask
-        selected_rx_ue_mask = fixed_rx_ue_mask
     else:
-        raise Exception("Scheduling not supported in this version.")
+        raise ValueError("Incorrect tx selection method")
 
     ns3cfg.update_ue_selection(selected_tx_ue_mask, fixed_rx_ue_mask)
     print("\n ns3cfg.txue_mask: ", ns3cfg.txue_mask)
     print("ns3cfg.rxue_mask: ", ns3cfg.rxue_mask)
 
-    # CFO and STO settings
-    if cfg.gen_sync_errors:
-        cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
-        cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
-
     if not cfg.scheduling:
         ue_indices = [[0, 1], [2, 3]]  # Assuming gNB was scheduled
-        scheduled_rx_UEs = _selected_ue_indices(selected_rx_ue_mask)
+        scheduled_rx_UEs = _selected_ue_indices(fixed_rx_ue_mask)
 
         for ue_idx in scheduled_rx_UEs:
             start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
@@ -434,15 +594,6 @@ def sim_mu_mimo(
         cfg.num_scheduled_ues = cfg.scheduled_rx_ue_indices.shape[0] - 2
         if not cfg.rank_adapt:
             cfg.num_tx_streams = (cfg.num_scheduled_ues + 2 ) * cfg.ue_ranks[0]
-
-        ue_indices = [[0, 1], [2, 3]]  # Assuming gNB was scheduled
-        scheduled_tx_UEs = _selected_ue_indices(selected_tx_ue_mask)
-
-        for ue_idx in scheduled_tx_UEs:
-            start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
-            end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
-            ue_indices.append(list(np.arange(start, end)))
-        cfg.scheduled_tx_ue_indices = np.array(ue_indices)
     else:
         raise Exception ("Scheduling not supported in this version.")
 
@@ -469,140 +620,25 @@ def sim_mu_mimo(
                           pilot_pattern="kronecker",
                           pilot_ofdm_symbol_indices=[2, 11])
     
-    # Cacheable LMMSE resources for the current drop
-    freq_cov_mat = getattr(cfg, "freq_cov_mat", None)
-    lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
-
-    # Channel CSI estimation using channels in previous frames/slots
-    h_freq_csi_history = None
-    if cfg.perfect_csi is True:
-        # Perfect channel estimation
-        h_freq_csi, rx_snr_db, rx_pwr_dbm = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
-                                                                     batch_size=cfg.num_slots_p2)
-    elif cfg.csi_prediction is True:
-        rc_predictor = getattr(cfg, "rc_predictor", None)
-
-        if rc_predictor is None:
-            rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, rc_config, ns3cfg)
-            cfg.rc_predictor = rc_predictor
-        if cfg.first_slot_idx == cfg.start_slot_idx:
-            rc_predictor.reset_csi_history()
-        # Get CSI history
-        # TODO: optimize channel estimation and optimization procedures (currently very slow)        
-
-        start_time = time.time()
-        if cfg.use_perfect_csi_history_for_prediction:
-            h_freq_csi_history = rc_predictor.get_ideal_csi_history(cfg.first_slot_idx, cfg.csi_delay,
-                                                          dmimo_chans)
-        else:
-        
-            h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
-                                                            rg_csi, dmimo_chans, 
-                                                            cfo_vals=cfg.random_cfo_vals,
-                                                            sto_vals=cfg.random_sto_vals,
-                                                            estimated_channels_dir=cfg.estimated_channels_dir,
-                                                            freq_cov_mat=freq_cov_mat,
-                                                            lmmse_interpolator=lmmse_interpolator)
-                
-        end_time = time.time()
-        # print("Total time for channel history gathering: ", end_time - start_time)
-        
-        if "two_mode" in cfg.channel_prediction_method:
-
-            if "two_mode_tf" in cfg.channel_prediction_method:
-
-                start_time_all_loops = time.time()
-
-                h_freq_csi = predict_all_links_tf(h_freq_csi_history, rc_config, ns3cfg)
-
-                end_time_all_loops = time.time()
-                # print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
-
-            else:
-                start_time_all_loops = time.time()
-
-                h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg, max_workers=8)
-                # h_freq_csi = predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg)
-
-                end_time_all_loops = time.time()
-                # print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
-
-        elif cfg.channel_prediction_method == "old":
-            h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
-        elif "weiner_filter" in cfg.channel_prediction_method:
-            # Weiner Filter based prediction (MIMO) (per_tx_rx_node_pair)
-            weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
-            h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len-1))
-        elif cfg.channel_prediction_method == "ddpg":
-            ddpg_actions = getattr(cfg, "ddpg_pred_channel", None)
-            if ddpg_actions is None:
-                h_freq_csi = h_freq_csi_history[-1, ...]
-            else:
-                h_freq_csi = ddpg_actions
-        else:
-            raise ValueError("Channel prediction method not implemented here.")
-    else:
-        # LMMSE channel estimation. h_freq_csi shape: [_, _, num_rx_ants, _ num_tx_ants, num_syms, num_subcarriers]
-        h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi,
-                                                           slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                           cfo_vals=cfg.random_cfo_vals,
-                                                           sto_vals=cfg.random_sto_vals,
-                                                           freq_cov_mat=freq_cov_mat,
-                                                           lmmse_interpolator=lmmse_interpolator)
-    
-    _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                batch_size=cfg.num_slots_p2)
-    
-    # Pick the selected UE's channels
+    h_freq_csi, rx_snr_db = _estimate_h_freq_csi(cfg, ns3cfg, rc_config, dmimo_chans, rg_csi)
     h_freq_csi_unquantized = h_freq_csi
 
     PMI_feedback_bits = None
     mcs_indices = None
 
     if cfg.csi_quantization_on:
-        h_freq_csi_unquantized = tf.reduce_mean(h_freq_csi_unquantized, axis=0, keepdims=True)
-        if cfg.PMI_feedback_architecture == "RVQ":
-            rvq = RandomVectorQuantizer(bits_per_codeword=15, vector_dim=h_freq_csi.shape[4], seed=42)
-            h_freq_csi = rvq.quantize_feedback(h_freq_csi, cfg, rg_csi, donald_hack=True, quantization_debug=False)
-        else:
-            type_II_PMI_quantizer = quantized_CSI_feedback(method='5G', 
-                                                            codebook_selection_method=None,
-                                                            num_tx_streams=cfg.num_tx_streams,
-                                                            architecture=cfg.PMI_feedback_architecture,
-                                                            rbs_per_subband=4,
-                                                            snrdb=rx_snr_db)
-            h_freq_csi, PMI_feedback_bits = type_II_PMI_quantizer(
-                h_freq_csi_unquantized,
-                return_feedback_bits=True,
-            )
-
-            w1_override = None
-            if cfg.csi_prediction is True and "deqn" in cfg.channel_prediction_method:
-                rl_selector = getattr(cfg, "rl_selector", None)
-                last_mcs_indices = getattr(cfg, "last_mcs_indices", None)
-                last_node_wise_acks = getattr(cfg, "last_node_wise_acks", None)
-                last_throughput = getattr(cfg, "last_throughput", None)
-                last_target_throughput = getattr(cfg, "last_target_throughput", None)
-                if rl_selector is not None and last_mcs_indices is not None and last_node_wise_acks is not None:
-                    w1_override = rl_selector.prepare_next_actions(
-                        PMI_feedback_bits,
-                        mcs_indices=last_mcs_indices,
-                        node_wise_acks=last_node_wise_acks,
-                        throughput_debug=last_throughput,
-                        num_transitions=cfg.num_transitions,
-                        no_rl_throughput=cfg.curr_no_rl_throughput
-                    )
-
-            if w1_override is not None:
-                h_freq_csi, _ = type_II_PMI_quantizer(
-                    h_freq_csi_unquantized,
-                    return_feedback_bits=True,
-                    w1_beam_indices_override=w1_override,
-                )
-                
-            h_freq_csi = tf.squeeze(h_freq_csi, axis=(1,3))
+        h_freq_csi, PMI_feedback_bits = _quantize_csi_feedback(cfg, h_freq_csi_unquantized, rg_csi, rx_snr_db)
+        h_freq_csi = tf.squeeze(h_freq_csi, axis=(1, 3))
 
     ranks_out = int(cfg.num_tx_streams / (cfg.num_scheduled_ues+2))
+
+    _, rx_snr_db, _ = dmimo_chans.load_channel(
+        slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+        batch_size=cfg.num_slots_p2,
+    )
+
+    # Saving Rx SNRs
+    snr_dB_arr = _compute_snr_db_arr(rx_snr_db, ns3cfg.num_rxue_sel)
 
     # Create MU-MIMO simulation
     mu_mimo = MU_MIMO(cfg, rg_csi)
@@ -610,31 +646,6 @@ def sim_mu_mimo(
     # The binary source will create batches of information bits
     binary_source = BinarySource()
     info_bits = binary_source([cfg.num_slots_p2, mu_mimo.num_bits_per_frame])
-
-    # TxSquad transmission (P1)
-    if cfg.enable_txsquad is True:
-        tx_squad = TxSquad(cfg, ns3cfg, mu_mimo.num_bits_per_frame)
-        txs_chans = dMIMOChannels(ns3cfg, "TxSquad", add_noise=True)
-        info_bits_new, txs_ber, txs_bler = tx_squad(txs_chans, info_bits)
-        assert txs_ber <= 1e-3, "TxSquad transmission BER too high"
-
-    # Saving Rx SNRs
-    rx_snr_lin = 10.0 **( rx_snr_db / 10.0)
-    rx_snr_lin = np.mean(rx_snr_lin, axis=(0,1, 3))
-    rx_snr_lin = np.reshape(rx_snr_lin, [ns3cfg.num_rxue_sel+2, -1])
-    rx_snr_lin = np.mean(rx_snr_lin, axis=-1)
-    snr_dB_arr = 10*np.log10(rx_snr_lin)
-
-    tx_selection_proxy = None
-    if ns3cfg.num_txue_sel > 0:
-        tx_selection_proxy = compute_tx_selection_proxy_mi(
-            h_freq_csi,
-            snr_dB_arr,
-            num_txue=ns3cfg.num_txue,
-            num_txue_sel=ns3cfg.num_txue_sel,
-            gnb_tx_ant=4,
-            tx_ue_ant=mu_mimo.num_ue_ant,
-        )
 
     # MU-MIMO transmission (P2)
     dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_db_arr = mu_mimo(dmimo_chans, h_freq_csi, info_bits, snr_dB_arr)
@@ -699,7 +710,7 @@ def sim_mu_mimo(
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, tx_selection_proxy]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler]
 
 
 
@@ -720,29 +731,6 @@ def sim_mu_mimo_all(
     overhead = cfg.num_slots_p2/(cfg.num_slots_p1 + cfg.num_slots_p2)
 
     total_cycles = 0
-    base_num_txue_sel = ns3cfg.num_txue_sel
-    base_num_rxue_sel = ns3cfg.num_rxue_sel
-    tx_selection_masks = []
-    if base_num_txue_sel > 0:
-        for selection in combinations(range(ns3cfg.num_txue), base_num_txue_sel):
-            selection_mask = np.zeros(ns3cfg.num_txue)
-            selection_mask[list(selection)] = 1
-            tx_selection_masks.append(selection_mask)
-    tx_selection_masks = np.array(tx_selection_masks)
-    tx_selection_throughput_sum = np.zeros(len(tx_selection_masks))
-    heuristic_throughput_sum = 0.0
-
-    heuristic_tx_ue_mask = None
-    if len(tx_selection_masks) > 0:
-        heuristic_cfg = cfg.clone()
-        heuristic_ns3cfg = ns3cfg.clone()
-        heuristic_ns3cfg.reset_ue_selection()
-        heuristic_ns3cfg.num_txue_sel = base_num_txue_sel
-        heuristic_ns3cfg.num_rxue_sel = base_num_rxue_sel
-        heuristic_tx_ue_mask, _ = update_node_selection(heuristic_cfg, heuristic_ns3cfg)
-    fixed_rx_ue_mask = np.zeros(ns3cfg.num_rxue)
-    fixed_rx_ue_mask[:ns3cfg.num_rxue_sel] = 1
-
     uncoded_ber, ldpc_ber, goodput, throughput, bitrate = 0, 0, 0, 0, 0
     nodewise_goodput = []
     nodewise_throughput = []
@@ -756,23 +744,6 @@ def sim_mu_mimo_all(
     nodewise_bler_list = []
     per_step_throughput = []
 
-    if rl_selector is None and cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
-        rl_selector = RLBeamSelector()
-        checkpoint = getattr(cfg, "rl_checkpoint", None)
-        if checkpoint:
-            rl_selector.load_all(Path(checkpoint))
-        rl_selector.set_evaluation_mode(bool(getattr(cfg, "rl_evaluation_only", False)))
-    cfg.rl_selector = rl_selector
-
-
-    if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
-        data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(cfg.drop_idx, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel))
-        no_rl_throughput = data['per_step_throughput']
-        assert(len(no_rl_throughput) == len(np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2))-1)
-        cfg.num_transitions = len(no_rl_throughput) - 1
-
-        cfg.curr_no_rl_throughput = no_rl_throughput[0]
-
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
         # print("first_slot_idx: ", first_slot_idx)
@@ -780,15 +751,18 @@ def sim_mu_mimo_all(
         cfg.first_slot_idx = first_slot_idx
 
         start_time = time.time()
-        bers, bits, additional_KPIs = sim_mu_mimo(cfg, ns3cfg, rc_config, use_heuristic_selection=True)
+        bers, bits, additional_KPIs = sim_mu_mimo(
+            cfg,
+            ns3cfg,
+            rc_config,
+            use_heuristic_selection=True,
+            tx_ue_selection_method=getattr(cfg, "tx_ue_selection_method", "rx_power"),
+        )
         end_time = time.time()
         # print("Cycle time: ", end_time - start_time, " seconds\n")
         
         if first_slot_idx > cfg.start_slot_idx:
             
-            if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
-                cfg.curr_no_rl_throughput = no_rl_throughput[total_cycles]
-
             total_cycles += 1
             
             uncoded_ber += bers[0]
@@ -809,32 +783,12 @@ def sim_mu_mimo_all(
             snr_dB_list.append(additional_KPIs[5])
             PMI_feedback_bits.append(additional_KPIs[6])
             nodewise_bler_list.append(additional_KPIs[7])
-
-            # if len(tx_selection_masks) > 0:
-            #     for idx, selection_mask in enumerate(tx_selection_masks):
-            #         sweep_cfg = cfg.clone()
-            #         sweep_ns3cfg = ns3cfg.clone()
-            #         sweep_cfg.first_slot_idx = first_slot_idx
-            #         _, sweep_bits, _ = sim_mu_mimo(
-            #             sweep_cfg,
-            #             sweep_ns3cfg,
-            #             rc_config,
-            #             tx_ue_mask_override=selection_mask,
-            #             rx_ue_mask_override=fixed_rx_ue_mask,
-            #         )
-            #         tx_selection_throughput_sum[idx] += sweep_bits[1]
-            #         if heuristic_tx_ue_mask is not None and np.array_equal(selection_mask, heuristic_tx_ue_mask):
-            #             heuristic_throughput_sum += sweep_bits[1]
         
         hold = 1
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
     bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
-
-    # print("Average throughput: {:.2f} Mbps".format(throughput))
-    # print("Average uncoded BER: {:.2f}".format(uncoded_ber / total_cycles))
-    # print("Average coded BER: {:.2f}".format(ldpc_ber / total_cycles))
 
     nodewise_goodput = np.concatenate(nodewise_goodput) / (slot_time * 1e6) * overhead  # Mbps
     nodewise_throughput = np.concatenate(nodewise_throughput) / (slot_time * 1e6) * overhead  # Mbps
@@ -850,18 +804,7 @@ def sim_mu_mimo_all(
     else:
         snr_dB = None
 
-    if rl_selector is not None:
-        checkpoint_dir = Path("results") / "deqn_checkpoints" / Path(cfg.ns3_folder.rstrip("/")).name
-        rl_selector.save_all(checkpoint_dir)
-
     per_step_throughput = np.array(per_step_throughput)
-
-    if total_cycles > 0:
-        tx_selection_throughput = tx_selection_throughput_sum / (total_cycles * slot_time * 1e6) * overhead
-        heuristic_throughput = heuristic_throughput_sum / (total_cycles * slot_time * 1e6) * overhead
-    else:
-        tx_selection_throughput = None
-        heuristic_throughput = None
 
     return [
         uncoded_ber / total_cycles,
@@ -878,7 +821,4 @@ def sim_mu_mimo_all(
         sinr_dB,
         snr_dB,
         per_step_throughput,
-        tx_selection_masks,
-        tx_selection_throughput,
-        heuristic_throughput
     ]

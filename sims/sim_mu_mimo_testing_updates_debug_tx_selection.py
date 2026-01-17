@@ -102,6 +102,7 @@ rl_train_end_drop = 45
 # rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
 rl_checkpoint = None
 rl_evaluation_only = True
+tx_ue_selection_method = "rx_power" # "rx_power", "proxy_mi"
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -131,6 +132,7 @@ def parse_arguments():
     global csi_prediction, channel_prediction_method
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
+    global tx_ue_selection_method
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -164,6 +166,9 @@ def parse_arguments():
 
         if len(arguments) >= 12:
             rl_evaluation_only = _parse_bool(arguments[11])
+        
+        if len(arguments) >= 13:
+            tx_ue_selection_method = arguments[12]
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -218,6 +223,7 @@ def run_simulation():
     cfg.csi_quantization_on = csi_quantization_on
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
     cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
+    cfg.tx_ue_selection_method = tx_ue_selection_method
 
     if cfg.perfect_csi:
         cfg.csi_prediction = False

@@ -39,6 +39,7 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._ncjt_ldpc_decode_and_forward = True                   # Enable LDPC decode-and-forward at the Rx UEs for NCJT simulations
         self._channel_prediction_method = "two_mode_wesn"           # Channel prediction method: "old", "two_mode", "two_mode_tf"
         self._rl_user_count = 2                                     # Number of worst users for transmitter-side DEQN
+        self._tx_ue_selection_method = "rx_power"                   # Tx UE selection method: "rx_power", "proxy_mi"
         super().__init__(**kwargs)
 
     @property
@@ -301,3 +302,11 @@ class SimConfig(CarrierConfig, MCSConfig):
     @rl_user_count.setter
     def rl_user_count(self, val):
         self._rl_user_count = int(val)
+
+    @property
+    def tx_ue_selection_method(self):
+        return self._tx_ue_selection_method
+
+    @tx_ue_selection_method.setter
+    def tx_ue_selection_method(self, val):
+        self._tx_ue_selection_method = val
