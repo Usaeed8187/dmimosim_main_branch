@@ -579,8 +579,7 @@ def sim_mu_mimo(
         raise ValueError("Incorrect tx selection method")
 
     ns3cfg.update_ue_selection(selected_tx_ue_mask, fixed_rx_ue_mask)
-    print("\n ns3cfg.txue_mask: ", ns3cfg.txue_mask)
-    print("ns3cfg.rxue_mask: ", ns3cfg.rxue_mask)
+    print("\nselected tx UEs: ", np.where(ns3cfg.txue_mask))
 
     if not cfg.scheduling:
         ue_indices = [[0, 1], [2, 3]]  # Assuming gNB was scheduled

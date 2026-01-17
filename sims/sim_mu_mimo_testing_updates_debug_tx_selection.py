@@ -84,7 +84,7 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'higher_mobility'
+mobility = 'high_mobility'
 drop_idx = '3'
 rx_ues_arr = [4]
 num_txue_sel = 2
@@ -102,7 +102,7 @@ rl_train_end_drop = 45
 # rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
 rl_checkpoint = None
 rl_evaluation_only = True
-tx_ue_selection_method = "rx_power" # "rx_power", "proxy_mi"
+tx_ue_selection_method = "proxy_mi" # "rx_power", "proxy_mi"
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
