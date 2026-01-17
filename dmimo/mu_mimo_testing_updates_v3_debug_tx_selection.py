@@ -810,21 +810,21 @@ def sim_mu_mimo_all(
             PMI_feedback_bits.append(additional_KPIs[6])
             nodewise_bler_list.append(additional_KPIs[7])
 
-            if len(tx_selection_masks) > 0:
-                for idx, selection_mask in enumerate(tx_selection_masks):
-                    sweep_cfg = cfg.clone()
-                    sweep_ns3cfg = ns3cfg.clone()
-                    sweep_cfg.first_slot_idx = first_slot_idx
-                    _, sweep_bits, _ = sim_mu_mimo(
-                        sweep_cfg,
-                        sweep_ns3cfg,
-                        rc_config,
-                        tx_ue_mask_override=selection_mask,
-                        rx_ue_mask_override=fixed_rx_ue_mask,
-                    )
-                    tx_selection_throughput_sum[idx] += sweep_bits[1]
-                    if heuristic_tx_ue_mask is not None and np.array_equal(selection_mask, heuristic_tx_ue_mask):
-                        heuristic_throughput_sum += sweep_bits[1]
+            # if len(tx_selection_masks) > 0:
+            #     for idx, selection_mask in enumerate(tx_selection_masks):
+            #         sweep_cfg = cfg.clone()
+            #         sweep_ns3cfg = ns3cfg.clone()
+            #         sweep_cfg.first_slot_idx = first_slot_idx
+            #         _, sweep_bits, _ = sim_mu_mimo(
+            #             sweep_cfg,
+            #             sweep_ns3cfg,
+            #             rc_config,
+            #             tx_ue_mask_override=selection_mask,
+            #             rx_ue_mask_override=fixed_rx_ue_mask,
+            #         )
+            #         tx_selection_throughput_sum[idx] += sweep_bits[1]
+            #         if heuristic_tx_ue_mask is not None and np.array_equal(selection_mask, heuristic_tx_ue_mask):
+            #             heuristic_throughput_sum += sweep_bits[1]
         
         hold = 1
 
