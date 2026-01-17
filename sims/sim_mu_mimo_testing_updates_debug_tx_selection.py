@@ -37,6 +37,7 @@ from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
 from dmimo.mu_mimo_testing_updates_v3_debug_tx_selection import sim_mu_mimo_all
+from dmimo.channel.rl_tx_selector_v1 import RLTxSelector
 
 # Add system path for the dmimo library
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
@@ -102,7 +103,7 @@ rl_train_end_drop = 45
 # rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
 rl_checkpoint = None
 rl_evaluation_only = True
-tx_ue_selection_method = "proxy_mi" # "rx_power", "proxy_mi"
+tx_ue_selection_method = "proxy_mi" # "rx_power", "proxy_mi", "rl_tx"
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -248,6 +249,13 @@ def run_simulation():
     cfg.rl_checkpoint = rl_checkpoint
     cfg.rl_evaluation_only = rl_evaluation_only
 
+    rl_tx_selector = None
+    if tx_ue_selection_method == "rl_tx":
+        rl_tx_selector = RLTxSelector(batch_size=8, total_steps=cfg.total_slots, random_seed=42)
+        rl_tx_selector.set_evaluation_mode(rl_evaluation_only)
+        if rl_checkpoint and os.path.exists(rl_checkpoint):
+            rl_tx_selector.load_all(rl_checkpoint)
+
     # Precompute LMMSE resources once per drop when needed
     start_time = time.time()
     if not cfg.perfect_csi:
@@ -333,7 +341,7 @@ def run_simulation():
 
         cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
 
-        rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config)
+        rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config, rl_tx_selector=rl_tx_selector)
         ber[ue_arr_idx] = rst_zf[0]
         ldpc_ber[ue_arr_idx] = rst_zf[1]
         goodput[ue_arr_idx] = rst_zf[2]

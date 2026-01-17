@@ -24,7 +24,7 @@ from dmimo.channel import standard_rc_pred_freq_mimo, default_ddpg_predictor
 from dmimo.channel.ddpg_predictor import DDPGChannelPredictor
 from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
-from dmimo.channel.rl_beam_selector_v2 import RLBeamSelector
+from dmimo.channel.rl_tx_selector_v1 import RLTxSelector
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, QuantizedSLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
@@ -229,8 +229,10 @@ def _compute_snr_db_arr(rx_snr_db, num_rxue_sel):
     return 10 * np.log10(rx_snr_lin)
 
 
-def _select_tx_ue_mask_proxy_mi(cfg, ns3cfg, rc_config, fixed_rx_ue_mask):
+def _select_tx_ue_mask_proxy_mi(cfg, ns3cfg, rc_config, fixed_rx_ue_mask, return_intermediates=False):
     if ns3cfg.num_txue_sel <= 0 or ns3cfg.num_txue <= 0:
+        if return_intermediates:
+            return None, None, None
         return None
 
     selection_cfg = cfg.clone()
@@ -257,6 +259,8 @@ def _select_tx_ue_mask_proxy_mi(cfg, ns3cfg, rc_config, fixed_rx_ue_mask):
         gnb_tx_ant=selection_ns3cfg.num_bs_ant,
         tx_ue_ant=selection_ns3cfg.num_ue_ant,
     )
+    if return_intermediates:
+        return best_mask, h_freq_csi, snr_dB_arr
     return best_mask
 
 class MU_MIMO(Model):
@@ -547,6 +551,7 @@ def sim_mu_mimo(
     rx_ue_mask_override=None,
     use_heuristic_selection=False,
     tx_ue_selection_method=None,
+    rl_tx_selector: Optional[RLTxSelector] = None,
 ):
     """
     Simulation of MU-MIMO scenarios using different settings
@@ -572,6 +577,32 @@ def sim_mu_mimo(
         if selected_tx_ue_mask is None:
             tx_ue_mask, _ = update_node_selection(cfg, ns3cfg)
             selected_tx_ue_mask = tx_ue_mask
+    elif selection_method == "rl_tx":
+        if rl_tx_selector is None:
+            raise ValueError("RL-based Tx selection requested without an RL selector instance.")
+        selection_result = _select_tx_ue_mask_proxy_mi(
+            cfg,
+            ns3cfg,
+            rc_config,
+            fixed_rx_ue_mask,
+            return_intermediates=True,
+        )
+        selected_tx_ue_mask, h_freq_csi_sel, snr_dB_arr_sel = selection_result
+        if selected_tx_ue_mask is None:
+            tx_ue_mask, _ = update_node_selection(cfg, ns3cfg)
+            selected_tx_ue_mask = tx_ue_mask
+        else:
+            selected_tx_ue_mask = rl_tx_selector.select_tx_ue_mask(
+                h_freq_csi_sel,
+                snr_dB_arr_sel,
+                num_txue=ns3cfg.num_txue,
+                num_txue_sel=ns3cfg.num_txue_sel,
+                gnb_tx_ant=ns3cfg.num_bs_ant,
+                tx_ue_ant=ns3cfg.num_ue_ant,
+                mcs_indices=getattr(cfg, "last_mcs_indices", None),
+                node_wise_acks=getattr(cfg, "last_node_wise_acks", None),
+                base_mask=selected_tx_ue_mask,
+            )
     elif selection_method == "rx_power":
         tx_ue_mask, _ = update_node_selection(cfg, ns3cfg)
         selected_tx_ue_mask = tx_ue_mask
@@ -717,7 +748,7 @@ def sim_mu_mimo_all(
     cfg: SimConfig,
     ns3cfg: Ns3Config,
     rc_config:RCConfig,
-    rl_selector: Optional[RLBeamSelector] = None,
+    rl_tx_selector: Optional[RLTxSelector] = None,
 ):
     """"
     Simulation of MU-MIMO scenario according to the frame structure
@@ -756,6 +787,7 @@ def sim_mu_mimo_all(
             rc_config,
             use_heuristic_selection=True,
             tx_ue_selection_method=getattr(cfg, "tx_ue_selection_method", "rx_power"),
+            rl_tx_selector=rl_tx_selector,
         )
         end_time = time.time()
         # print("Cycle time: ", end_time - start_time, " seconds\n")
