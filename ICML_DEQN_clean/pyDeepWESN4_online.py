@@ -287,13 +287,16 @@ class WESN():
         for n in range(n_samples):
             # states.append(self._update(states[n], inputs[n + 1, :]))
             states.append(self._update(states[n], inputs[n : n + self.input_window_length + 1, :].flatten()))
+            index = self.memory_counter % self.memory_size
             if self.W_out_type == 1:
-                self.extended_states[self.memory_counter, : self.n_inputs] = inputs[n + 1, :]
+                self.extended_states[index, : self.n_inputs] = inputs[n + 1, :]
             else:
-                # Fill the first few elements of self.extended_states with the inputs. self.extended_states includes the 
+                # Fill the first few elements of self.extended_states with the inputs. self.extended_states includes the
                 # arrays that are fed to the output weight matrix. These are supposed to be used later for training.
                 n_out_window_elements = (self.output_window_length) * self.n_inputs
-                self.extended_states[self.memory_counter, : n_out_window_elements] = inputs[n + 1 : n + self.output_window_length + 1, :].flatten()
+                self.extended_states[index, : n_out_window_elements] = inputs[
+                    n + 1 : n + self.output_window_length + 1, :
+                ].flatten()
             for i in range(self.n_layers):
                 '''
                 self.extended_states[self.memory_counter,
@@ -301,14 +304,18 @@ class WESN():
                 int(self.n_inputs/2) + (i+1) * self.n_reservoir] = states[n+1][i]
                 '''
                 if self.W_out_type == 1:
-                    self.extended_states[self.memory_counter,
-                    self.n_inputs + i * self.n_reservoir:
-                    self.n_inputs + (i + 1) * self.n_reservoir] = states[n + 1][i]
+                    self.extended_states[
+                        index,
+                        self.n_inputs + i * self.n_reservoir : self.n_inputs + (i + 1) * self.n_reservoir,
+                    ] = states[n + 1][i]
                 else:
-                    self.extended_states[self.memory_counter,
-                    n_out_window_elements + i * self.n_reservoir:
-                    n_out_window_elements + (i + 1) * self.n_reservoir] = states[n + 1][i]
-            outputs[n + 1, :] = self.out_activation(np.dot(self.W_out, self.extended_states[self.memory_counter, :]))
+                    self.extended_states[
+                        index,
+                        n_out_window_elements
+                        + i * self.n_reservoir : n_out_window_elements
+                        + (i + 1) * self.n_reservoir,
+                    ] = states[n + 1][i]
+            outputs[n + 1, :] = self.out_activation(np.dot(self.W_out, self.extended_states[index, :]))
             self.memory_counter = self.memory_counter + 1
 
 
