@@ -105,7 +105,7 @@ rl_train_end_drop = 45
 # rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
 rl_checkpoint = None
 rl_evaluation_only = False
-tx_ue_selection_method = "proxy_mi" # "rx_power", "proxy_mi", "rl_tx"
+tx_ue_selection_method = "rl_tx" # "rx_power", "proxy_mi", "rl_tx"
 batch_size = 3
 
 def log_error(exc: Exception) -> str:
@@ -281,6 +281,7 @@ def run_simulation():
         cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
         cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
         cfg.tx_ue_selection_method = tx_ue_selection_method
+        cfg.drop_idx = drop_idx
 
         if cfg.perfect_csi:
             cfg.csi_prediction = False

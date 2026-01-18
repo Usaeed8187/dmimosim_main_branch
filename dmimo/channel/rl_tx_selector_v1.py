@@ -198,6 +198,8 @@ class RLTxSelector:
         mcs_indices: Optional[np.ndarray] = None,
         node_wise_acks: Optional[np.ndarray] = None,
         base_mask: Optional[np.ndarray] = None,
+        no_rl_throughput: Optional[float] = None,
+        throughput_debug: Optional[float] = None,
     ) -> Optional[np.ndarray]:
         if num_txue_sel <= 0 or num_txue <= 0:
             return None
@@ -234,7 +236,10 @@ class RLTxSelector:
 
         predicted_idx = 0
         if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
-            reward = self._compute_reward(mcs_indices, node_wise_acks)
+
+            # reward = self._compute_reward(mcs_indices, node_wise_acks)
+            reward = throughput_debug - no_rl_throughput
+
             if reward is not None:
                 print("reward = ", reward)
                 agent.activate_target_net(state)

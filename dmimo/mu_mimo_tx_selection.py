@@ -592,6 +592,7 @@ def sim_mu_mimo(
             selected_tx_ue_mask = cfg.prev_selected_tx_ue_mask
         assert selected_tx_ue_mask is not None
 
+        last_throughput = getattr(cfg, "last_throughput", None)
         selected_tx_ue_mask = rl_tx_selector.select_tx_ue_mask(
             h_freq_csi_sel,
             snr_dB_arr_sel,
@@ -602,6 +603,8 @@ def sim_mu_mimo(
             mcs_indices=getattr(cfg, "last_mcs_indices", None),
             node_wise_acks=getattr(cfg, "last_node_wise_acks", None),
             base_mask=selected_tx_ue_mask,
+            no_rl_throughput=cfg.curr_no_rl_throughput,
+            throughput_debug=last_throughput,
         )
         cfg.prev_selected_tx_ue_mask = selected_tx_ue_mask
     elif selection_method == "rx_power":
@@ -787,6 +790,19 @@ def sim_mu_mimo_all(
     nodewise_bler_list = []
     per_step_throughput = []
 
+    if cfg.tx_ue_selection_method == "rl_tx":
+        if cfg.link_adapt:
+            data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_True_tx_selection_{}.npz'.format(cfg.drop_idx, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel, cfg.perfect_csi, cfg.tx_ue_selection_method))
+        else:
+            data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_mod_order_{}_code_rate_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_True_tx_selection_{}.npz'.format(cfg.drop_idx, cfg.modulation_order, cfg.code_rate, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel, cfg.perfect_csi, cfg.tx_ue_selection_method))
+        no_rl_throughput = data['per_step_throughput']
+        assert(len(no_rl_throughput) == len(np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2))-1)
+        cfg.num_transitions = len(no_rl_throughput) - 1
+
+        cfg.curr_no_rl_throughput = no_rl_throughput[0]
+    else:
+        cfg.curr_no_rl_throughput = None
+
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
         # print("first_slot_idx: ", first_slot_idx)
@@ -805,6 +821,9 @@ def sim_mu_mimo_all(
         # print("Cycle time: ", end_time - start_time, " seconds\n")
         
         if first_slot_idx > cfg.start_slot_idx:
+
+            if cfg.tx_ue_selection_method == "rl_tx":
+                cfg.curr_no_rl_throughput = no_rl_throughput[total_cycles]
             
             total_cycles += 1
             
