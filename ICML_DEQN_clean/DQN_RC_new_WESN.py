@@ -52,7 +52,7 @@ class DeepWESNQNetwork:
         self.spectral_radius = spectral_radius
         self.nInternalUnits = nInternalUnits
         self.training_batch_size = training_batch_size
-        self.training_iteration = 15
+        self.training_iteration = 100
         self.replace_target_iter = 25
         self.training_start_threshold = (
             training_start_threshold

@@ -54,6 +54,7 @@ class RLTxSelector:
         output_window_size: int = 3,
         total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
+        rank_R: int = 2,   # number of ranked candidates
     ):
         self.batch_size = batch_size
         self.epsilon_update_period = batch_size
@@ -84,6 +85,8 @@ class RLTxSelector:
         self.evaluation_only: bool = False
         self.max_actions: Optional[int] = None
         self.current_mask: Optional[np.ndarray] = None
+
+        self.rank_R = int(rank_R)
 
     def set_evaluation_mode(self, evaluation_only: bool) -> None:
         """Enable or disable training during transmitter selection."""
@@ -128,32 +131,88 @@ class RLTxSelector:
                 self.input_window_size,
                 self.output_window_size,
                 self.batch_size,
-                training_batch_size=self.batch_size,
-                training_start_threshold=self.batch_size,
+                # training_batch_size=self.batch_size,
+                # training_start_threshold=self.batch_size,
                 n_layers=1,
-                nInternalUnits=16,
+                nInternalUnits=64,
                 spectral_radius=0.9,
                 random_seed=self.agent_seed,
             )
             self.agent.epsilon = self.epsilon
             self.state_dim = state_dim
 
-    def _build_action_map(
-        self, num_txue: int, current_mask: np.ndarray
-    ) -> List[Optional[Tuple[int, int]]]:
-        mask_key = tuple(int(v) for v in current_mask.tolist())
-        key = (num_txue, mask_key)
-        if key in self.action_maps:
-            return self.action_maps[key]
+    def _ranked_actions_count(self) -> int:
+        """Total actions: 0=no-op, 1..R^2 are rank-based swap templates."""
+        R = self.rank_R
+        return 1 + R * R
 
-        actions: List[Optional[Tuple[int, int]]] = [None]
-        selected_indices = [idx for idx, active in enumerate(current_mask) if active > 0]
-        unselected_indices = [idx for idx, active in enumerate(current_mask) if active <= 0]
-        for drop_idx in selected_indices:
-            for add_idx in unselected_indices:
-                actions.append((drop_idx, add_idx))
-        self.action_maps[key] = actions
-        return actions
+    def _apply_ranked_action(
+        self,
+        action_idx: int,
+        current_mask: np.ndarray,
+        best_swap_gain: np.ndarray,
+        h_scaled,
+        gnb_indices,
+        tx_ue_indices,
+    ) -> np.ndarray:
+        """
+        Apply rank-based action template:
+        action 0: no-op
+        action 1..R^2: drop rank rd among selected, add rank ra among unselected
+        Ranking:
+        - add candidates: unselected sorted by best_swap_gain desc
+        - drop candidates: selected sorted by "least harmful to drop" (largest delta_drop)
+            where delta_drop(i) = MI(S\{i}) - MI(S)  (<=0); least harmful => closest to 0 => largest
+        """
+        next_mask = np.array(current_mask, dtype=np.float32)
+
+        # No-op
+        if action_idx <= 0:
+            return next_mask
+
+        R = self.rank_R
+        selected = np.where(next_mask > 0)[0].tolist()
+        unselected = np.where(next_mask <= 0)[0].tolist()
+
+        # Need at least one candidate on each side
+        if len(selected) == 0 or len(unselected) == 0:
+            return next_mask
+
+        # Decode (rd, ra) in 1..R^2
+        a = action_idx - 1
+        rd = a // R  # 0..R-1
+        ra = a % R   # 0..R-1
+
+        # --- Rank add candidates (unselected) by best_swap_gain ---
+        # best_swap_gain already 0 for selected, but we restrict to unselected list anyway
+        unselected_sorted = sorted(unselected, key=lambda j: float(best_swap_gain[j]), reverse=True)
+        if ra >= len(unselected_sorted):
+            return next_mask
+        add_idx = unselected_sorted[ra]
+
+        # --- Rank drop candidates (selected) by least harmful to drop ---
+        base_mi = _proxy_mi_for_mask(h_scaled, gnb_indices, tx_ue_indices, next_mask)
+        drop_scores = []
+        for i in selected:
+            trial_mask = next_mask.copy()
+            trial_mask[i] = 0.0
+            # keep set size temporarily N-1 just to measure drop harm
+            mi_drop = _proxy_mi_for_mask(h_scaled, gnb_indices, tx_ue_indices, trial_mask)
+            delta_drop = mi_drop - base_mi  # <= 0, closer to 0 is better to drop
+            drop_scores.append((i, float(delta_drop)))
+
+        # Sort by largest delta_drop (closest to 0) first => easiest to drop
+        drop_scores.sort(key=lambda x: x[1], reverse=True)
+        if rd >= len(drop_scores):
+            return next_mask
+        drop_idx = drop_scores[rd][0]
+
+        # Apply swap
+        if next_mask[drop_idx] > 0 and next_mask[add_idx] == 0:
+            next_mask[drop_idx] = 0.0
+            next_mask[add_idx] = 1.0
+
+        return next_mask
 
     def _compute_reward(
         self,
@@ -215,6 +274,12 @@ class RLTxSelector:
             best_swap_gain[j] = np.float32(best_gain_j)
 
         # Selected transmitters remain 0 by definition
+
+        best_swap_gain = best_swap_gain.astype(np.float32)
+        den = np.max(np.abs(best_swap_gain)) + 1e-6
+        best_swap_gain = best_swap_gain / den
+        best_swap_gain = np.clip(best_swap_gain, -1.0, 1.0)
+
         return best_swap_gain
 
     def select_tx_ue_mask(
@@ -257,9 +322,10 @@ class RLTxSelector:
         ]
 
         state = self._build_state(h_scaled, gnb_indices, tx_ue_indices, current_mask)
+        best_swap_gain = state
         print("state = ", state)
-        actions = self._build_action_map(num_txue, current_mask)
-        self._maybe_init_agent(state.shape[0], len(actions))
+        num_actions = self._ranked_actions_count()
+        self._maybe_init_agent(state.shape[0], num_actions)
 
         agent = self.agent
         assert agent is not None
@@ -290,13 +356,15 @@ class RLTxSelector:
                 print("predicted_idx: ",predicted_idx)
                 self.transition_idx += 1
 
-        action = actions[predicted_idx] if 0 <= predicted_idx < len(actions) else None
-        next_mask = np.array(current_mask, dtype=np.float32)
-        if action is not None:
-            drop_idx, add_idx = action
-            if next_mask[drop_idx] > 0 and next_mask[add_idx] == 0:
-                next_mask[drop_idx] = 0
-                next_mask[add_idx] = 1
+        # Apply ranked action template to produce next mask
+        next_mask = self._apply_ranked_action(
+            int(predicted_idx),
+            current_mask,
+            best_swap_gain,
+            h_scaled,
+            gnb_indices,
+            tx_ue_indices,
+        )
 
         self.log_action(predicted_idx)
         self.prev_state = state

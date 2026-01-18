@@ -106,7 +106,7 @@ rl_train_end_drop = 45
 rl_checkpoint = None
 rl_evaluation_only = False
 tx_ue_selection_method = "rl_tx" # "rx_power", "proxy_mi", "rl_tx"
-batch_size = 3
+batch_size = 90
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -250,6 +250,7 @@ def run_simulation():
             batch_size=batch_size,
             total_steps=total_steps,
             random_seed=42,
+            rank_R=np.min((num_txue_sel, 4))
         )
         rl_tx_selector.set_evaluation_mode(rl_evaluation_only)
         if rl_checkpoint and os.path.exists(rl_checkpoint):
