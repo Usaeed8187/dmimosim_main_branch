@@ -91,7 +91,7 @@ rx_ues_arr = [4]
 num_txue_sel = 2
 
 modulation_order = 2
-code_rate = 0.5
+code_rate = 0.6
 link_adapt = False
 
 perfect_csi = True
@@ -102,8 +102,9 @@ csi_quantization_on = True
 rl_train_end_drop = 45
 # rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
 rl_checkpoint = None
-rl_evaluation_only = True
-tx_ue_selection_method = "proxy_mi" # "rx_power", "proxy_mi", "rl_tx"
+rl_evaluation_only = False
+tx_ue_selection_method = "rl_tx" # "rx_power", "proxy_mi", "rl_tx"
+batch_size = 3
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -134,6 +135,7 @@ def parse_arguments():
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
     global tx_ue_selection_method
+    global batch_size
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -251,7 +253,7 @@ def run_simulation():
 
     rl_tx_selector = None
     if tx_ue_selection_method == "rl_tx":
-        rl_tx_selector = RLTxSelector(batch_size=8, total_steps=cfg.total_slots, random_seed=42)
+        rl_tx_selector = RLTxSelector(batch_size=batch_size, total_steps=cfg.total_slots, random_seed=42)
         rl_tx_selector.set_evaluation_mode(rl_evaluation_only)
         if rl_checkpoint and os.path.exists(rl_checkpoint):
             rl_tx_selector.load_all(rl_checkpoint)

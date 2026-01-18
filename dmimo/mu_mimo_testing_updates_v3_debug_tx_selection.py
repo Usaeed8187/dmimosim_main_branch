@@ -588,21 +588,19 @@ def sim_mu_mimo(
             return_intermediates=True,
         )
         selected_tx_ue_mask, h_freq_csi_sel, snr_dB_arr_sel = selection_result
-        if selected_tx_ue_mask is None:
-            tx_ue_mask, _ = update_node_selection(cfg, ns3cfg)
-            selected_tx_ue_mask = tx_ue_mask
-        else:
-            selected_tx_ue_mask = rl_tx_selector.select_tx_ue_mask(
-                h_freq_csi_sel,
-                snr_dB_arr_sel,
-                num_txue=ns3cfg.num_txue,
-                num_txue_sel=ns3cfg.num_txue_sel,
-                gnb_tx_ant=ns3cfg.num_bs_ant,
-                tx_ue_ant=ns3cfg.num_ue_ant,
-                mcs_indices=getattr(cfg, "last_mcs_indices", None),
-                node_wise_acks=getattr(cfg, "last_node_wise_acks", None),
-                base_mask=selected_tx_ue_mask,
-            )
+        assert selected_tx_ue_mask is not None
+
+        selected_tx_ue_mask = rl_tx_selector.select_tx_ue_mask(
+            h_freq_csi_sel,
+            snr_dB_arr_sel,
+            num_txue=ns3cfg.num_txue,
+            num_txue_sel=ns3cfg.num_txue_sel,
+            gnb_tx_ant=ns3cfg.num_bs_ant,
+            tx_ue_ant=ns3cfg.num_ue_ant,
+            mcs_indices=getattr(cfg, "last_mcs_indices", None),
+            node_wise_acks=getattr(cfg, "last_node_wise_acks", None),
+            base_mask=selected_tx_ue_mask,
+        )
     elif selection_method == "rx_power":
         tx_ue_mask, _ = update_node_selection(cfg, ns3cfg)
         selected_tx_ue_mask = tx_ue_mask
@@ -711,6 +709,18 @@ def sim_mu_mimo(
 
         # print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order)
         # print("Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
+    else:
+
+        mcs_candidates = np.array([np.array([2,0.3]), np.array([2,0.6]), 
+                                        np.array([4,0.37]), np.array([4,0.5]), np.array([4,0.6]), np.array([4,0.66]),
+                                        np.array([6,0.55]), np.array([6,0.75]), np.array([6,0.85])])
+        idx = np.where(
+            np.all(mcs_candidates == np.array([cfg.modulation_order, cfg.code_rate]), axis=1)
+        )[0]
+
+        mcs_indices = np.ones((ns3cfg.num_rxue_sel+2)) * idx
+        mcs_indices = mcs_indices + 1
+
 
     # Update error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
