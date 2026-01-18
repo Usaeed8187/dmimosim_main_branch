@@ -138,16 +138,19 @@ class RLTxSelector:
             self.agent.epsilon = self.epsilon
             self.state_dim = state_dim
 
-    def _build_action_map(self, num_txue: int, num_txue_sel: int) -> List[Optional[Tuple[int, int]]]:
-        key = (num_txue, num_txue_sel)
+    def _build_action_map(
+        self, num_txue: int, current_mask: np.ndarray
+    ) -> List[Optional[Tuple[int, int]]]:
+        mask_key = tuple(int(v) for v in current_mask.tolist())
+        key = (num_txue, mask_key)
         if key in self.action_maps:
             return self.action_maps[key]
 
         actions: List[Optional[Tuple[int, int]]] = [None]
-        for drop_idx in range(num_txue):
-            for add_idx in range(num_txue):
-                if drop_idx == add_idx:
-                    continue
+        selected_indices = [idx for idx, active in enumerate(current_mask) if active > 0]
+        unselected_indices = [idx for idx, active in enumerate(current_mask) if active <= 0]
+        for drop_idx in selected_indices:
+            for add_idx in unselected_indices:
                 actions.append((drop_idx, add_idx))
         self.action_maps[key] = actions
         return actions
@@ -223,7 +226,7 @@ class RLTxSelector:
 
         state = self._build_state(h_scaled, gnb_indices, tx_ue_indices, current_mask)
         print("state = ", state)
-        actions = self._build_action_map(num_txue, num_txue_sel)
+        actions = self._build_action_map(num_txue, current_mask)
         self._maybe_init_agent(state.shape[0], len(actions))
 
         agent = self.agent
