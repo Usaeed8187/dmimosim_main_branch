@@ -234,7 +234,7 @@ def run_simulation():
     rc_config.history_len = 8
 
     total_slots = 99
-    start_slot_idx = 33
+    start_slot_idx = 35
     csi_delay = 4
 
     cfg_tmp = SimConfig()
