@@ -222,6 +222,7 @@ class RLTxSelector:
         ]
 
         state = self._build_state(h_scaled, gnb_indices, tx_ue_indices, current_mask)
+        print("state = ", state)
         actions = self._build_action_map(num_txue, num_txue_sel)
         self._maybe_init_agent(state.shape[0], len(actions))
 
@@ -232,6 +233,7 @@ class RLTxSelector:
         if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
             reward = self._compute_reward(mcs_indices, node_wise_acks)
             if reward is not None:
+                print("reward = ", reward)
                 agent.activate_target_net(state)
                 agent.store_transition(self.prev_state, self.prev_action, reward, state)
                 self.log_reward(reward)
@@ -247,6 +249,7 @@ class RLTxSelector:
                     self.agent.epsilon = self.epsilon
 
                 predicted_idx = agent.choose_action(state)
+                print("predicted_idx: ",predicted_idx)
                 self.transition_idx += 1
 
         action = actions[predicted_idx] if 0 <= predicted_idx < len(actions) else None
