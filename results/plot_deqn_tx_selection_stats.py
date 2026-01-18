@@ -5,7 +5,9 @@ This script targets the DEQN-based Tx selector used by
 ``deqn_tx_rewards_drop_<drop>_rx_UE_<rx>_tx_UE_<tx>_tx_selection_<method>.npz``
 then plots the per-step reward trend across drops. Throughput is loaded from
 ``mu_mimo_results_*_rx_UE_<rx>_tx_UE_<tx>_*_tx_selection_<method>.npz`` files and
-aggregated across drops to plot per-step throughput.
+aggregated across drops to plot per-step throughput. When link adaptation is
+disabled, throughput results are loaded from files named with
+``mod_order_<modulation_order>_code_rate_<code_rate>``.
 """
 
 from __future__ import annotations
@@ -24,11 +26,13 @@ DEFAULT_MOBILITY = "high_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
 DEFAULT_LINK_ADAPT = False
+DEFAULT_MODULATION_ORDER = 2
+DEFAULT_CODE_RATE = 0.6
 DEFAULT_PERFECT_CSI = True
 DEFAULT_CSI_PREDICTION = False
 DEFAULT_CHANNEL_PREDICTION_SETTING = "none"
 DEFAULT_TX_SELECTION_METHOD = "rl_tx"
-DEFAULT_ROLLING_WINDOW_LEN = 100
+DEFAULT_ROLLING_WINDOW_LEN = 1300
 
 REWARD_PATTERN = re.compile(
     r"deqn_tx_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"
@@ -137,6 +141,7 @@ def _find_throughput_files(
     tx_ue: int,
     selection_method: str,
     prediction_mode: str,
+    mcs_filter: str | None,
 ) -> List[ThroughputFile]:
     files: List[ThroughputFile] = []
     for drop in drops:
@@ -156,6 +161,8 @@ def _find_throughput_files(
             if info.selection_method != selection_method:
                 continue
             if info.prediction_mode != prediction_mode:
+                continue
+            if mcs_filter is not None and info.mcs != mcs_filter:
                 continue
             candidates.append(info)
 
@@ -261,19 +268,27 @@ def plot_rewards(series: List[Tuple[int, float]], step_ids: List[int], output: P
     print(f"Saved reward plot to {output}")
 
 
-def plot_throughput(series: List[Tuple[int, float]], step_ids: List[int], output: Path, tick_stride: int) -> None:
-    if not series:
+def plot_throughput(
+    series_by_label: List[Tuple[str, List[Tuple[int, float]]]],
+    step_ids: List[int],
+    output: Path,
+    tick_stride: int,
+) -> None:
+    if not series_by_label:
         raise RuntimeError("No throughput data found to plot.")
 
-    steps, values = zip(*series)
-
     plt.figure(figsize=(10, 6))
-    plt.plot(steps, values, marker="s")
+    for label, series in series_by_label:
+        if not series:
+            continue
+        steps, values = zip(*series)
+        plt.plot(steps, values, marker="s", label=label)
     plt.xlabel("Step")
     plt.ylabel("Per-step throughput")
     plt.title("Tx-selection throughput across steps")
     plt.grid(True, linestyle="--", alpha=0.6)
     plt.xticks(_select_tick_steps(step_ids, tick_stride))
+    plt.legend()
     plt.tight_layout()
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -296,6 +311,8 @@ def main() -> None:
     parser.add_argument("--link-adapt", action="store_true", default=DEFAULT_LINK_ADAPT)
     parser.add_argument("--perfect-csi", action="store_true", default=DEFAULT_PERFECT_CSI)
     parser.add_argument("--csi-prediction", action="store_true", default=DEFAULT_CSI_PREDICTION)
+    parser.add_argument("--modulation-order", type=int, default=DEFAULT_MODULATION_ORDER)
+    parser.add_argument("--code-rate", type=float, default=DEFAULT_CODE_RATE)
     parser.add_argument(
         "--channel-prediction-setting",
         type=str,
@@ -305,6 +322,13 @@ def main() -> None:
         "--tx-selection-method",
         type=str,
         default=DEFAULT_TX_SELECTION_METHOD,
+    )
+    parser.add_argument(
+        "--throughput-selection-methods",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Tx selection methods to include in throughput plot.",
     )
     parser.add_argument("--rolling-window", type=int, default=DEFAULT_ROLLING_WINDOW_LEN)
     parser.add_argument(
@@ -331,6 +355,9 @@ def main() -> None:
 
     drops = list(args.drops)
     root = args.root
+    mcs_filter = None
+    if not args.link_adapt:
+        mcs_filter = f"mod_order_{args.modulation_order}_code_rate_{args.code_rate:g}"
 
     reward_files = _find_reward_files(
         root,
@@ -340,17 +367,31 @@ def main() -> None:
         args.tx_ue,
         args.tx_selection_method,
     )
-    throughput_files = _find_throughput_files(
-        root,
-        drops,
-        args.mobility,
-        args.rx_ue,
-        args.tx_ue,
-        args.tx_selection_method,
-        prediction_mode,
-    )
+    throughput_selection_methods = args.throughput_selection_methods
+    if throughput_selection_methods is None:
+        throughput_selection_methods = [args.tx_selection_method, "rx_power"]
+    throughput_selection_methods = list(dict.fromkeys(throughput_selection_methods))
 
-    if not reward_files and not throughput_files:
+    throughput_series_by_label: List[Tuple[str, List[Tuple[int, float]]]] = []
+    throughput_steps: List[int] = []
+    for selection_method in throughput_selection_methods:
+        throughput_files = _find_throughput_files(
+            root,
+            drops,
+            args.mobility,
+            args.rx_ue,
+            args.tx_ue,
+            selection_method,
+            prediction_mode,
+            mcs_filter,
+        )
+        if not throughput_files:
+            continue
+        throughput_series, throughput_steps = _aggregate_throughput(throughput_files)
+        throughput_series = _apply_rolling_mean(throughput_series, args.rolling_window)
+        throughput_series_by_label.append((selection_method, throughput_series))
+
+    if not reward_files and not throughput_series_by_label:
         raise SystemExit("No DEQN Tx-selection outputs found for the requested settings.")
 
     if reward_files:
@@ -360,10 +401,13 @@ def main() -> None:
     else:
         print("No reward files found; skipping reward plot.")
 
-    if throughput_files:
-        throughput_series, throughput_steps = _aggregate_throughput(throughput_files)
-        throughput_series = _apply_rolling_mean(throughput_series, args.rolling_window)
-        plot_throughput(throughput_series, throughput_steps, args.throughput_output, args.rolling_window)
+    if throughput_series_by_label:
+        plot_throughput(
+            throughput_series_by_label,
+            throughput_steps,
+            args.throughput_output,
+            args.rolling_window,
+        )
     else:
         print("No throughput files found; skipping throughput plot.")
 
