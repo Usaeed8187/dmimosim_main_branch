@@ -547,9 +547,6 @@ def sim_mu_mimo(
     cfg: SimConfig,
     ns3cfg: Ns3Config,
     rc_config: RCConfig,
-    tx_ue_mask_override=None,
-    rx_ue_mask_override=None,
-    use_heuristic_selection=False,
     tx_ue_selection_method=None,
     rl_tx_selector: Optional[RLTxSelector] = None,
 ):
@@ -569,7 +566,7 @@ def sim_mu_mimo(
     fixed_rx_ue_mask = np.zeros(ns3cfg.num_rxue)
     fixed_rx_ue_mask[:ns3cfg.num_rxue_sel] = 1
 
-    selection_method = tx_ue_selection_method or getattr(cfg, "tx_ue_selection_method", "rx_power")
+    selection_method = tx_ue_selection_method or getattr(cfg, "tx_ue_selection_method", "proxy_mi")
     tx_ue_mask = None
 
     if selection_method == "proxy_mi":
@@ -580,14 +577,19 @@ def sim_mu_mimo(
     elif selection_method == "rl_tx":
         if rl_tx_selector is None:
             raise ValueError("RL-based Tx selection requested without an RL selector instance.")
+        
         selection_result = _select_tx_ue_mask_proxy_mi(
-            cfg,
-            ns3cfg,
-            rc_config,
-            fixed_rx_ue_mask,
-            return_intermediates=True,
-        )
-        selected_tx_ue_mask, h_freq_csi_sel, snr_dB_arr_sel = selection_result
+                cfg,
+                ns3cfg,
+                rc_config,
+                fixed_rx_ue_mask,
+                return_intermediates=True,
+            )
+        if cfg.first_slot_idx == cfg.start_slot_idx:
+            selected_tx_ue_mask, h_freq_csi_sel, snr_dB_arr_sel = selection_result
+        else:
+            _, h_freq_csi_sel, snr_dB_arr_sel = selection_result
+            selected_tx_ue_mask = cfg.prev_selected_tx_ue_mask
         assert selected_tx_ue_mask is not None
 
         selected_tx_ue_mask = rl_tx_selector.select_tx_ue_mask(
@@ -601,6 +603,7 @@ def sim_mu_mimo(
             node_wise_acks=getattr(cfg, "last_node_wise_acks", None),
             base_mask=selected_tx_ue_mask,
         )
+        cfg.prev_selected_tx_ue_mask = selected_tx_ue_mask
     elif selection_method == "rx_power":
         tx_ue_mask, _ = update_node_selection(cfg, ns3cfg)
         selected_tx_ue_mask = tx_ue_mask
@@ -795,7 +798,6 @@ def sim_mu_mimo_all(
             cfg,
             ns3cfg,
             rc_config,
-            use_heuristic_selection=True,
             tx_ue_selection_method=getattr(cfg, "tx_ue_selection_method", "rx_power"),
             rl_tx_selector=rl_tx_selector,
         )
