@@ -36,7 +36,7 @@ from sionna.ofdm import ResourceGrid
 from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
-from dmimo.mu_mimo_testing_updates_v3_debug_tx_selection import sim_mu_mimo_all
+from dmimo.mu_mimo_tx_selection import sim_mu_mimo_all
 from dmimo.channel.rl_tx_selector_v1 import RLTxSelector
 
 # Add system path for the dmimo library
