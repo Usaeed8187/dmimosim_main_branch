@@ -7,6 +7,7 @@ import sys
 import os
 import datetime
 import traceback
+import math
 import numpy as np
 from fractions import Fraction
 import matplotlib.pyplot as plt
@@ -86,7 +87,8 @@ arguments = sys.argv[1:]
 
 
 mobility = 'high_mobility'
-drop_idx = '3'
+drop_idx = ','.join(str(i) for i in range(1, 101))
+drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [4]
 num_txue_sel = 2
 
@@ -127,8 +129,26 @@ def _parse_code_rate(value):
     except (ValueError, ZeroDivisionError):
         return float(value)
 
+def _parse_drop_indices(raw_drop_value: str) -> List[str]:
+    values: List[str] = []
+    for part in str(raw_drop_value).split(','):
+        part = part.strip()
+        if not part:
+            continue
+
+        if '-' in part:
+            start_str, end_str = part.split('-', maxsplit=1)
+            start = int(start_str)
+            end = int(end_str)
+            step = 1 if end >= start else -1
+            values.extend(str(i) for i in range(start, end + step, step))
+        else:
+            values.append(part)
+
+    return values
+
 def parse_arguments():
-    global mobility, drop_idx, rx_ues_arr
+    global mobility, drop_idx, rx_ues_arr, drop_list
     global modulation_order, code_rate, num_txue_sel
     global perfect_csi, channel_prediction_setting
     global csi_prediction, channel_prediction_method
@@ -184,6 +204,8 @@ def parse_arguments():
             csi_prediction = False
             channel_prediction_method = None
 
+        drop_list = _parse_drop_indices(drop_idx)
+
         print("Current mobility: {} \n Current drop: {} \n".format(mobility, drop_idx))
         # print("rx_ues_arr: ", rx_ues_arr)
         # print("rx_ues_arr[0]: ", rx_ues_arr[0])
@@ -196,51 +218,14 @@ def parse_arguments():
         # print("csi_quantization_on: {}".format(csi_quantization_on))
         # print("channel_prediction_method: {}".format(channel_prediction_method))
         # print("link_adapt: {}".format(link_adapt))
+    else:
+        drop_list = _parse_drop_indices(drop_idx)
 
 
 # Main function
 def run_simulation():
-    global mobility, drop_idx, rx_ues_arr
+    global mobility, drop_idx, rx_ues_arr, drop_list
     parse_arguments()
-
-    # Simulation settings
-    cfg = SimConfig()
-    cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
-    cfg.total_slots = 99       # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 33     # starting slots (must be greater than csi_delay + 5)
-    cfg.csi_delay = 4           # feedback delay in number of subframe
-    cfg.perfect_csi = perfect_csi
-    cfg.rank_adapt = False      # enable/disable rank adaptation
-    cfg.link_adapt = link_adapt      # enable/disable link adaptation,. .
-    cfg.csi_prediction = csi_prediction
-    cfg.use_perfect_csi_history_for_prediction = False
-    cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"
-    cfg.enable_ue_selection = False
-    cfg.scheduling = False
-    cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
-    # cfg.ns3_folder = "ns3/channels/LowMobility/"
-    ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
-    cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
-    cfg.enable_rxsquad = False
-    cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT", "SLNR" for quantized CSI feedback
-    cfg.csi_quantization_on = csi_quantization_on
-    cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
-    cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
-    cfg.tx_ue_selection_method = tx_ue_selection_method
-
-    if cfg.perfect_csi:
-        cfg.csi_prediction = False
-
-    if cfg.link_adapt:
-        MCS_string = "link_adapt"
-    else:
-        MCS_string = "mod_order_{}_code_rate_{}".format(modulation_order, code_rate)
-
-    # Select Number of TxSquad and RxSquad UEs to use.
-    ns3cfg.num_txue_sel = num_txue_sel        
-
-    folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
-    # print("Using channels in {}".format(folder_name))    
 
     rc_config = RCConfig()
     rc_config.enable_window = True
@@ -248,148 +233,222 @@ def run_simulation():
     rc_config.num_neurons = 16
     rc_config.history_len = 8
 
-    cfg.rl_checkpoint = rl_checkpoint
-    cfg.rl_evaluation_only = rl_evaluation_only
+    total_slots = 99
+    start_slot_idx = 33
+    csi_delay = 4
+
+    cfg_tmp = SimConfig()
+    time_steps_per_drop = math.ceil(
+        (total_slots - start_slot_idx)
+        / (cfg_tmp.num_slots_p1 + cfg_tmp.num_slots_p2)
+    ) - 1
+    total_steps = len(drop_list) * time_steps_per_drop
 
     rl_tx_selector = None
     if tx_ue_selection_method == "rl_tx":
-        rl_tx_selector = RLTxSelector(batch_size=batch_size, total_steps=cfg.total_slots, random_seed=42)
+        rl_tx_selector = RLTxSelector(
+            batch_size=batch_size,
+            total_steps=total_steps,
+            random_seed=42,
+        )
         rl_tx_selector.set_evaluation_mode(rl_evaluation_only)
         if rl_checkpoint and os.path.exists(rl_checkpoint):
             rl_tx_selector.load_all(rl_checkpoint)
 
-    # Precompute LMMSE resources once per drop when needed
-    start_time = time.time()
-    if not cfg.perfect_csi:
-        num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
+    for drop_number, drop_idx in enumerate(drop_list, start=1):
+        drop_start_time = time.time()
+        # Simulation settings
+        cfg = SimConfig()
+        cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
+        cfg.total_slots = total_slots       # total number of slots in ns-3 channels
+        cfg.start_slot_idx = start_slot_idx     # starting slots (must be greater than csi_delay + 5)
+        cfg.csi_delay = csi_delay           # feedback delay in number of subframe
+        cfg.perfect_csi = perfect_csi
+        cfg.rank_adapt = False      # enable/disable rank adaptation
+        cfg.link_adapt = link_adapt      # enable/disable link adaptation,. .
+        cfg.csi_prediction = csi_prediction
+        cfg.use_perfect_csi_history_for_prediction = False
+        cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"
+        cfg.enable_ue_selection = False
+        cfg.scheduling = False
+        cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
+        # cfg.ns3_folder = "ns3/channels/LowMobility/"
+        ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
+        cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
+        cfg.enable_rxsquad = False
+        cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT", "SLNR" for quantized CSI feedback
+        cfg.csi_quantization_on = csi_quantization_on
+        cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
+        cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
+        cfg.tx_ue_selection_method = tx_ue_selection_method
 
-        csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
-        csi_guard_carriers_1 = (cfg.fft_size - csi_effective_subcarriers) // 2
-        csi_guard_carriers_2 = (cfg.fft_size - csi_effective_subcarriers) - csi_guard_carriers_1
+        if cfg.perfect_csi:
+            cfg.csi_prediction = False
 
-        rg_csi = ResourceGrid(
-            num_ofdm_symbols=14,
-            fft_size=cfg.fft_size,
-            subcarrier_spacing=cfg.subcarrier_spacing,
-            num_tx=1,
-            num_streams_per_tx=num_txs_ant,
-            cyclic_prefix_length=cfg.cyclic_prefix_len,
-            num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
-            dc_null=False,
-            pilot_pattern="kronecker",
-            pilot_ofdm_symbol_indices=[2, 11],
-        )
-
-        dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
-        slot_idx = cfg.start_slot_idx - cfg.csi_delay
-        cache_slots = cfg.lmmse_cov_est_slots if slot_idx >= cfg.lmmse_cov_est_slots else slot_idx
-        start_slot = slot_idx - cache_slots + 1
-
-        freq_cov_mat = estimate_freq_cov(
-            dmimo_chans, rg_csi, start_slot=start_slot, total_slots=cache_slots
-        )
-        lmmse_interpolator = LMMSELinearInterp(rg_csi.pilot_pattern, freq_cov_mat)
-
-        cfg.freq_cov_mat = freq_cov_mat
-        cfg.lmmse_interpolator = lmmse_interpolator
-    end_time = time.time()
-    print("Time taken for pre-computing LMMSE resources: ", end_time - start_time)
-
-    #############################################
-    # Testing
-    #############################################
-
-    ber = np.zeros(np.size(rx_ues_arr ))
-    ldpc_ber = np.zeros(np.size(rx_ues_arr ))
-    goodput = np.zeros(np.size(rx_ues_arr ))
-    throughput = np.zeros(np.size(rx_ues_arr ))
-    bitrate = np.zeros(np.size(rx_ues_arr ))
-    nodewise_goodput = []
-    nodewise_throughput = []
-    nodewise_bitrate = []
-    ranks = []
-    ldpc_ber_list = []
-    uncoded_ber_list = []
-    sinr_dB = []
-    snr_dB = []
-    phase_1_ue_ber = []
-
-    for ue_arr_idx in range(np.size(rx_ues_arr)):
-        
-        ns3cfg.num_rxue_sel = rx_ues_arr[ue_arr_idx]
-
-        assert cfg.rank_adapt == False, "Current MU-MIMO code assumes fixed rank transmission (single stream per RX UE)."
-
-        num_rx_antennas = rx_ues_arr[ue_arr_idx] * 2 + 4
-
-        # Test case 1:  rank 2 transmission, assuming 2 antennas per UE and treating BS as two UEs
-        # cfg.num_tx_streams = num_rx_antennas
-        # cfg.ue_ranks = [2] # same rank for all UEs
-
-        # Test case 2: rank 1 transmission, assuming 2 antennas per UE and treating BS as two UEs
-        cfg.num_tx_streams = num_rx_antennas // 2
-        cfg.ue_ranks = [1]  # same rank for all UEs
-
-        # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
-        cfg.modulation_order = modulation_order
-        cfg.code_rate = code_rate
-        
-        # if not cfg.scheduling:
-        #     tx_ue_mask = np.zeros(10)
-        #     tx_ue_mask[:ns3cfg.num_txue_sel] = np.ones(ns3cfg.num_txue_sel)
-        #     rx_ue_mask = np.zeros(10)
-        #     rx_ue_mask[:ns3cfg.num_rxue_sel] = np.ones(ns3cfg.num_rxue_sel)
-        #     ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
-
-        cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
-
-        rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config, rl_tx_selector=rl_tx_selector)
-        ber[ue_arr_idx] = rst_zf[0]
-        ldpc_ber[ue_arr_idx] = rst_zf[1]
-        goodput[ue_arr_idx] = rst_zf[2]
-        throughput[ue_arr_idx] = rst_zf[3]
-        bitrate[ue_arr_idx] = rst_zf[4]
-        
-        nodewise_goodput.append(rst_zf[5])
-        nodewise_throughput.append(rst_zf[6])
-        nodewise_bitrate.append(rst_zf[7])
-        ranks.append(rst_zf[8])
-        uncoded_ber_list.append(rst_zf[9])
-        ldpc_ber_list.append(rst_zf[10])
-        if rst_zf[11] is not None:
-            sinr_dB.append(rst_zf[11])
-        if rst_zf[12] is not None:
-            snr_dB.append(rst_zf[12])
-
-        folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
-        os.makedirs(folder_path, exist_ok=True)
-
-        if cfg.csi_prediction:
-            
-            if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}_tx_selection_{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, cfg.tx_ue_selection_method))
-            else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}_tx_selection_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, cfg.tx_ue_selection_method))
-            np.savez(file_path,
-                    ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
-                    nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
-                    ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13])
+        if cfg.link_adapt:
+            MCS_string = "link_adapt"
         else:
-            if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}_tx_selection_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, cfg.tx_ue_selection_method))
+            MCS_string = "mod_order_{}_code_rate_{}".format(modulation_order, code_rate)
+
+        # Select Number of TxSquad and RxSquad UEs to use.
+        ns3cfg.num_txue_sel = num_txue_sel        
+
+        folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
+        # print("Using channels in {}".format(folder_name))    
+
+        cfg.rl_checkpoint = rl_checkpoint
+        cfg.rl_evaluation_only = rl_evaluation_only
+
+        # Precompute LMMSE resources once per drop when needed
+        lmmse_start_time = time.time()
+        if not cfg.perfect_csi:
+            num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
+
+            csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
+            csi_guard_carriers_1 = (cfg.fft_size - csi_effective_subcarriers) // 2
+            csi_guard_carriers_2 = (cfg.fft_size - csi_effective_subcarriers) - csi_guard_carriers_1
+
+            rg_csi = ResourceGrid(
+                num_ofdm_symbols=14,
+                fft_size=cfg.fft_size,
+                subcarrier_spacing=cfg.subcarrier_spacing,
+                num_tx=1,
+                num_streams_per_tx=num_txs_ant,
+                cyclic_prefix_length=cfg.cyclic_prefix_len,
+                num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
+                dc_null=False,
+                pilot_pattern="kronecker",
+                pilot_ofdm_symbol_indices=[2, 11],
+            )
+
+            dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+            slot_idx = cfg.start_slot_idx - cfg.csi_delay
+            cache_slots = cfg.lmmse_cov_est_slots if slot_idx >= cfg.lmmse_cov_est_slots else slot_idx
+            start_slot = slot_idx - cache_slots + 1
+
+            freq_cov_mat = estimate_freq_cov(
+                dmimo_chans, rg_csi, start_slot=start_slot, total_slots=cache_slots
+            )
+            lmmse_interpolator = LMMSELinearInterp(rg_csi.pilot_pattern, freq_cov_mat)
+
+            cfg.freq_cov_mat = freq_cov_mat
+            cfg.lmmse_interpolator = lmmse_interpolator
+        end_time = time.time()
+        print("Time taken for pre-computing LMMSE resources: ", end_time - lmmse_start_time)
+
+        #############################################
+        # Testing
+        #############################################
+
+        ber = np.zeros(np.size(rx_ues_arr ))
+        ldpc_ber = np.zeros(np.size(rx_ues_arr ))
+        goodput = np.zeros(np.size(rx_ues_arr ))
+        throughput = np.zeros(np.size(rx_ues_arr ))
+        bitrate = np.zeros(np.size(rx_ues_arr ))
+        nodewise_goodput = []
+        nodewise_throughput = []
+        nodewise_bitrate = []
+        ranks = []
+        ldpc_ber_list = []
+        uncoded_ber_list = []
+        sinr_dB = []
+        snr_dB = []
+        phase_1_ue_ber = []
+        last_rx_ue_sel = None
+
+        for ue_arr_idx in range(np.size(rx_ues_arr)):
+            
+            ns3cfg.num_rxue_sel = rx_ues_arr[ue_arr_idx]
+            last_rx_ue_sel = ns3cfg.num_rxue_sel
+            assert cfg.rank_adapt == False, "Current MU-MIMO code assumes fixed rank transmission (single stream per RX UE)."
+
+            num_rx_antennas = rx_ues_arr[ue_arr_idx] * 2 + 4
+
+            # Test case 1:  rank 2 transmission, assuming 2 antennas per UE and treating BS as two UEs
+            # cfg.num_tx_streams = num_rx_antennas
+            # cfg.ue_ranks = [2] # same rank for all UEs
+
+            # Test case 2: rank 1 transmission, assuming 2 antennas per UE and treating BS as two UEs
+            cfg.num_tx_streams = num_rx_antennas // 2
+            cfg.ue_ranks = [1]  # same rank for all UEs
+
+            # Modulation order: 2/4/6 for QPSK/16QAM/64QAM
+            cfg.modulation_order = modulation_order
+            cfg.code_rate = code_rate
+
+            # if not cfg.scheduling:
+            #     tx_ue_mask = np.zeros(10)
+            #     tx_ue_mask[:ns3cfg.num_txue_sel] = np.ones(ns3cfg.num_txue_sel)
+            #     rx_ue_mask = np.zeros(10)
+            #     rx_ue_mask[:ns3cfg.num_rxue_sel] = np.ones(ns3cfg.num_rxue_sel)
+            #     ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+
+            cfg.ue_indices = np.reshape(np.arange((ns3cfg.num_rxue_sel + 2) * 2), (ns3cfg.num_rxue_sel + 2, -1))
+
+            rst_zf = sim_mu_mimo_all(cfg, ns3cfg, rc_config, rl_tx_selector=rl_tx_selector)
+            ber[ue_arr_idx] = rst_zf[0]
+            ldpc_ber[ue_arr_idx] = rst_zf[1]
+            goodput[ue_arr_idx] = rst_zf[2]
+            throughput[ue_arr_idx] = rst_zf[3]
+            bitrate[ue_arr_idx] = rst_zf[4]
+            
+            nodewise_goodput.append(rst_zf[5])
+            nodewise_throughput.append(rst_zf[6])
+            nodewise_bitrate.append(rst_zf[7])
+            ranks.append(rst_zf[8])
+            uncoded_ber_list.append(rst_zf[9])
+            ldpc_ber_list.append(rst_zf[10])
+            if rst_zf[11] is not None:
+                sinr_dB.append(rst_zf[11])
+            if rst_zf[12] is not None:
+                snr_dB.append(rst_zf[12])
+
+            folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
+            os.makedirs(folder_path, exist_ok=True)
+
+            if cfg.csi_prediction:
+                
+                if cfg.scheduling:
+                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}_tx_selection_{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, cfg.tx_ue_selection_method))
+                else:
+                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}_tx_selection_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, cfg.tx_ue_selection_method))
+                np.savez(file_path,
+                        ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
+                        nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
+                        ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13])
+                
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}_tx_selection_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, cfg.tx_ue_selection_method))
+                if cfg.scheduling:
+                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}_tx_selection_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, cfg.tx_ue_selection_method))
+                else:
+                    file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}_tx_selection_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, cfg.tx_ue_selection_method))
 
-            np.savez(file_path,
-                    ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
-                    nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], 
-                    ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13])
+                np.savez(file_path,
+                        ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
+                        nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], 
+                        ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13])
 
+        if rl_tx_selector is not None:
+            if last_rx_ue_sel is None:
+                raise RuntimeError("RX UE selection was not set before saving rewards.")
+
+            rewards = np.array(rl_tx_selector.get_reward_log(), dtype=np.float32)
+            rewards_path = os.path.join(
+                folder_path,
+                "deqn_tx_rewards_drop_{}_rx_UE_{}_tx_UE_{}_tx_selection_{}.npz".format(
+                    drop_idx, last_rx_ue_sel, num_txue_sel, cfg.tx_ue_selection_method
+                ),
+            )
+            np.savez(rewards_path, rewards=rewards)
+            print(f"Saved DEQN Tx-selection rewards to {rewards_path}")
+
+            rl_tx_selector.reset_episode()
+        end_time = time.time()
+        print("Drop {} simulation time: {} seconds".format(drop_idx, end_time - drop_start_time))
 
 if __name__ == "__main__":
-    # try:
-    #     run_simulation()
-    # except Exception as exc:  # noqa: BLE001
-    #     log_error(exc)
-    #     sys.exit(1)
-    run_simulation()
+    try:
+        run_simulation()
+    except Exception as exc:  # noqa: BLE001
+        log_error(exc)
+        sys.exit(1)
