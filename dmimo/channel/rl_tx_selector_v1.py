@@ -23,7 +23,7 @@ def _scale_csi_by_snr(h_freq_csi, snr_dB_arr):
             h_scaled = tf.squeeze(h_scaled, axis=squeeze_axes)
     snr_lin = tf.cast(10.0 ** (tf.convert_to_tensor(snr_dB_arr) / 10.0), h_scaled.dtype)
     snr_lin = tf.reshape(snr_lin, [-1, 1, 1, 1])
-    return h_scaled * snr_lin
+    return h_scaled * np.sqrt(snr_lin)
 
 
 def _proxy_mutual_information(h_scaled, tx_ant_indices) -> float:
@@ -57,7 +57,7 @@ class RLTxSelector:
     ):
         self.batch_size = batch_size
         self.epsilon_update_period = batch_size
-        self.e_greedy_start = 0.7
+        self.e_greedy_start = 0.2
         self.e_greedy_end = 0.9
         self.epsilon = self.e_greedy_start
         if total_steps is None or batch_size is None:
@@ -175,17 +175,47 @@ class RLTxSelector:
         tx_ue_indices,
         current_mask,
     ) -> np.ndarray:
+        """
+        Swap-1 aligned state.
+
+        For each transmitter j:
+        - if j is currently selected: state[j] = 0
+        - else: state[j] = max over i in selected of ( MI(S \ {i} ∪ {j}) - MI(S) )
+
+        This gives the best achievable MI proxy change by swapping in transmitter j.
+        """
+        current_mask = np.asarray(current_mask, dtype=np.float32)
         base_mi = _proxy_mi_for_mask(h_scaled, gnb_indices, tx_ue_indices, current_mask)
-        deltas: List[float] = []
-        for ue_idx, active in enumerate(current_mask):
-            trial_mask = np.array(current_mask, dtype=np.float32)
-            if active > 0:
-                trial_mask[ue_idx] = 0
-            else:
-                trial_mask[ue_idx] = 1
-            new_mi = _proxy_mi_for_mask(h_scaled, gnb_indices, tx_ue_indices, trial_mask)
-            deltas.append(new_mi - base_mi)
-        return np.asarray(deltas, dtype=np.float32)
+
+        selected = np.where(current_mask > 0)[0].tolist()
+        unselected = np.where(current_mask <= 0)[0].tolist()
+
+        # Default: 0 for selected, will fill for unselected
+        best_swap_gain = np.zeros_like(current_mask, dtype=np.float32)
+
+        # If nothing selected or nothing to swap in, return zeros (degenerate case)
+        if len(selected) == 0 or len(unselected) == 0:
+            return best_swap_gain
+
+        # For each unselected transmitter j, find the best swap (drop i, add j)
+        for j in unselected:
+            best_gain_j = -np.inf
+            for i in selected:
+                trial_mask = current_mask.copy()
+                trial_mask[i] = 0.0
+                trial_mask[j] = 1.0
+                new_mi = _proxy_mi_for_mask(h_scaled, gnb_indices, tx_ue_indices, trial_mask)
+                gain = new_mi - base_mi
+                if gain > best_gain_j:
+                    best_gain_j = gain
+
+            # If for some reason nothing updated, fall back to 0
+            if not np.isfinite(best_gain_j):
+                best_gain_j = 0.0
+            best_swap_gain[j] = np.float32(best_gain_j)
+
+        # Selected transmitters remain 0 by definition
+        return best_swap_gain
 
     def select_tx_ue_mask(
         self,
