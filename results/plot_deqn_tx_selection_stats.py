@@ -21,7 +21,7 @@ from typing import Iterable, List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 8))
+DEFAULT_DROPS = list(range(1, 101))
 DEFAULT_MOBILITY = "high_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
@@ -32,7 +32,7 @@ DEFAULT_PERFECT_CSI = True
 DEFAULT_CSI_PREDICTION = False
 DEFAULT_CHANNEL_PREDICTION_SETTING = "none"
 DEFAULT_TX_SELECTION_METHOD = "rl_tx"
-DEFAULT_ROLLING_WINDOW_LEN = 50
+DEFAULT_ROLLING_WINDOW_LEN = 100
 
 REWARD_PATTERN = re.compile(
     r"deqn_tx_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"
