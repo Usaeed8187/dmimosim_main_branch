@@ -49,24 +49,26 @@ class RLTxSelector:
 
     def __init__(
         self,
-        batch_size: Optional[int] = 8,
+        memory_size: Optional[int] = 8,
         input_window_size: int = 3,
         output_window_size: int = 3,
         total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
         rank_R: int = 2,   # number of ranked candidates
     ):
-        self.batch_size = batch_size
-        self.epsilon_update_period = batch_size
+        self.memory_size = memory_size
+        self.epsilon_update_period = 10
         self.e_greedy_start = 0.2
         self.e_greedy_end = 0.9
         self.epsilon = self.e_greedy_start
-        if total_steps is None or batch_size is None:
+        if total_steps is None or memory_size is None:
             self.e_increase = 0.0
         else:
-            self.e_increase = (self.e_greedy_end - self.e_greedy_start) / max(
-                1, (total_steps // batch_size) - 1
-            )
+            # ramp epsilon over first 1000 steps
+            eps_ramp_steps = 1000
+            self.e_increase = (self.e_greedy_end - self.e_greedy_start) / max(1, eps_ramp_steps // self.epsilon_update_period)
+
+        self.train_every_N_steps = 15
 
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
@@ -130,12 +132,14 @@ class RLTxSelector:
                 state_dim,
                 self.input_window_size,
                 self.output_window_size,
-                self.batch_size,
-                # training_batch_size=self.batch_size,
-                # training_start_threshold=self.batch_size,
+                self.memory_size,
+                training_batch_size=32,
+                training_start_threshold=100,
+                reward_decay=0.7,                # gamma
+                lr=0.001,                        # LR
                 n_layers=1,
                 nInternalUnits=64,
-                spectral_radius=0.9,
+                spectral_radius=0.6,
                 random_seed=self.agent_seed,
             )
             self.agent.epsilon = self.epsilon
@@ -330,7 +334,6 @@ class RLTxSelector:
         agent = self.agent
         assert agent is not None
 
-        predicted_idx = 0
         if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
 
             # reward = self._compute_reward(mcs_indices, node_wise_acks)
@@ -344,17 +347,18 @@ class RLTxSelector:
 
                 if (
                     (self.transition_idx + 1) >= agent.training_start_threshold
-                    and ((self.transition_idx + 1) % self.batch_size) == 0
+                    and ((self.transition_idx + 1) % self.train_every_N_steps) == 0
                 ):
-                    agent.learn_new(self.batch_size, self.transition_idx, method="double")
+                    agent.learn_new(agent.memory_size, self.transition_idx, method="double")
 
                 if ((self.transition_idx + 1) % self.epsilon_update_period) == 0:
                     self.epsilon = min(self.e_greedy_end, self.epsilon + self.e_increase)
                     self.agent.epsilon = self.epsilon
 
-                predicted_idx = agent.choose_action(state)
-                print("predicted_idx: ",predicted_idx)
                 self.transition_idx += 1
+
+        predicted_idx = agent.choose_action(state)
+        print("predicted_idx: ",predicted_idx)
 
         # Apply ranked action template to produce next mask
         next_mask = self._apply_ranked_action(

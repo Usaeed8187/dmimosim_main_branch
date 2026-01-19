@@ -106,7 +106,7 @@ rl_train_end_drop = 45
 rl_checkpoint = None
 rl_evaluation_only = False
 tx_ue_selection_method = "rl_tx" # "rx_power", "proxy_mi", "rl_tx"
-batch_size = 90
+memory_size = 300
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -155,7 +155,7 @@ def parse_arguments():
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
     global tx_ue_selection_method
-    global batch_size
+    global memory_size
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -247,7 +247,7 @@ def run_simulation():
     rl_tx_selector = None
     if tx_ue_selection_method == "rl_tx":
         rl_tx_selector = RLTxSelector(
-            batch_size=batch_size,
+            memory_size=memory_size,
             total_steps=total_steps,
             random_seed=42,
             rank_R=np.min((num_txue_sel, 4))
