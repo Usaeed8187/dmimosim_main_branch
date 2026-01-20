@@ -21,8 +21,8 @@ from typing import Iterable, List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 96))
-DEFAULT_MOBILITY = "high_mobility"
+DEFAULT_DROPS = list(range(2, 3))
+DEFAULT_MOBILITY = "longer_high_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
 DEFAULT_LINK_ADAPT = False
@@ -32,7 +32,7 @@ DEFAULT_PERFECT_CSI = True
 DEFAULT_CSI_PREDICTION = False
 DEFAULT_CHANNEL_PREDICTION_SETTING = "none"
 DEFAULT_TX_SELECTION_METHOD = "rl_tx"
-DEFAULT_ROLLING_WINDOW_LEN = 300
+DEFAULT_ROLLING_WINDOW_LEN = 100
 
 REWARD_PATTERN = re.compile(
     r"deqn_tx_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"
@@ -375,7 +375,8 @@ def main() -> None:
     )
     throughput_selection_methods = args.throughput_selection_methods
     if throughput_selection_methods is None:
-        throughput_selection_methods = [args.tx_selection_method, "rx_power", "proxy_mi"]
+        # throughput_selection_methods = [args.tx_selection_method, "rx_power", "proxy_mi"]
+        throughput_selection_methods = [args.tx_selection_method, "proxy_mi"]
     throughput_selection_methods = list(dict.fromkeys(throughput_selection_methods))
 
     throughput_series_by_label: List[Tuple[str, List[Tuple[int, float]]]] = []

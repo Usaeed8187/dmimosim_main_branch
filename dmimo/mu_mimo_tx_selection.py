@@ -792,9 +792,9 @@ def sim_mu_mimo_all(
 
     if cfg.tx_ue_selection_method == "rl_tx":
         if cfg.link_adapt:
-            data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_True_tx_selection_proxy_mi.npz'.format(cfg.drop_idx, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel, cfg.perfect_csi))
+            data = np.load('results/channels_multiple_mu_mimo/channels_{}_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_True_tx_selection_proxy_mi.npz'.format(cfg.mobility, cfg.drop_idx, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel, cfg.perfect_csi))
         else:
-            data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_mod_order_{}_code_rate_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_True_tx_selection_proxy_mi.npz'.format(cfg.drop_idx, cfg.modulation_order, cfg.code_rate, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel, cfg.perfect_csi))
+            data = np.load('results/channels_multiple_mu_mimo/channels_{}_{}/mu_mimo_results_mod_order_{}_code_rate_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_True_tx_selection_proxy_mi.npz'.format(cfg.mobility, cfg.drop_idx, cfg.modulation_order, cfg.code_rate, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel, cfg.perfect_csi))
         no_rl_throughput = data['per_step_throughput']
         assert(len(no_rl_throughput) == len(np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2))-1)
         cfg.num_transitions = len(no_rl_throughput) - 1
