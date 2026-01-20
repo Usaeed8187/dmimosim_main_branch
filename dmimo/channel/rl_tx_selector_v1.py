@@ -66,7 +66,7 @@ class RLTxSelector:
         else:
             # ramp epsilon over first 1000 steps
             eps_ramp_steps = 1000
-            self.e_increase = (self.e_greedy_end - self.e_greedy_start) / max(1, eps_ramp_steps // self.epsilon_update_period)
+            self.e_increase = (self.e_greedy_end - self.e_greedy_start) / max(1, total_steps*(3/4) // self.epsilon_update_period)
 
         self.train_every_N_steps = 15
 
@@ -337,7 +337,7 @@ class RLTxSelector:
         if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
 
             # reward = self._compute_reward(mcs_indices, node_wise_acks)
-            reward = throughput_debug - no_rl_throughput
+            reward = (throughput_debug - no_rl_throughput) / (no_rl_throughput)
 
             if reward is not None:
                 print("reward = ", reward)
@@ -354,6 +354,7 @@ class RLTxSelector:
                 if ((self.transition_idx + 1) % self.epsilon_update_period) == 0:
                     self.epsilon = min(self.e_greedy_end, self.epsilon + self.e_increase)
                     self.agent.epsilon = self.epsilon
+                    print("self.agent.epsilon = ", self.agent.epsilon)
 
                 self.transition_idx += 1
 
