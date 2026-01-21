@@ -55,6 +55,8 @@ class RLTxSelector:
         total_steps: Optional[int] = None,
         random_seed: Optional[int] = None,
         rank_R: int = 2,   # number of ranked candidates
+        ema_alpha: float = 0.1,
+        debug_oracle_reward: bool = False,
     ):
         self.memory_size = memory_size
         self.epsilon_update_period = 10
@@ -88,6 +90,9 @@ class RLTxSelector:
         self.current_mask: Optional[np.ndarray] = None
 
         self.rank_R = int(rank_R)
+        self.ema_alpha = float(ema_alpha)
+        self.ema_throughput: Optional[float] = None
+        self.debug_oracle_reward = bool(debug_oracle_reward)
 
     def set_evaluation_mode(self, evaluation_only: bool) -> None:
         """Enable or disable training during transmitter selection."""
@@ -100,6 +105,7 @@ class RLTxSelector:
         self.prev_state = None
         self.prev_action = None
         self.current_mask = None
+        self.ema_throughput = None
         self.reward_log.clear()
         self.action_log.clear()
         self.transition_idx = 0
@@ -229,6 +235,19 @@ class RLTxSelector:
         if mcs_array.size == 0 or ack_array.size == 0:
             return None
         return float(np.sum(mcs_array * ack_array))
+    
+    def _ema_reward(self, throughput: Optional[float]) -> Optional[float]:
+        if throughput is None:
+            return None
+        throughput_value = float(throughput)
+        if self.ema_throughput is None:
+            self.ema_throughput = throughput_value
+            return 0.0
+        baseline = self.ema_throughput
+        reward = (throughput_value - baseline) / (baseline + 1e-6)
+        alpha = np.clip(self.ema_alpha, 0.0, 1.0)
+        self.ema_throughput = alpha * throughput_value + (1.0 - alpha) * baseline
+        return float(reward)
 
     def _build_state(
         self,
@@ -335,8 +354,10 @@ class RLTxSelector:
 
         if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
 
-            # reward = self._compute_reward(mcs_indices, node_wise_acks)
-            reward = (throughput_debug - no_rl_throughput) / (no_rl_throughput)
+            if self.debug_oracle_reward:
+                reward = (throughput_debug - no_rl_throughput) / (no_rl_throughput)
+            else:
+                reward = self._ema_reward(throughput_debug)
 
             if reward is not None:
                 print("reward = ", reward)
@@ -358,7 +379,7 @@ class RLTxSelector:
                 self.transition_idx += 1
 
         predicted_idx = agent.choose_action(state)
-        print("predicted_idx: ",predicted_idx)
+        # print("predicted_idx: ",predicted_idx)
 
         # Apply ranked action template to produce next mask
         next_mask = self._apply_ranked_action(

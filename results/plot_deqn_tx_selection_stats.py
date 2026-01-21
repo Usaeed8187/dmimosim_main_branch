@@ -21,7 +21,7 @@ from typing import Iterable, List, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 66))
+DEFAULT_DROPS = list(range(1, 101))
 DEFAULT_MOBILITY = "high_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2

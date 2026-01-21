@@ -614,7 +614,7 @@ def sim_mu_mimo(
         raise ValueError("Incorrect tx selection method")
 
     ns3cfg.update_ue_selection(selected_tx_ue_mask, fixed_rx_ue_mask)
-    print("selected tx UEs: ", np.where(ns3cfg.txue_mask))
+    # print("selected tx UEs: ", np.where(ns3cfg.txue_mask))
 
     if not cfg.scheduling:
         ue_indices = [[0, 1], [2, 3]]  # Assuming gNB was scheduled
@@ -749,7 +749,7 @@ def sim_mu_mimo(
     overhead = cfg.num_slots_p2/(cfg.num_slots_p1 + cfg.num_slots_p2)
     cfg.last_throughput = userbits / (cfg.slot_duration * 1e6) * overhead  # Mbps
     cfg.last_target_throughput = mu_mimo.num_bits_per_frame / (cfg.slot_duration * 1e6) * overhead  # Mbps
-    print("throughput: ", cfg.last_throughput, "\n")
+    # print("throughput: ", cfg.last_throughput, "\n")
     # print("cfg.last_target_throughput: ", cfg.last_target_throughput)
 
     node_wise_goodbits_phase_2 = (1.0 - node_wise_ber) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)

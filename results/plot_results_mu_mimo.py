@@ -367,14 +367,14 @@ def _default_scenarios(
             link_adapt=link_adapt,
             prediction_method="weiner_filter",
         ),
-        Scenario(
-            perfect_csi=False,
-            prediction=True,
-            quantization=True,
-            label="DEQN beam adaptation + Two-Mode WESN prediction",
-            link_adapt=link_adapt,
-            prediction_method="deqn_plus_two_mode",
-        ),
+        # Scenario(
+        #     perfect_csi=False,
+        #     prediction=True,
+        #     quantization=True,
+        #     label="DEQN beam adaptation + Two-Mode WESN prediction",
+        #     link_adapt=link_adapt,
+        #     prediction_method="deqn_plus_two_mode",
+        # ),
         Scenario(
             perfect_csi=True,
             prediction=False,
@@ -486,8 +486,8 @@ def main() -> None:
         "--drops",
         type=int,
         nargs="+",
-        # default=[1, 2, 3],
-        default=list(range(40, 43)),
+        default=[1, 2, 3],
+        # default=list(range(40, 43)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -501,7 +501,7 @@ def main() -> None:
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[2],
+        default=[2, 4, 6, 8, 10],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
@@ -554,7 +554,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--link-adapt",
-        default=True,
+        default=False,
         action="store_true",
         help="Plot link adaptation results saved when link adaptation was enabled.",
     )

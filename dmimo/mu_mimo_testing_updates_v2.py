@@ -574,15 +574,15 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         most_frequent_value = values[np.argmax(counts)]
         cfg.code_rate = most_frequent_value
 
-        # print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order)
-        # print("Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
+        print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order)
+        print("Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
 
     # Update error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    # print("Uncoded BER: ", uncoded_ber_phase_2)
-    # print("Coded BER: ", coded_ber)
+    print("Uncoded BER: ", uncoded_ber_phase_2)
+    print("Coded BER: ", coded_ber)
     print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)

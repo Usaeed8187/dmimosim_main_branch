@@ -86,10 +86,10 @@ arguments = sys.argv[1:]
 
 mobility = 'higher_mobility'
 drop_idx = '3'
-rx_ues_arr = [2]
-num_txue_sel = 2
+rx_ues_arr = [4]
+num_txue_sel = 8
 
-modulation_order = 2
+modulation_order = 4
 code_rate = 1 / 2
 link_adapt = True
 

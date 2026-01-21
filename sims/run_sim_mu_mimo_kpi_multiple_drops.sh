@@ -4,16 +4,17 @@
 # declare -a mobilities=("low_mobility" "medium_mobility" "high_mobility")
 declare -a mobilities=("high_mobility")
 # declare -a drop_idx=("26" "27" "28" "29" "30" "31" "32" "33" "34" "35" "36" "37" "38" "39" "43" "44" "45")
-declare -a drop_idx=($(seq 1 100))
-declare -a rx_ues_arr=("0")
-declare -a num_txue_sel_arr=("2")
-declare -a modulation_orders=("2" "4")
-declare -a code_rates=("2/3" "5/6")
+declare -a drop_idx=("1" "2" "3")
+# declare -a drop_idx=($(seq 1 3))
+declare -a rx_ues_arr=("4")
+declare -a num_txue_sel_arr=("2" "4" "6" "8")
+declare -a modulation_orders=("4")
+declare -a code_rates=("2/3")
 declare -a perfect_csi_arr=("True" "False")
-declare -a channel_prediction_settings=("two_mode") # "None", "weiner_filter", "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
+declare -a channel_prediction_settings=("two_mode" "None" "weiner_filter") # "None", "weiner_filter", "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
 declare -a csi_quantization_arr=("True" "False")
 
-link_adapt="True"
+link_adapt="False"
 
 if [[ "${link_adapt}" == "True" ]]; then
     modulation_orders=("${modulation_orders[0]}")
