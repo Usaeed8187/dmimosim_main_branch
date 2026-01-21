@@ -8,7 +8,7 @@ declare -a drop_idx=("1" "2" "3")
 # declare -a drop_idx=($(seq 1 3))
 declare -a rx_ues_arr=("4")
 declare -a num_txue_sel_arr=("2" "4" "6" "8")
-declare -a modulation_orders=("4")
+declare -a modulation_orders=("2")
 declare -a code_rates=("2/3")
 declare -a perfect_csi_arr=("True" "False")
 declare -a channel_prediction_settings=("two_mode" "None" "weiner_filter") # "None", "weiner_filter", "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.

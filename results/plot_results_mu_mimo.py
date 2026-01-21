@@ -515,13 +515,13 @@ def main() -> None:
         "--code-rates",
         type=_float_or_fraction,
         nargs="+",
-        default=[_float_or_fraction("2/3"), _float_or_fraction("5/6")],
+        default=[_float_or_fraction("2/3")],
         help="Code rates that were simulated (accepts fractions like 2/3).",
     )
     parser.add_argument(
         "--ber-modulation-order",
         type=int,
-        default=4,
+        default=2,
         help="Modulation order to use for BER plots.",
     )
     parser.add_argument(

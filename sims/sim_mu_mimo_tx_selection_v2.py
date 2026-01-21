@@ -37,8 +37,8 @@ from sionna.ofdm import ResourceGrid
 from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
-from dmimo.mu_mimo_tx_selection import sim_mu_mimo_all
-from dmimo.channel.rl_tx_selector_v1 import RLTxSelector
+from dmimo.mu_mimo_tx_selection_v2 import sim_mu_mimo_all
+from dmimo.channel.rl_tx_selector_v2 import RLTxSelector
 
 # Add system path for the dmimo library
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
@@ -86,8 +86,8 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'longer_high_mobility'
-drop_idx = ','.join(str(i) for i in range(2, 3))
+mobility = 'high_mobility'
+drop_idx = ','.join(str(i) for i in range(1, 101))
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [4]
 num_txue_sel = 2
@@ -105,7 +105,7 @@ rl_train_end_drop = 45
 # rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
 rl_checkpoint = None
 rl_evaluation_only = False
-tx_ue_selection_method = "proxy_mi" # "rx_power", "proxy_mi", "rl_tx"
+tx_ue_selection_method = "rl_tx" # "rx_power", "proxy_mi", "rl_tx"
 memory_size = 300
 rank_R = 2 # number of ranked candidates for deqn tx selection
 
@@ -235,7 +235,7 @@ def run_simulation():
     rc_config.num_neurons = 16
     rc_config.history_len = 8
 
-    total_slots = 1599
+    total_slots = 99
     start_slot_idx = 35
     csi_delay = 4
 
