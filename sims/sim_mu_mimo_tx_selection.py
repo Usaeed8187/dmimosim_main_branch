@@ -86,8 +86,8 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'longer_high_mobility'
-drop_idx = ','.join(str(i) for i in range(2, 3))
+mobility = 'high_mobility'
+drop_idx = ','.join(str(i) for i in range(1, 101))
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [4]
 num_txue_sel = 2
@@ -235,7 +235,7 @@ def run_simulation():
     rc_config.num_neurons = 16
     rc_config.history_len = 8
 
-    total_slots = 1599
+    total_slots = 99
     start_slot_idx = 35
     csi_delay = 4
 
