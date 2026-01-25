@@ -88,10 +88,10 @@ mobility = 'high_mobility'
 drop_idx = ','.join(str(i) for i in range(1, 101))
 drop_list: List[str] = [item.strip() for item in drop_idx.split(',') if item.strip()]
 rx_ues_arr = [4]
-num_txue_sel = 4
+num_txue_sel = 2
 
 modulation_order = 2
-code_rate = 1 / 2
+code_rate = 0.6
 link_adapt = True
 
 perfect_csi = False
@@ -103,7 +103,7 @@ imitation_method = "none" # "none", "weiner_filter", "two_mode"
 imitation_drop_count = 0
 worst_tx_count = 1
 worst_rx_count = 2
-batch_size = 3
+memory_size = 300
 
 def _build_imitation_info() -> Optional[str]:
     if imitation_method == "none" or imitation_drop_count <= 0:
@@ -170,7 +170,7 @@ def parse_arguments():
     global csi_quantization_on, link_adapt
     global imitation_method, imitation_drop_count
     global worst_tx_count, worst_rx_count
-    global batch_size
+    global memory_size
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -275,8 +275,9 @@ def run_simulation():
 
     shared_rl_selector = (
         RLBeamSelector(
-            batch_size=batch_size,
+            memory_size=memory_size,
             total_steps=total_steps,
+            random_seed=42,
             worst_tx_count=worst_tx_count,
             worst_rx_count=worst_rx_count,
         )
@@ -455,6 +456,8 @@ def run_simulation():
                     npz_payload["imitation_info"] = imitation_info
 
                 np.savez(file_path, **npz_payload)
+
+                print("Saved Beam selection results to {}".format(file_path))
             else:
                 if cfg.scheduling:
                     file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, imitation_tag))
@@ -483,6 +486,8 @@ def run_simulation():
                     npz_payload["imitation_info"] = imitation_info
 
                 np.savez(file_path, **npz_payload)
+
+                print("Saved Beam selection results to {}".format(file_path))
         
         if shared_rl_selector is not None:
             if last_rx_ue_sel is None:

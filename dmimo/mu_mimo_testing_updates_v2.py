@@ -527,14 +527,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     binary_source = BinarySource()
     info_bits = binary_source([cfg.num_slots_p2, mu_mimo.num_bits_per_frame])
 
-    # TxSquad transmission (P1)
-    if cfg.enable_txsquad is True:
-        tx_squad = TxSquad(cfg, ns3cfg, mu_mimo.num_bits_per_frame)
-        txs_chans = dMIMOChannels(ns3cfg, "TxSquad", add_noise=True)
-        info_bits_new, txs_ber, txs_bler = tx_squad(txs_chans, info_bits)
-        # print("BER: {}  BLER: {}".format(txs_ber, txs_bler))
-        assert txs_ber <= 1e-3, "TxSquad transmission BER too high"
-
     # Saving Rx SNRs
     rx_snr_lin = 10.0 **( rx_snr_db / 10.0)
     rx_snr_lin = np.mean(rx_snr_lin, axis=(0,1, 3))
@@ -574,56 +566,21 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         most_frequent_value = values[np.argmax(counts)]
         cfg.code_rate = most_frequent_value
 
-        print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order)
-        print("Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
+        # print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order)
+        # print("Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
 
     # Update error statistics
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    print("Uncoded BER: ", uncoded_ber_phase_2)
-    print("Coded BER: ", coded_ber)
+    # print("Uncoded BER: ", uncoded_ber_phase_2)
+    # print("Coded BER: ", coded_ber)
     print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
     node_wise_acks = 1 - np.ceil(node_wise_bler)
     cfg.last_mcs_indices = mcs_indices
     cfg.last_node_wise_acks = node_wise_acks
-
-    # RxSquad transmission (P3)
-    if cfg.enable_rxsquad is True:
-        rxcfg = cfg.clone()
-        rxcfg.csi_delay = 4
-        rxcfg.decoder = "lmmse"
-        rxcfg.perfect_csi = False
-        rxcfg.first_slot_idx = cfg.first_slot_idx + cfg.num_slots_p2
-        num_ue_bits_per_frame = mu_mimo.num_bits_per_frame * (cfg.num_scheduled_ues / (cfg.num_scheduled_ues + 2))
-
-        rx_ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
-        rx_ns3cfg.update_ue_selection(None, rx_ue_mask)
-        rxs_chans = dMIMOChannels(rx_ns3cfg, "RxSquad", add_noise=False)
-        rx_squad = RxSquad(rxcfg, ns3cfg, num_ue_bits_per_frame, rxs_chans)
-        print("Each RxSquad UE transmitting {} streams, each with modulation order {}".format(rx_squad.num_streams_per_tx, rx_squad.num_bits_per_symbol_per_UE))
-
-        forwarding_bits = dec_bits[:,:,-(cfg.num_scheduled_ues * cfg.ue_ranks[0]):, : , :]
-        dec_bits_phase_3, \
-        node_wise_uncoded_ber_phase_3, \
-        uncoded_ber_phase_3, \
-        node_wise_coded_ber_phase_3, \
-        coded_ber_phase_3, \
-        node_wise_coded_bler_phase_3, \
-        coded_bler_phase_3 = rx_squad(rxs_chans, forwarding_bits)
-        # print("PHASE 3 STATS\nUNCODED BER: {}\nCODED BER: {}\nBLER: {}".format(uncoded_ber_phase_3 , coded_ber_phase_3, coded_bler_phase_3))
-        # if uncoded_ber_phase_3 >= 1e-2 or coded_ber_phase_3 >= 1e-2:
-        #     print("Warning: High RxSquad transmission BER")
-        
-        dec_bits_phase_3 = tf.reshape(dec_bits_phase_3, [dec_bits_phase_3.shape[0], forwarding_bits.shape[0], forwarding_bits.shape[1], forwarding_bits.shape[3], forwarding_bits.shape[4]])
-        dec_bits_phase_3 = tf.transpose(dec_bits_phase_3, perm=[1, 2, 0, 3, 4])
-        gNB_bits_phase_2 = dec_bits[:,:,:-(cfg.num_scheduled_ues * cfg.ue_ranks[0]), : , :]
-        end_to_end_dec_bits = tf.concat([gNB_bits_phase_2, dec_bits_phase_3], axis=2)
-
-        coded_ber = compute_ber(info_bits, end_to_end_dec_bits).numpy()
-        coded_bler = compute_bler(info_bits, end_to_end_dec_bits).numpy()
 
     # Goodput and throughput estimation
     goodbits = (1.0 - coded_ber) * mu_mimo.num_bits_per_frame
@@ -673,24 +630,27 @@ def sim_mu_mimo_all(
     nodewise_bler_list = []
     per_step_throughput = []
 
-    if rl_selector is None and cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
-        rl_selector = RLBeamSelector()
-        checkpoint = getattr(cfg, "rl_checkpoint", None)
-        if checkpoint:
-            rl_selector.load_all(Path(checkpoint))
-        rl_selector.set_evaluation_mode(bool(getattr(cfg, "rl_evaluation_only", False)))
-    cfg.rl_selector = rl_selector
-
+    no_rl_throughput = None
+    total_steps = None
 
     if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
         data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(cfg.drop_idx, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel))
         no_rl_throughput = data['per_step_throughput']
         assert(len(no_rl_throughput) == len(np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2))-1)
         cfg.num_transitions = len(no_rl_throughput) - 1
+        total_steps = cfg.num_transitions
 
         cfg.curr_no_rl_throughput = no_rl_throughput[0]
     else:
         cfg.curr_no_rl_throughput = None
+
+    if rl_selector is None and cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
+        rl_selector = RLBeamSelector(total_steps=total_steps)
+        checkpoint = getattr(cfg, "rl_checkpoint", None)
+        if checkpoint:
+            rl_selector.load_all(Path(checkpoint))
+        rl_selector.set_evaluation_mode(bool(getattr(cfg, "rl_evaluation_only", False)))
+    cfg.rl_selector = rl_selector
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         

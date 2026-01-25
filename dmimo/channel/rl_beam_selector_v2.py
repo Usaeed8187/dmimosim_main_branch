@@ -126,7 +126,8 @@ class RLBeamSelector:
 
     def __init__(
         self,
-        batch_size: Optional[int] = None,
+        memory_size: Optional[int] = 300,
+        training_batch_size: int = 32,
         input_window_size: int = 3,
         output_window_size: int = 3,
         total_steps: Optional[int] = None,
@@ -134,6 +135,8 @@ class RLBeamSelector:
         imitation_method: Optional[str] = "none",
         worst_tx_count: int = 1,
         worst_rx_count: int = 2,
+        ema_alpha: float = 0.1,
+        debug_oracle_reward: bool = True,
     ):
         
         self.O2 = 1
@@ -144,12 +147,20 @@ class RLBeamSelector:
         self.N1 = 1
         self.num_beams = (self.O1 * self.N1) * (self.O2 * self.N2)
         
-        self.batch_size = batch_size
-        self.epsilon_update_period = batch_size
+        self.memory_size = memory_size
+        self.training_batch_size = int(training_batch_size)
+        self.train_every_N_steps = 15
+        self.epsilon_update_period = 10
         self.e_greedy_start = 0.2
         self.e_greedy_end = 0.9
         self.epsilon = self.e_greedy_start
-        self.e_increase = (self.e_greedy_end - self.e_greedy_start) / max(1, (total_steps // batch_size) - 1)
+        if total_steps is None or memory_size is None:
+            self.e_increase = 0.0
+        else:
+            self.e_increase = (
+                (self.e_greedy_end - self.e_greedy_start)
+                / max(1, total_steps * (3 / 4) // self.epsilon_update_period)
+            )
 
         self.input_window_size = input_window_size
         self.output_window_size = output_window_size
@@ -171,6 +182,10 @@ class RLBeamSelector:
         self.action_log: List[int] = []
         self.transition_idx: int = 0
         self.evaluation_only: bool = False
+        self.ema_alpha = float(ema_alpha)
+        self.ema_throughput: Optional[float] = None
+        self.debug_oracle_reward = bool(debug_oracle_reward)
+        self._agent_max_actions: Optional[int] = None
 
     def set_epsilon_total_steps(self, total_steps: Optional[int]) -> None:
         """Update the epsilon decay horizon for the agent."""
@@ -187,6 +202,8 @@ class RLBeamSelector:
 
         self.prev_state = None
         self.prev_action = None
+        self.ema_throughput = None
+        self.transition_idx = 0
         
         self.reward_log.clear()
         self.action_log.clear()
@@ -234,15 +251,19 @@ class RLBeamSelector:
                 state_dim,
                 self.input_window_size,
                 self.output_window_size,
-                self.batch_size,
-                training_batch_size=self.batch_size,
-                training_start_threshold=self.batch_size,
+                self.memory_size,
+                training_batch_size=self.training_batch_size,
+                training_start_threshold=100,
+                reward_decay=0.7,
+                lr=0.001,
                 n_layers=1,
-                nInternalUnits=16,
-                spectral_radius=0.9,
+                nInternalUnits=64,
+                spectral_radius=0.6,
                 random_seed=self.agent_seed,
             )
+            self.agent.epsilon = self.epsilon
             self.state_dim = state_dim
+            self._agent_max_actions = self.max_actions
 
 
     def _init_action_map(self, tx_idx: int, L: int) -> List[Tuple[int, ...]]:
@@ -306,6 +327,19 @@ class RLBeamSelector:
         while len(candidates) < 4:
             candidates.append(current_idx)
         return candidates
+
+    def _ema_reward(self, throughput: Optional[float]) -> Optional[float]:
+        if throughput is None:
+            return None
+        throughput_value = float(throughput)
+        if self.ema_throughput is None:
+            self.ema_throughput = throughput_value
+            return 0.0
+        baseline = self.ema_throughput
+        reward = (throughput_value - baseline) / (baseline + 1e-6)
+        alpha = np.clip(self.ema_alpha, 0.0, 1.0)
+        self.ema_throughput = alpha * throughput_value + (1.0 - alpha) * baseline
+        return float(reward)
 
     def prepare_next_actions(
         self,
@@ -414,37 +448,32 @@ class RLBeamSelector:
 
         if not self.evaluation_only and self.prev_state is not None and self.prev_action is not None:
             
-            # reward = (throughput_debug - last_target_throughput) / last_target_throughput
-            
-            # reward = float(np.mean(throughput_debug - self.prev_mcs_arr))
-            
-            reward = throughput_debug - no_rl_throughput
-            
-            # if self.prev_action == 0:
-            #     reward = 1
-            # else:
-            #     reward = 0
+            if self.debug_oracle_reward and no_rl_throughput is not None:
+                reward = (throughput_debug - no_rl_throughput) / (no_rl_throughput + 1e-6)
+            else:
+                reward = self._ema_reward(throughput_debug)
 
-            # print("reward = ", reward)
-            
-            agent.activate_target_net(state)
-            agent.store_transition(self.prev_state, self.prev_action, reward, state)
-            self.log_reward(reward)
+            print("reward = ", reward)
 
-            if (self.transition_idx + 1) >= self.agent.training_start_threshold and ((self.transition_idx+1) % self.batch_size) == 0:
-                agent.learn_new(self.batch_size, self.transition_idx, method="double")
+            if reward is not None:
+                agent.activate_target_net(state)
+                agent.store_transition(self.prev_state, self.prev_action, reward, state)
+                self.log_reward(reward)
 
-            if ((self.transition_idx+1) % self.epsilon_update_period) == 0:
-                self.epsilon = min(self.e_greedy_end, self.epsilon + self.e_increase)
-                self.agent.epsilon = self.epsilon
+                if (
+                    (self.transition_idx + 1) >= agent.training_start_threshold
+                    and ((self.transition_idx + 1) % self.train_every_N_steps) == 0
+                ):
+                    agent.learn_new(agent.memory_size, self.transition_idx, method="double")
 
-            predicted_idx = agent.choose_action(state)
-            action_vector = self._decode_action_vector(predicted_idx, action_digit_count)
+                if ((self.transition_idx + 1) % self.epsilon_update_period) == 0:
+                    self.epsilon = min(self.e_greedy_end, self.epsilon + self.e_increase)
+                    self.agent.epsilon = self.epsilon
 
-            self.transition_idx += 1
-        else:
-            predicted_idx = 0
-            action_vector = self._decode_action_vector(predicted_idx, action_digit_count)
+                self.transition_idx += 1
+
+        predicted_idx = agent.choose_action(state)
+        action_vector = self._decode_action_vector(predicted_idx, action_digit_count)
 
         overrides = [[None for _ in range(num_tx)] for _ in range(total_users)]
 
