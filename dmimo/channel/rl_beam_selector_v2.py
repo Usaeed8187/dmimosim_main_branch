@@ -146,7 +146,7 @@ class RLBeamSelector:
         
         self.batch_size = batch_size
         self.epsilon_update_period = batch_size
-        self.e_greedy_start = 0.7
+        self.e_greedy_start = 0.2
         self.e_greedy_end = 0.9
         self.epsilon = self.e_greedy_start
         self.e_increase = (self.e_greedy_end - self.e_greedy_start) / max(1, (total_steps // batch_size) - 1)
