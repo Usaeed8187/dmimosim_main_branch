@@ -25,11 +25,13 @@ from typing import Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 5))
+DEFAULT_DROPS = list(range(1, 6))
 DEFAULT_MOBILITY = "high_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
 DEFAULT_LINK_ADAPT = True
+DEFAULT_MODULATION_ORDER = 2
+DEFAULT_CODE_RATE = 0.6
 DEFAULT_PERFECT_CSI = False
 DEFAULT_CSI_PREDICTION = True
 DEFAULT_CHANNEL_PREDICTION_SETTING = "deqn_plus_two_mode"
@@ -260,10 +262,13 @@ def _find_throughput_files(
     tx_ue: int,
     prediction_methods: Iterable[str],
     link_adapt: bool,
+    modulation_order: int,
+    code_rate: float,
 ) -> List[ThroughputFile]:
 
     files: List[ThroughputFile] = []
     prediction_set = {method for method in prediction_methods}
+    mcs_filter = f"mod_order_{modulation_order}_code_rate_{code_rate:g}"
     for drop in drops:
         drop_path = root / f"channels_{mobility}_{drop}"
         if not drop_path.exists():
@@ -289,6 +294,8 @@ def _find_throughput_files(
                 continue
             if info.prediction_method not in prediction_set:
                 continue
+            if not link_adapt and info.mcs != mcs_filter:
+                continue    
             candidates.append(info)
 
 
@@ -484,6 +491,8 @@ def main() -> None:
     parser.add_argument("--rx-ue", type=int, default=DEFAULT_RX_UES)
     parser.add_argument("--tx-ue", type=int, default=DEFAULT_TX_UES)
     parser.add_argument("--link-adapt", action="store_true", default=DEFAULT_LINK_ADAPT)
+    parser.add_argument("--modulation-order", type=int, default=DEFAULT_MODULATION_ORDER)
+    parser.add_argument("--code-rate", type=float, default=DEFAULT_CODE_RATE)
     parser.add_argument("--perfect-csi", action="store_true", default=DEFAULT_PERFECT_CSI)
     parser.add_argument("--csi-prediction", action="store_true", default=DEFAULT_CSI_PREDICTION)
     parser.add_argument(
@@ -542,6 +551,8 @@ def main() -> None:
         args.tx_ue,
         prediction_methods,
         args.link_adapt,
+        args.modulation_order,
+        args.code_rate,
     )
 
     if not reward_files and not action_files and not throughput_files:
