@@ -486,8 +486,8 @@ def main() -> None:
         "--drops",
         type=int,
         nargs="+",
-        default=[1, 2, 3],
-        # default=list(range(40, 43)),
+        # default=[1, 2, 3],
+        default=list(range(5, 6)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -501,7 +501,7 @@ def main() -> None:
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8, 10],
+        default=[2],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
@@ -554,7 +554,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--link-adapt",
-        default=False,
+        default=True,
         action="store_true",
         help="Plot link adaptation results saved when link adaptation was enabled.",
     )
