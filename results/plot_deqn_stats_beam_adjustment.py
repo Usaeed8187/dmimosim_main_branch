@@ -8,8 +8,10 @@ and ``deqn_actions_drop_<drop>_rx_UE_<rx>_tx_UE_<tx>_imitation_<method>_steps_<n
 then plots per-step average reward plus step-wise action selections.
 
 Throughput is loaded from files named like:
-``mu_mimo_results_<mcs>_rx_UE_<rx>_tx_UE_<tx>_prediction_<method>_pmi_quantization_<bool>_imitation_<method>_steps_<n>.npz``.
-
+``mu_mimo_results_link_adapt_rx_UE_<rx>_tx_UE_<tx>_prediction_<method>_pmi_quantization_<bool>_imitation_<method>_steps_<n>.npz``
+when link adaptation is enabled, or
+``mu_mimo_results_mod_order_<modorder>_code_rate_<coderate>_rx_UE_<rx>_tx_UE_<tx>_prediction_<method>_pmi_quantization_<bool>_imitation_<method>_steps_<n>.npz``
+when link adaptation is disabled.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from typing import Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 2))
+DEFAULT_DROPS = list(range(1, 5))
 DEFAULT_MOBILITY = "high_mobility"
 DEFAULT_RX_UES = 4
 DEFAULT_TX_UES = 2
@@ -33,7 +35,7 @@ DEFAULT_CSI_PREDICTION = True
 DEFAULT_CHANNEL_PREDICTION_SETTING = "deqn_plus_two_mode"
 DEFAULT_IMITATION_METHOD = "none"
 DEFAULT_IMITATION_DROP_COUNT = 0
-DEFAULT_ROLLING_WINDOW_LEN = 1
+DEFAULT_ROLLING_WINDOW_LEN = 10
 
 REWARD_PATTERN = re.compile(
     r"deqn_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"
@@ -46,15 +48,27 @@ ACTION_PATTERN = re.compile(
 )
 
 
-THROUGHPUT_PATTERN = re.compile(
-    r"mu_mimo_results_(?P<mcs>.+?)_rx_UE_(\d+)_tx_UE_(\d+)_"
+THROUGHPUT_LINK_ADAPT_PATTERN = re.compile(
+    r"mu_mimo_results_link_adapt_rx_UE_(\d+)_tx_UE_(\d+)_"
     r"prediction_(?P<prediction>[A-Za-z0-9_]+)_pmi_quantization_(?P<quant>True|False)_"
     r"imitation_([A-Za-z0-9_]+)_steps_(\d+)\.npz$"
 )
 
-THROUGHPUT_TWO_MODE_PATTERN = re.compile(
-    r"mu_mimo_results_(?P<mcs>.+?)_rx_UE_(\d+)_tx_UE_(\d+)_"
+THROUGHPUT_LINK_ADAPT_TWO_MODE_PATTERN = re.compile(
+    r"mu_mimo_results_link_adapt_rx_UE_(\d+)_tx_UE_(\d+)_"
     r"prediction_(?P<prediction>[A-Za-z0-9_]+)_pmi_quantization_(?P<quant>True|False)\.npz$"
+)
+
+THROUGHPUT_MODCOD_PATTERN = re.compile(
+    r"mu_mimo_results_mod_order_(?P<modorder>[^_]+)_code_rate_(?P<coderate>[^_]+)_"
+    r"rx_UE_(\d+)_tx_UE_(\d+)_prediction_(?P<prediction>[A-Za-z0-9_]+)_"
+    r"pmi_quantization_(?P<quant>True|False)_imitation_([A-Za-z0-9_]+)_steps_(\d+)\.npz$"
+)
+
+THROUGHPUT_MODCOD_TWO_MODE_PATTERN = re.compile(
+    r"mu_mimo_results_mod_order_(?P<modorder>[^_]+)_code_rate_(?P<coderate>[^_]+)_"
+    r"rx_UE_(\d+)_tx_UE_(\d+)_prediction_(?P<prediction>[A-Za-z0-9_]+)_"
+    r"pmi_quantization_(?P<quant>True|False)\.npz$"
 )
 
 
@@ -115,33 +129,60 @@ def _extract_action_metadata(path: Path) -> ActionFile:
         imitation_steps=int(match.group(5)),
     )
 
-def _extract_throughput_metadata(path: Path, drop_id: int) -> ThroughputFile:
+def _extract_throughput_metadata(path: Path, drop_id: int, link_adapt: bool) -> ThroughputFile:
 
-    match = THROUGHPUT_PATTERN.search(path.name)
-    if match:
-        return ThroughputFile(
-            path=path,
-            drop_id=drop_id,
-            rx_ue=int(match.group(2)),
-            tx_ue=int(match.group(3)),
-            prediction_method=match.group("prediction"),
-            mcs=match.group("mcs"),
-            imitation_method=match.group(6),
-            imitation_steps=int(match.group(7)),
-        )
-    
-    match = THROUGHPUT_TWO_MODE_PATTERN.search(path.name)
-    if match:
-        return ThroughputFile(
-            path=path,
-            drop_id=drop_id,
-            rx_ue=int(match.group(2)),
-            tx_ue=int(match.group(3)),
-            prediction_method=match.group("prediction"),
-            mcs=match.group("mcs"),
-            imitation_method=None,
-            imitation_steps=None,
-        )
+    if link_adapt:
+        match = THROUGHPUT_LINK_ADAPT_PATTERN.search(path.name)
+        if match:
+            return ThroughputFile(
+                path=path,
+                drop_id=drop_id,
+                rx_ue=int(match.group(1)),
+                tx_ue=int(match.group(2)),
+                prediction_method=match.group("prediction"),
+                mcs="link_adapt",
+                imitation_method=match.group(5),
+                imitation_steps=int(match.group(6)),
+            )
+
+        match = THROUGHPUT_LINK_ADAPT_TWO_MODE_PATTERN.search(path.name)
+        if match:
+            return ThroughputFile(
+                path=path,
+                drop_id=drop_id,
+                rx_ue=int(match.group(1)),
+                tx_ue=int(match.group(2)),
+                prediction_method=match.group("prediction"),
+                mcs="link_adapt",
+                imitation_method=None,
+                imitation_steps=None,
+            )
+    else:
+        match = THROUGHPUT_MODCOD_PATTERN.search(path.name)
+        if match:
+            return ThroughputFile(
+                path=path,
+                drop_id=drop_id,
+                rx_ue=int(match.group(3)),
+                tx_ue=int(match.group(4)),
+                prediction_method=match.group("prediction"),
+                mcs=f"mod_order_{match.group('modorder')}_code_rate_{match.group('coderate')}",
+                imitation_method=match.group(7),
+                imitation_steps=int(match.group(8)),
+            )
+
+        match = THROUGHPUT_MODCOD_TWO_MODE_PATTERN.search(path.name)
+        if match:
+            return ThroughputFile(
+                path=path,
+                drop_id=drop_id,
+                rx_ue=int(match.group(3)),
+                tx_ue=int(match.group(4)),
+                prediction_method=match.group("prediction"),
+                mcs=f"mod_order_{match.group('modorder')}_code_rate_{match.group('coderate')}",
+                imitation_method=None,
+                imitation_steps=None,
+            )
 
     raise ValueError(f"Cannot parse throughput metadata from {path}")
 
@@ -218,6 +259,7 @@ def _find_throughput_files(
     rx_ue: int,
     tx_ue: int,
     prediction_methods: Iterable[str],
+    link_adapt: bool,
 ) -> List[ThroughputFile]:
 
     files: List[ThroughputFile] = []
@@ -239,7 +281,7 @@ def _find_throughput_files(
         )
         for path in sorted({path for path in throughput_paths}):
             try:
-                info = _extract_throughput_metadata(path, drop_id=int(drop))
+                info = _extract_throughput_metadata(path, drop_id=int(drop), link_adapt=link_adapt)
             except ValueError:
                 continue
 
@@ -493,7 +535,13 @@ def main() -> None:
     if prediction_method != "two_mode":
         prediction_methods.add("two_mode")
     throughput_files = _find_throughput_files(
-        root, drops, args.mobility, args.rx_ue, args.tx_ue, prediction_methods
+        root,
+        drops,
+        args.mobility,
+        args.rx_ue,
+        args.tx_ue,
+        prediction_methods,
+        args.link_adapt,
     )
 
     if not reward_files and not action_files and not throughput_files:
