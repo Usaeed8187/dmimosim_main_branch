@@ -10,6 +10,23 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from scipy.io import loadmat
 
+gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
+os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
+
+import tensorflow as tf
+
+dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
+sys.path.append(dmimo_root)
+# Configure to use only a single GPU and allocate only as much memory as needed
+gpus = tf.config.list_physical_devices('GPU')
+if gpus and gpu_num != "":
+    try:
+        tf.config.experimental.set_memory_growth(gpus[0], True)
+    except RuntimeError as e:
+        print(e)
+tf.get_logger().setLevel('ERROR')
 
 from dmimo.config import SimConfig, Ns3Config
 from dmimo.phase_1 import sim_phase_1_all

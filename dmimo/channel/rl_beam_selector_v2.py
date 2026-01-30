@@ -149,7 +149,7 @@ class RLBeamSelector:
         
         self.memory_size = memory_size
         self.training_batch_size = int(training_batch_size)
-        self.train_every_N_steps = 15
+        self.train_every_N_steps = 5
         self.epsilon_update_period = 10
         self.e_greedy_start = 0.2
         self.e_greedy_end = 0.9
@@ -253,8 +253,8 @@ class RLBeamSelector:
                 self.output_window_size,
                 self.memory_size,
                 training_batch_size=self.training_batch_size,
-                training_start_threshold=100,
-                reward_decay=0.7,
+                training_start_threshold=50,
+                reward_decay=0.1,
                 lr=0.001,
                 n_layers=1,
                 nInternalUnits=64,
@@ -289,19 +289,60 @@ class RLBeamSelector:
 
         return None
 
-    def _build_state(self, user_beam_sets: List[List[int]], mcs_values: np.ndarray) -> np.ndarray:
-        state_parts: List[np.ndarray] = []
-        for user_idx, beam_set in enumerate(user_beam_sets):
-            beam_arr = np.asarray(beam_set, dtype=np.float32)
-            mcs_val = (
-                np.array([mcs_values[user_idx]], dtype=np.float32)
-                if user_idx < len(mcs_values)
-                else np.array([0.0], dtype=np.float32)
+    # def _build_state(self, user_beam_sets: List[List[int]], mcs_values: np.ndarray) -> np.ndarray:
+    #     state_parts: List[np.ndarray] = []
+    #     for user_idx, beam_set in enumerate(user_beam_sets):
+    #         beam_arr = np.asarray(beam_set, dtype=np.float32)
+    #         mcs_val = (
+    #             np.array([mcs_values[user_idx]], dtype=np.float32)
+    #             if user_idx < len(mcs_values)
+    #             else np.array([0.0], dtype=np.float32)
+    #         )
+    #         state_parts.append(np.concatenate([beam_arr, mcs_val]))
+    #     if not state_parts:
+    #         return np.array([], dtype=np.float32)
+    #     return np.concatenate(state_parts)
+
+    def _build_state(
+        self,
+        user_beam_sets,
+        worst_user_indices,
+        worst_tx_indices,
+    ):
+        U = len(user_beam_sets)
+        state = []
+
+        # --- Global collision info per worst TX ---
+        for tx_idx in worst_tx_indices:
+            beams = [user_beam_sets[u][tx_idx] for u in range(U)]
+            unique = len(set(beams))
+            collision_count = U - unique
+            multiplicities = np.bincount(beams)
+            max_mult = np.max(multiplicities)
+
+            state.append(collision_count / max(1, U - 1))
+            state.append(max_mult / max(1, U))
+
+        # --- Per worst-user collision + utility ---
+        for tx_idx in worst_tx_indices:
+            multiplicities = np.bincount(
+                [user_beam_sets[u][tx_idx] for u in range(U)]
             )
-            state_parts.append(np.concatenate([beam_arr, mcs_val]))
-        if not state_parts:
-            return np.array([], dtype=np.float32)
-        return np.concatenate(state_parts)
+            for u in worst_user_indices:
+                b = user_beam_sets[u][tx_idx]
+                mult = multiplicities[b]
+
+                state.append(1.0 if mult > 1 else 0.0)      # is colliding
+                state.append(mult / max(1, U))              # multiplicity
+
+        # --- Optional global severity ---
+        total_collisions = sum(
+            U - len(set(user_beam_sets[u][tx] for u in range(U)))
+            for tx in range(len(user_beam_sets[0]))
+        )
+        state.append(total_collisions / max(1, (U - 1)))
+
+        return np.array(state, dtype=np.float32)
     
     # def _build_state(self, mcs_values: Optional[np.ndarray]) -> np.ndarray:
     #     if mcs_values is None:
@@ -327,6 +368,65 @@ class RLBeamSelector:
         while len(candidates) < 4:
             candidates.append(current_idx)
         return candidates
+    
+    def _build_candidate_indices_collision_aware(
+        self,
+        current_idx: int,
+        action_map: List[Tuple[int, ...]],
+        user_beam_sets: List[List[int]],
+        tx_idx: int,
+        user_idx: int,
+    ) -> List[int]:
+        num_beams = len(action_map)
+        if num_beams <= 0:
+            return [current_idx, current_idx, current_idx, current_idx]
+
+        current_idx = int(np.clip(current_idx, 0, num_beams - 1))
+
+        # Count OTHER users per beam index at this TX
+        used_counts = np.zeros((num_beams,), dtype=np.int32)
+        for j, beams_j in enumerate(user_beam_sets):
+            if j == user_idx or tx_idx >= len(beams_j):
+                continue
+            b = int(beams_j[tx_idx])
+            if 0 <= b < num_beams:
+                used_counts[b] += 1
+
+        current_mult_excl_self = used_counts[current_idx]  # others on same beam
+
+        # If user is NOT colliding (no one else on same beam), prefer no-op strongly.
+        if current_mult_excl_self == 0:
+            return [current_idx, current_idx, current_idx, current_idx]
+
+        # Score alternatives by expected collision reduction:
+        # Move is "useful" if it goes to a beam with fewer others than current beam has.
+        alts = [b for b in range(num_beams) if b != current_idx]
+
+        # Keep only beneficial moves first
+        beneficial = [b for b in alts if used_counts[b] < current_mult_excl_self]
+        nonbeneficial = [b for b in alts if used_counts[b] >= current_mult_excl_self]
+
+        # Sort beneficial by least used, then index
+        beneficial_sorted = sorted(beneficial, key=lambda b: (used_counts[b], b))
+        nonbeneficial_sorted = sorted(nonbeneficial, key=lambda b: (used_counts[b], b))
+
+        # Build candidate list:
+        candidates = [current_idx] + beneficial_sorted
+
+        # If fewer than 3 beneficial moves exist, pad with current_idx (no-op),
+        # or (optionally) include the least-bad nonbeneficial at the end.
+        while len(candidates) < 4 and nonbeneficial_sorted:
+            # Option A (strict high-upside only): pad with no-op
+            candidates.append(current_idx)
+            # Option B (allow exploration): uncomment below and remove line above
+            # candidates.append(nonbeneficial_sorted.pop(0))
+
+        while len(candidates) < 4:
+            candidates.append(current_idx)
+
+        return candidates[:4]
+
+
 
     def _ema_reward(self, throughput: Optional[float]) -> Optional[float]:
         if throughput is None:
@@ -433,10 +533,16 @@ class RLBeamSelector:
         # State uses indices of W1 beam sets (not raw beam IDs) plus each user's MCS.
         # selected_beam_sets = [user_beam_sets[idx] for idx in worst_user_indices]
         # selected_mcs = mcs_array[worst_user_indices] if len(mcs_array) > 0 else np.zeros(selected_user_count)
-        state = self._build_state(user_beam_sets, mcs_array)
+        # state = self._build_state(user_beam_sets, mcs_array)
 
         # # State uses only the MCS values.
         # state = self._build_state(mcs_array)
+
+        state = self._build_state(
+            user_beam_sets,
+            worst_user_indices,
+            worst_tx_indices,
+        )
 
         action_digit_count = selected_user_count * len(worst_tx_indices)
         self.max_actions = 4 ** action_digit_count
@@ -452,6 +558,7 @@ class RLBeamSelector:
                 reward = (throughput_debug - no_rl_throughput) / (no_rl_throughput + 1e-6)
             else:
                 reward = self._ema_reward(throughput_debug)
+            reward = float(np.clip(reward, -0.5, 0.5))
 
             print("reward = ", reward)
 
@@ -460,19 +567,30 @@ class RLBeamSelector:
                 agent.store_transition(self.prev_state, self.prev_action, reward, state)
                 self.log_reward(reward)
 
+                # --- Train only on filled replay buffer ---
+                filled_replay = min(agent.memory_counter, agent.memory_size)
+
                 if (
-                    (self.transition_idx + 1) >= agent.training_start_threshold
+                    filled_replay >= agent.training_start_threshold
                     and ((self.transition_idx + 1) % self.train_every_N_steps) == 0
                 ):
-                    agent.learn_new(agent.memory_size, self.transition_idx, method="double")
+                    # Use filled_replay instead of full memory_size
+                    agent.learn_new(
+                        filled_replay,
+                        min(self.transition_idx, filled_replay - 1),
+                        method="double",
+                    )
 
                 if ((self.transition_idx + 1) % self.epsilon_update_period) == 0:
                     self.epsilon = min(self.e_greedy_end, self.epsilon + self.e_increase)
                     self.agent.epsilon = self.epsilon
 
+                    print("epsilon = ", self.agent.epsilon)
+
                 self.transition_idx += 1
 
         predicted_idx = agent.choose_action(state)
+        print("action = ", predicted_idx)
         action_vector = self._decode_action_vector(predicted_idx, action_digit_count)
 
         overrides = [[None for _ in range(num_tx)] for _ in range(total_users)]
@@ -481,7 +599,15 @@ class RLBeamSelector:
             worst_action_map = tx_action_maps[tx_idx]
             for user_pos, user_idx in enumerate(worst_user_indices):
                 current_idx = user_beam_sets[user_idx][tx_idx]
-                candidates = self._build_candidate_indices(current_idx, worst_action_map)
+                # candidates = self._build_candidate_indices(current_idx, worst_action_map) # TESTING
+                candidates = self._build_candidate_indices_collision_aware(
+                    current_idx=current_idx,
+                    action_map=worst_action_map,
+                    user_beam_sets=user_beam_sets,
+                    tx_idx=tx_idx,
+                    user_idx=user_idx,
+                )
+
                 action_idx = action_vector[tx_pos * selected_user_count + user_pos]
                 chosen_idx = candidates[action_idx]
                 beam_tuple = worst_action_map[chosen_idx] if worst_action_map else None

@@ -25,9 +25,9 @@ from typing import Iterable, List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-DEFAULT_DROPS = list(range(1, 6))
+DEFAULT_DROPS = list(range(1, 101))
 DEFAULT_MOBILITY = "high_mobility"
-DEFAULT_RX_UES = 4
+DEFAULT_RX_UES = 2
 DEFAULT_TX_UES = 2
 DEFAULT_LINK_ADAPT = True
 DEFAULT_MODULATION_ORDER = 2
@@ -37,7 +37,7 @@ DEFAULT_CSI_PREDICTION = True
 DEFAULT_CHANNEL_PREDICTION_SETTING = "deqn_plus_two_mode"
 DEFAULT_IMITATION_METHOD = "none"
 DEFAULT_IMITATION_DROP_COUNT = 0
-DEFAULT_ROLLING_WINDOW_LEN = 10
+DEFAULT_ROLLING_WINDOW_LEN = 300
 
 REWARD_PATTERN = re.compile(
     r"deqn_rewards_drop_(\d+)_rx_UE_(\d+)_tx_UE_(\d+)_"
@@ -478,6 +478,70 @@ def plot_throughput(
     plt.savefig(output, dpi=200)
     print(f"Saved throughput plot to {output}")
 
+def plot_fifth_percentile_throughput(
+    two_mode_series: List[Tuple[int, float]],
+    deqn_plus_two_mode_series: List[Tuple[int, float]],
+    output: Path,
+    tick_stride: int,
+) -> None:
+    if not two_mode_series:
+        raise RuntimeError("No two_mode throughput data found for 5% plot.")
+    if not deqn_plus_two_mode_series:
+        raise RuntimeError("No deqn_plus_two_mode throughput data found for 5% plot.")
+
+    two_mode_values = np.array([value for _, value in two_mode_series], dtype=float)
+    deqn_values = np.array([value for _, value in deqn_plus_two_mode_series], dtype=float)
+    sample_count = len(two_mode_values)
+    if sample_count == 0:
+        raise RuntimeError("No two_mode throughput samples found for 5% plot.")
+    if len(deqn_values) == 0:
+        raise RuntimeError("No deqn_plus_two_mode throughput samples found for 5% plot.")
+
+    aligned_count = min(sample_count, len(deqn_values))
+    if aligned_count < sample_count:
+        print(
+            "Warning: deqn_plus_two_mode throughput length "
+            f"({len(deqn_values)}) is shorter than two_mode ({sample_count}); "
+            "truncating to aligned length."
+        )
+        two_mode_values = two_mode_values[:aligned_count]
+        sample_count = aligned_count
+
+    latter_half_start = sample_count // 2
+    latter_half_values = two_mode_values[latter_half_start:]
+    if latter_half_values.size == 0:
+        raise RuntimeError("No two_mode throughput samples in the latter half for 5% plot.")
+
+    selection_count = max(1, int(np.ceil(0.05 * latter_half_values.size)))
+    lowest_indices = np.argsort(latter_half_values)[:selection_count]
+    selected_indices = np.sort(latter_half_start + lowest_indices)
+
+    x_positions = np.arange(1, selected_indices.size + 1, dtype=int)
+    two_mode_selected = two_mode_values[selected_indices]
+    deqn_selected = deqn_values[selected_indices]
+
+    improvements = deqn_selected - two_mode_selected
+    avg_improvement = float(np.mean(improvements)) if improvements.size else float("nan")
+    print(
+        "Average deqn_plus_two_mode improvement over two_mode for 5% throughput "
+        f"in latter half ({latter_half_start + 1}-{sample_count}): {avg_improvement:.6f}"
+    )
+
+    plt.figure(figsize=(10, 6))
+    plt.plot(x_positions, two_mode_selected, marker="o", label="two_mode 5% samples")
+    plt.plot(x_positions, deqn_selected, marker="s", label="deqn_plus_two_mode at 5% samples")
+    plt.xlabel("Sample index (latter-half selection)")
+    plt.ylabel("Per-step throughput")
+    plt.title("5% throughput samples (two_mode-based, latter half)")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.xticks(_select_tick_steps(x_positions, tick_stride))
+    plt.legend()
+    plt.tight_layout()
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output, dpi=200)
+    print(f"Saved 5% throughput plot to {output}")
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Plot DEQN reward/action logs across drops.")
     parser.add_argument(
@@ -524,6 +588,13 @@ def main() -> None:
         type=Path,
         default=Path("results") / "deqn_throughput.png",
         help="Path to save the generated throughput plot image.",
+    )
+
+    parser.add_argument(
+        "--throughput-5p-output",
+        type=Path,
+        default=Path("results") / "deqn_throughput_5p.png",
+        help="Path to save the generated 5% throughput plot image.",
     )
 
     args = parser.parse_args()
@@ -573,6 +644,7 @@ def main() -> None:
 
     if throughput_files:
         throughput_series_by_label: List[Tuple[str, List[Tuple[int, float]]]] = []
+        throughput_series_by_method: dict[str, List[Tuple[int, float]]] = {}
         for method in sorted(prediction_methods):
             method_files = [file_info for file_info in throughput_files if file_info.prediction_method == method]
             if not method_files:
@@ -580,11 +652,23 @@ def main() -> None:
             throughput_series, _ = _aggregate_throughput(method_files)
             throughput_series = _apply_rolling_mean(throughput_series, args.rolling_window)
             throughput_series_by_label.append((method, throughput_series))
+            throughput_series_by_method[method] = throughput_series
         plot_throughput(
             throughput_series_by_label,
             args.throughput_output,
             args.rolling_window,
-        )   
+        )
+        two_mode_series = throughput_series_by_method.get("two_mode", [])
+        deqn_plus_two_mode_series = throughput_series_by_method.get("deqn_plus_two_mode", [])
+        if two_mode_series and deqn_plus_two_mode_series:
+            plot_fifth_percentile_throughput(
+                two_mode_series,
+                deqn_plus_two_mode_series,
+                args.throughput_5p_output,
+                args.rolling_window,
+            )
+        else:
+            print("Skipping 5% throughput plot; missing two_mode or deqn_plus_two_mode data.")
     else:
         print("No throughput files found; skipping throughput plot.")
 
