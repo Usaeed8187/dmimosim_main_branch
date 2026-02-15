@@ -464,8 +464,10 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                            freq_cov_mat=freq_cov_mat,
                                                            lmmse_interpolator=lmmse_interpolator)
     
-    _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+    h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
                                                 batch_size=cfg.num_slots_p2)
+    
+    chan_pred_nmse = tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...] - h_freq_csi)**2) / tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...])**2)
     
     # Pick the selected UE's channels
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)
@@ -597,7 +599,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     node_wise_userbits_phase_2 = (1.0 - node_wise_bler) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
     node_wise_ratedbits_phase_2 = (1.0 - node_wise_uncoded_ser) * mu_mimo.num_bits_per_frame / (cfg.num_scheduled_ues + 1)
 
-    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler]
+    return [uncoded_ber_phase_2, coded_ber], [goodbits, userbits, ratedbits_phase_2], [node_wise_goodbits_phase_2, node_wise_userbits_phase_2, node_wise_ratedbits_phase_2, ranks_out, sinr_db_arr, snr_dB_arr, PMI_feedback_bits, node_wise_bler, chan_pred_nmse]
 
 
 def sim_mu_mimo_all(
@@ -629,6 +631,7 @@ def sim_mu_mimo_all(
     PMI_feedback_bits = []
     nodewise_bler_list = []
     per_step_throughput = []
+    chan_pred_nmse = []
 
     no_rl_throughput = None
     total_steps = None
@@ -688,6 +691,7 @@ def sim_mu_mimo_all(
             snr_dB_list.append(additional_KPIs[5])
             PMI_feedback_bits.append(additional_KPIs[6])
             nodewise_bler_list.append(additional_KPIs[7])
+            chan_pred_nmse.append(additional_KPIs[8])
         
         hold = 1
 
@@ -718,6 +722,7 @@ def sim_mu_mimo_all(
         rl_selector.save_all(checkpoint_dir)
 
     per_step_throughput = np.array(per_step_throughput)
+    chan_pred_nmse = np.array(chan_pred_nmse)
 
     return [
         uncoded_ber / total_cycles,
@@ -733,5 +738,6 @@ def sim_mu_mimo_all(
         ldpc_ber_list,
         sinr_dB,
         snr_dB,
-        per_step_throughput
+        per_step_throughput,
+        chan_pred_nmse
     ]

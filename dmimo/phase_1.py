@@ -319,7 +319,7 @@ def sim_phase_1(cfg: SimConfig, ns3cfg: Ns3Config):
     if cfg.perfect_csi is True:
         # Perfect channel estimation
         h_freq_csi_dl, rx_snr_db_dl, rx_pwr_dbm_dl = p1_chans_dl.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                                            forward=False,
+                                                                            forward=True,
                                                                             batch_size=cfg.num_slots_p1)                                                                            
     # elif cfg.csi_prediction is True:
     #     rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams)
@@ -340,7 +340,7 @@ def sim_phase_1(cfg: SimConfig, ns3cfg: Ns3Config):
         precoding_channel = h_freq_csi_dl
 
         _, rx_snr_db, _ = p1_chans_dl.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                                            forward=False,
+                                                                            forward=True,
                                                                             batch_size=cfg.num_slots_p1)
 
     # print ("h_freq_dl", h_freq_csi_dl.shape)

@@ -50,7 +50,7 @@ dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
 sys.path.append(os.path.join('..'))
-source_dir = '/home/data/ns3_channels_2way/'
+source_dir = '/home/usama/ns3_channels_q4/'
 destination_dir = 'ns3/'
 if not os.path.exists(destination_dir):
     os.makedirs(destination_dir)

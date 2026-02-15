@@ -7,10 +7,10 @@ declare -a mobilities=("high_mobility")
 # declare -a drop_idx=("1" "2" "3")
 declare -a drop_idx=($(seq 1 5))
 declare -a rx_ues_arr=("4")
-declare -a num_txue_sel_arr=("2" "4" "6" "8" "10")
+declare -a num_txue_sel_arr=("10")
 declare -a modulation_orders=("4")
 declare -a code_rates=("1/2")
-declare -a perfect_csi_arr=("True")
+declare -a perfect_csi_arr=("False")
 declare -a channel_prediction_settings=("None" "weiner_filter" "two_mode") # "None" "weiner_filter" "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
 declare -a csi_quantization_arr=("True")
 
@@ -21,7 +21,7 @@ if [[ "${link_adapt}" == "True" ]]; then
     code_rates=("${code_rates[0]}")
 fi
 
-PARALLEL_JOBS=${PARALLEL_JOBS:-12}
+PARALLEL_JOBS=${PARALLEL_JOBS:-6}
 
 generate_args() {
     # Loop through the arrays

@@ -157,42 +157,118 @@ def _enumerate_beam_sets(N1, O1, N2, O2, L):
 
     return sorted(beam_sets)
 
-def _build_w1_override_candidates(ns3cfg):
+def _extract_stream_vectors_from_pmi(h_pmi_squeezed):
+    """
+    Convert PMI "channel" tensor (which is actually stacked W_rb) into wideband unit vectors.
+
+    Expected input shape (after squeeze axis=(1,3) in your code):
+        h_pmi_squeezed: [B, Nstreams, Ntx, Nsym, Nfft]
+
+    Returns:
+        V: np.ndarray [Nstreams, Ntx] complex, unit-norm per stream
+    """
+    hp = h_pmi_squeezed.numpy() if hasattr(h_pmi_squeezed, "numpy") else np.asarray(h_pmi_squeezed)
+    # Average over batch, OFDM symbols, subcarriers -> wideband effective vector per stream
+    v = np.mean(hp, axis=(0, 3, 4))  # [Nstreams, Ntx]
+    # Normalize
+    nrm = np.linalg.norm(v, axis=1, keepdims=True) + 1e-12
+    V = v / nrm
+    return V
+
+
+def _stream_to_user_index(stream_idx, num_users, rank_per_user):
+    """
+    Map stream index -> user index assuming streams are grouped user-by-user.
+    """
+    return int(stream_idx // rank_per_user)
+
+
+def _find_most_collinear_pair(V, num_users, rank_per_user, exclude_same_user=True):
+    """
+    Find (i,j) that maximizes |V[i]^H V[j]|, optionally excluding same-user stream pairs.
+
+    Returns:
+        (i, j, corr_abs)
+    """
+    # Gram matrix
+    G = V @ np.conjugate(V.T)  # [Ns, Ns]
+    Ns = G.shape[0]
+    # Remove diagonal
+    np.fill_diagonal(G, 0.0)
+
+    if exclude_same_user:
+        for i in range(Ns):
+            ui = _stream_to_user_index(i, num_users, rank_per_user)
+            for j in range(Ns):
+                uj = _stream_to_user_index(j, num_users, rank_per_user)
+                if ui == uj:
+                    G[i, j] = 0.0
+
+    absG = np.abs(G)
+    idx = np.unravel_index(np.argmax(absG), absG.shape)
+    i, j = int(idx[0]), int(idx[1])
+    return i, j, float(absG[i, j])
+
+def _user_stream_indices(user_idx, rank_per_user):
+    start = user_idx * rank_per_user
+    return list(range(start, start + rank_per_user))
+
+def _su_direction_penalty(V_ref, V_trial, moved_users, rank_per_user, rho_min=0.95):
+    """
+    Penalize rotating moved users' stream vectors away from their reference directions.
+
+    Args:
+        V_ref:   [Ns, Ntx] unit-norm rows (reference)
+        V_trial: [Ns, Ntx] unit-norm rows (trial)
+        moved_users: iterable of user indices (UEs you are tweaking)
+        rank_per_user: int
+        rho_min: float in (0,1], minimum allowed |v_ref^H v_trial|^2 before penalty kicks in
+
+    Returns:
+        penalty (float), rhos (dict stream_idx -> rho)
+    """
+    moved_users = list(set(int(u) for u in moved_users))
+    rhos = {}
+    pen = 0.0
+    for u in moved_users:
+        for s in _user_stream_indices(u, rank_per_user):
+            # |v_ref^H v_trial|^2
+            rho = float(np.abs(np.vdot(V_ref[s], V_trial[s]))**2)
+            rhos[s] = rho
+            if rho < rho_min:
+                pen += (rho_min - rho) ** 2
+    return float(pen), rhos
+
+
+def _tx_block_slices(ns3cfg, num_bs_ant=4, num_ue_ant=2):
+    """
+    Build antenna slices per TX node (tx_idx matches quantizer loop: 0=BS, 1..=TX UEs).
+    Returns:
+        slices: list[slice] length num_tx_nodes
+    """
     num_tx_nodes = ns3cfg.num_txue_sel + 1
-    num_rx_nodes = ns3cfg.num_rxue_sel + 2
+    slices = []
+    # tx_idx=0 -> BS antennas
+    slices.append(slice(0, num_bs_ant))
+    # tx_idx>=1 -> UE antennas appended after BS
+    for tx_idx in range(1, num_tx_nodes):
+        start = num_bs_ant + (tx_idx - 1) * num_ue_ant
+        end = start + num_ue_ant
+        slices.append(slice(start, end))
+    return slices
 
-    per_rx_tx_beams = []
-    for _rx in range(num_rx_nodes):
-        per_tx_options = []
-        for tx in range(num_tx_nodes):
-            if tx == 0:
-                N1 = 4
-                L = 4
-            else:
-                N1 = 2
-                L = 2
-            per_tx_options.append(_enumerate_beam_sets(N1=N1, O1=4, N2=1, O2=1, L=L))
-        per_rx_tx_beams.append(per_tx_options)
 
-    override_candidates = []
-    per_pair_options = [
-        per_rx_tx_beams[rx][tx]
-        for rx in range(num_rx_nodes)
-        for tx in range(num_tx_nodes)
-    ]
-
-    for combo in itertools.product(*per_pair_options):
-        override = [None for _ in range(num_rx_nodes)]
-        combo_idx = 0
-        for rx in range(num_rx_nodes):
-            tx_overrides = []
-            for _tx in range(num_tx_nodes):
-                tx_overrides.append(combo[combo_idx])
-                combo_idx += 1
-            override[rx] = tx_overrides
-        override_candidates.append(override)
-
-    return override_candidates
+def _rank_tx_blocks_by_contribution(v_i, v_j, tx_slices):
+    """
+    Rank tx blocks by how much they contribute to inner product <v_i, v_j>.
+    Contribution for tx block t is | v_i[t]^H v_j[t] |.
+    """
+    contrib = []
+    for tx_idx, sl in enumerate(tx_slices):
+        ci = np.vdot(v_i[sl], v_j[sl])  # v_i^H v_j on that block
+        contrib.append((tx_idx, float(np.abs(ci))))
+    contrib.sort(key=lambda x: x[1], reverse=True)
+    return contrib
 
 class MU_MIMO(Model):
 
@@ -748,11 +824,11 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    print("Baseline uncoded BER: ", uncoded_ber_phase_2)
-    print("Baseline BLER: ", coded_bler)
+    # print("Baseline uncoded BER: ", uncoded_ber_phase_2)
+    # print("Baseline BLER: ", coded_bler)
     sinr_linear = 10.0 ** (np.asarray(sinr_db_arr) / 10.0)
     sum_log_sinr = np.sum(np.log(1.0 + sinr_linear))
-    print("Baseline sum_log_sinr: ", sum_log_sinr)
+    # print("Baseline sum_log_sinr: ", sum_log_sinr)
 
     best_sum_log_sinr = sum_log_sinr
 
@@ -782,6 +858,65 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits_override, cfg.ue_ranks[0], cfg.num_tx_streams)
         
         return sum_log_sinr, coded_bler_override, sinr_db_arr_override, float(uncoded_ber), node_wise_bler
+
+    def _eval_proxy_score(
+        w1_override,
+        V_ref=None,
+        moved_users=None,
+        rank_per_user=None,
+        eps=1e-3,
+        lambda_su=5.0,
+        rho_min=0.95,
+    ):
+        """
+        Proxy objective used during planning (NO mu_mimo / NO BLER).
+
+        Smaller is better.
+
+        Components:
+        1) MU-ZF conditioning: tr((G+eps I)^-1), G = V V^H
+        2) SU preservation (optional): penalize rotating the moved users' stream vectors
+            away from reference directions using hinge on rho=|v_ref^H v_trial|^2.
+
+        Args:
+            V_ref: [Ns,Ntx] reference stream vectors (unit-norm). If None -> no SU penalty.
+            moved_users: list[int] moved UE indices for which SU should be protected
+            rank_per_user: int needed if SU penalty enabled
+        """
+        h_pmi, _, _ = type_II_PMI_quantizer(
+            h_freq_csi_quant_input,
+            return_feedback_bits=True,
+            return_components=True,
+            w1_beam_indices_override=w1_override,
+        )
+        h_pmi = tf.squeeze(h_pmi, axis=(1, 3))  # [B, Nstreams, Ntx, Nsym, Nfft]
+        V = _extract_stream_vectors_from_pmi(h_pmi)  # [Ns, Ntx], unit-norm per stream
+
+        # MU conditioning proxy
+        G = V @ np.conjugate(V.T)  # [Ns, Ns]
+        Ns = G.shape[0]
+        G_reg = G + eps * np.eye(Ns, dtype=G.dtype)
+        try:
+            invG = np.linalg.inv(G_reg)
+            mu_term = float(np.real(np.trace(invG)))
+        except np.linalg.LinAlgError:
+            return 1e9  # extremely ill-conditioned
+
+        # Optional SU penalty
+        su_term = 0.0
+        if (V_ref is not None) and (moved_users is not None) and (rank_per_user is not None):
+            su_pen, _ = _su_direction_penalty(
+                V_ref=V_ref,
+                V_trial=V,
+                moved_users=moved_users,
+                rank_per_user=rank_per_user,
+                rho_min=rho_min,
+            )
+            su_term = lambda_su * su_pen
+
+        return mu_term + su_term
+
+
 
     def _deepcopy_override(ov):
         # ov is nested list: override[rx][tx] = tuple/list beam indices
@@ -813,112 +948,264 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
         # Evaluate initial
         best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber, node_wise_bler = _eval_override(current_override)
-        print("Greedy init sum_log_sinr:", best_sum_log_sinr, "BLER:", best_bler)
+        # print("Greedy init sum_log_sinr:", best_sum_log_sinr, "BLER:", best_bler)
 
         print("Greedy init node_wise_bler:", node_wise_bler)
         best_node_wise_bler = node_wise_bler
 
 
         ########################################################################################################
-        # GREEDY APPROACH, CHANGING RX-TX PAIRS FOR WORST RX -- USES PERFECT CHANNEL INTERACTIONS
+        # dMIMO-guided greedy beam search:
+        #   - Identify the most collinear stream-pair (largest |v_i^H v_j|)
+        #   - Choose which USER to move (usually the higher-SNR one)
+        #   - Choose which TX blocks to move on (blocks contributing most to that collinearity)
+        #   - Search W1 candidates ONLY for (mover_user, selected_tx_blocks)
         ########################################################################################################
 
-        max_passes = getattr(cfg, "greedy_max_passes", 1)
+        max_passes = int(getattr(cfg, "greedy_max_passes", 1))
+
+        cfg.greedy_num_ues_to_adjust = 2  # <-- NEW (default = 1 if not set)
+
+        # How many TX blocks we are allowed to tweak for the selected mover user (per pass)
+        K_tx_blocks = int(getattr(cfg, "greedy_num_tx_to_optimize", 2))
+
+        # Optional: cap candidate search per (rx,tx) to keep runtime sane (None disables cap)
+        max_candidates_per_pair = getattr(cfg, "greedy_max_candidates_per_pair", None)
+
         improved = True
         pass_idx = 0
 
-        # How many "worst" users to consider each pass
-        bottom_N = int(getattr(cfg, "greedy_bottom_N", 2))  # e.g., 1,2,3,...
-        bottom_N = max(1, min(bottom_N, num_rx_nodes))
+        num_tx_nodes = ns3cfg.num_txue_sel + 1
+        num_rx_nodes = ns3cfg.num_rxue_sel + 2
+        rank_per_user = int(cfg.num_tx_streams / num_rx_nodes)  # assumes uniform ranks
 
-        rank_per_user = int(cfg.num_tx_streams / num_rx_nodes)  # e.g., 1 if 1 stream per node
+        # Per-(rx,tx) candidates, same as your current enumerator
+        per_pair_candidates = [[None for _ in range(num_tx_nodes)] for _ in range(num_rx_nodes)]
+        for rx in range(num_rx_nodes):
+            for tx in range(num_tx_nodes):
+                if tx == 0:
+                    N1, L = 4, 4
+                else:
+                    N1, L = 2, 2
+                cands = _enumerate_beam_sets(N1=N1, O1=4, N2=1, O2=1, L=L)
+                if max_candidates_per_pair is not None:
+                    cands = cands[: int(max_candidates_per_pair)]
+                per_pair_candidates[rx][tx] = cands
 
-        def _worst_users_from_sinr_db(sinr_db_arr_, bottom_N_):
+        # Initialize from baseline quantizer output
+        current_override = [
+            [np.sort(feedback_bits[rx]['w1_beam_indices'][tx]) for tx in range(num_tx_nodes)]
+            for rx in range(num_rx_nodes)
+        ]
+
+        # Update _eval_override so it also returns the squeezed PMI tensor (so we can compute v vectors)
+        def _eval_override(w1_override):
             """
-            Return indices of bottom_N_ users by per-user SINR score.
-            Assumes per-stream SINRs are ordered user-by-user.
+            Evaluate a full W1 override config and return:
+                (sum_log_sinr, bler, sinr_db_arr, uncoded_ber, node_wise_bler, h_pmi_squeezed)
             """
-            s = np.asarray(sinr_db_arr_, dtype=float).reshape(num_rx_nodes, rank_per_user)
+            h_pmi, _, _ = type_II_PMI_quantizer(
+                h_freq_csi_quant_input,
+                return_feedback_bits=True,
+                return_components=True,
+                w1_beam_indices_override=w1_override,
+            )
+            h_pmi = tf.squeeze(h_pmi, axis=(1, 3))  # [B, Nstreams, Ntx, Nsym, Nfft]
 
-            # Score per user: mean SINR(dB) over that user's streams (use min if you prefer)
-            per_user_score = np.mean(s, axis=1)
+            dec_bits_override, uncoded_ber, _, _, _, sinr_db_arr_override = mu_mimo(
+                dmimo_chans,
+                h_pmi,
+                info_bits,
+                snr_dB_arr,
+            )
+            info_bits_override = tf.reshape(info_bits, dec_bits_override.shape)
+            coded_bler_override = compute_bler(info_bits_override, dec_bits_override).numpy()
 
-            # Indices sorted ascending (worst first)
-            worst_order = np.argsort(per_user_score)
-            bottom_users = worst_order[:bottom_N_].tolist()
-            return bottom_users, per_user_score
+            sinr_linear = 10.0 ** (np.asarray(sinr_db_arr_override) / 10.0)
+            sum_log_sinr = float(np.sum(np.log(1.0 + sinr_linear)))
 
-        while improved and pass_idx < max_passes:
-            improved = False
-            pass_idx += 1
+            node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits_override, cfg.ue_ranks[0], cfg.num_tx_streams)
 
-            # 1) pick bottom-N users based on current SINR
-            bottom_users, per_user_sinr_db = _worst_users_from_sinr_db(best_sinr_db_arr, bottom_N)
-            print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] bottom_users={bottom_users}, per_user_sinr_dB={per_user_sinr_db}")
+            return sum_log_sinr, coded_bler_override, sinr_db_arr_override, float(uncoded_ber), node_wise_bler, h_pmi
 
-            ranked_txs, col_vec = _rank_txs_by_w1_collisions(
-                worst_rxs=bottom_users,
-                num_tx_nodes=num_tx_nodes,
-                feedback_bits=feedback_bits,        # OR use current_override=current_override
-                # current_override=current_override,  # if you want collisions based on current (updated) beams
-                metric="extra_duplicates",          # or "pair_collisions"
+
+        def _deepcopy_override(ov):
+            return [list(tx_list) for tx_list in ov]
+
+
+        # Evaluate initial
+        best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber, best_node_wise_bler, best_h_pmi = _eval_override(current_override)
+        print("Greedy init sum_log_sinr:", best_sum_log_sinr, "BLER:", best_bler)
+        print("Greedy init node_wise_bler:", best_node_wise_bler)
+
+        override_sum_log_sinr = []
+        override_bler = []
+        override_sinr_db_arr = []
+
+        # Build TX antenna block slices so we can see which TX contributes most to collinearity
+        tx_slices = _tx_block_slices(ns3cfg, num_bs_ant=4, num_ue_ant=2)
+
+        max_ues_to_adjust = int(getattr(cfg, "greedy_num_ues_to_adjust", 1))
+
+    while improved and pass_idx < max_passes:
+        improved = False
+        pass_idx += 1
+
+        # ------------------------------------------------------------------
+        # PLAN PHASE (NO mu_mimo / NO BLER):
+        # plan up to max_ues_to_adjust tweaks using a proxy score only.
+        # ------------------------------------------------------------------
+        planned_override = _deepcopy_override(current_override)
+        planned_users = []
+        planned_changes = []  # list of tuples (user, tx, cand)
+        tweaked_users_this_pass = set()
+
+        # We will plan all tweaks sequentially, but WITHOUT environment eval
+        for ue_adjust_iter in range(max_ues_to_adjust):
+
+            # Build V from CURRENT planned_override (proxy-only)
+            # (We need h_pmi to get V, but still no mu_mimo)
+            h_pmi_plan, _, _ = type_II_PMI_quantizer(
+                h_freq_csi_quant_input,
+                return_feedback_bits=True,
+                return_components=True,
+                w1_beam_indices_override=planned_override,
+            )
+            h_pmi_plan = tf.squeeze(h_pmi_plan, axis=(1, 3))
+            V = _extract_stream_vectors_from_pmi(h_pmi_plan)
+
+            # Find most collinear stream pair
+            i, j, corr_ij = _find_most_collinear_pair(
+                V,
+                num_users=num_rx_nodes,
+                rank_per_user=rank_per_user,
+                exclude_same_user=True,
+            )
+            ui = _stream_to_user_index(i, num_rx_nodes, rank_per_user)
+            uj = _stream_to_user_index(j, num_rx_nodes, rank_per_user)
+
+            # Choose mover UE (prefer higher SNR, avoid re-tweaking if possible)
+            pair_candidates = sorted([(ui, i), (uj, j)], key=lambda x: snr_dB_arr[x[0]], reverse=True)
+
+            mover_u = None
+            mover_stream = None
+            fixed_stream = None
+            for u, s in pair_candidates:
+                if u not in tweaked_users_this_pass:
+                    mover_u = u
+                    mover_stream = s
+                    fixed_stream = j if s == i else i
+                    break
+            if mover_u is None:
+                mover_u, mover_stream = pair_candidates[0]
+                fixed_stream = j if mover_stream == i else i
+
+            print(
+                f"[Pass {pass_idx}, PLAN {ue_adjust_iter+1}] "
+                f"max |v_i^H v_j|={corr_ij:.4f}, moving user={mover_u}"
             )
 
-            K = int(getattr(cfg, "greedy_num_tx_to_optimize", 1))
-            K = max(1, min(K, num_tx_nodes))
-            allowed_txs = [tx for tx, _, _ in ranked_txs[:K]]
+            # TX blocks that contribute most
+            contrib = _rank_tx_blocks_by_contribution(V[mover_stream], V[fixed_stream], tx_slices)
+            allowed_txs = [tx for tx, _ in contrib[: max(1, min(K_tx_blocks, num_tx_nodes))]]
 
-            # 2) search ONLY changes to W1 of those bottom-N users (across all tx nodes)
-            best_local_delta = 0.0
-            best_local_override = None
-            best_local_metrics = None
-            best_local_where = None  # (rx, tx, cand)
+            # Protect SU gains for the UE we're currently moving (only)
+            V_ref = V
+            base_proxy = _eval_proxy_score(
+                planned_override,
+                V_ref=V_ref,
+                moved_users=[mover_u],
+                rank_per_user=rank_per_user,
+            )
+            best_proxy = base_proxy
+            best_choice = None  # (tx, cand)
 
-            for rx in bottom_users:
-                for tx in allowed_txs:
-                    base_choice = current_override[rx][tx]
-                    candidates = per_pair_candidates[rx][tx]
+            for tx in allowed_txs:
+                base_choice = planned_override[mover_u][tx]
+                cand_list = per_pair_candidates[mover_u][tx]
 
-                    for cand in candidates:
-                        # IMPORTANT: prefer tuples everywhere, so equality is just `cand == base_choice`
-                        # If base_choice is a numpy array in your code, keep this np.all check.
-                        if np.all(cand == base_choice):
-                            continue
+                for cand in cand_list:
+                    if np.all(cand == base_choice):
+                        continue
 
-                        trial_override = _deepcopy_override(current_override)
-                        trial_override[rx][tx] = cand
+                    trial_override = _deepcopy_override(planned_override)
+                    trial_override[mover_u][tx] = cand
 
-                        sum_log_sinr, bler, sinr_db_arr, uncoded_ber, node_wise_bler = _eval_override(trial_override)
+                    proxy = _eval_proxy_score(
+                        trial_override,
+                        V_ref=V_ref,
+                        moved_users=[mover_u],
+                        rank_per_user=rank_per_user,
+                    )
 
-                        if bler < best_bler:
-                            best_local_override = trial_override
-                            best_local_metrics = (sum_log_sinr, bler, sinr_db_arr, uncoded_ber, node_wise_bler)
-                            best_local_where = (rx, tx, cand)
+                    if proxy < best_proxy:
+                        best_proxy = proxy
+                        best_choice = (tx, cand)
 
-            # 3) apply best single change (if any improvement)
-            if best_local_override is not None:
-                current_override = best_local_override
-                best_sum_log_sinr, best_bler, best_sinr_db_arr, best_uncoded_ber, best_node_wise_bler = best_local_metrics
-                improved = True
+            if best_choice is None:
+                print(f"[Pass {pass_idx}, PLAN {ue_adjust_iter+1}] No proxy-improving move found; stopping planning.")
+                break
 
-                rx_changed, tx_changed, cand_used = best_local_where
-                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Changed (rx={rx_changed}, tx={tx_changed}) -> {cand_used}")
-                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Updating best_sum_log_sinr to:", best_sum_log_sinr)
-                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Current uncoded BER:", best_uncoded_ber)
-                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Current node_wise_bler:", best_node_wise_bler)
-                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] Current BLER:", best_bler)
+            # Commit the planned change (still no mu_mimo)
+            tx_best, cand_best = best_choice
+            planned_override[mover_u][tx_best] = cand_best
+            planned_users.append(mover_u)
+            planned_changes.append((mover_u, tx_best, cand_best))
+            tweaked_users_this_pass.add(mover_u)
 
-                override_sum_log_sinr.append(best_sum_log_sinr)
-                override_bler.append(best_bler)
-                override_sinr_db_arr.append(best_sinr_db_arr)
-            else:
-                print(f"[Bottom-{bottom_N} greedy pass {pass_idx}] No improving move found within bottom-{bottom_N} users.")
+            print(
+                f"[Pass {pass_idx}, PLAN {ue_adjust_iter+1}] Planned change: user={mover_u}, tx={tx_best}, "
+                f"proxy {base_proxy:.4f} -> {best_proxy:.4f}"
+            )
 
-        # Convert logs to arrays (optional)
+        # ------------------------------------------------------------------
+        # APPLY + EVAL PHASE (ONE environment interaction):
+        # evaluate planned_override ONCE using mu_mimo / BLER
+        # ------------------------------------------------------------------
+        if len(planned_changes) == 0:
+            print(f"[Pass {pass_idx}] No planned changes. Ending.")
+            break
+
+        (sum_log_sinr, bler, sinr_db_arr, uncoded_ber, node_wise_bler, h_pmi) = _eval_override(planned_override)
+
+        print(f"[Pass {pass_idx}] EVAL after joint apply: BLER={bler}, sum_log_sinr={sum_log_sinr:.4f}")
+        print(f"[Pass {pass_idx}] Planned changes applied: {planned_changes}")
+        print(f"[Pass {pass_idx}] node_wise_bler={node_wise_bler}")
+
+        # Accept/reject as a joint action (single interaction)
+        better = False
+        if bler < best_bler:
+            better = True
+        elif bler == best_bler and sum_log_sinr > best_sum_log_sinr:
+            better = True
+
+        if better:
+            current_override = planned_override
+            best_sum_log_sinr = sum_log_sinr
+            best_bler = bler
+            best_sinr_db_arr = sinr_db_arr
+            best_uncoded_ber = uncoded_ber
+            best_node_wise_bler = node_wise_bler
+            best_h_pmi = h_pmi
+
+            improved = True
+
+            override_sum_log_sinr.append(best_sum_log_sinr)
+            override_bler.append(best_bler)
+            override_sinr_db_arr.append(best_sinr_db_arr)
+
+            print(f"[Pass {pass_idx}] ACCEPT joint action.")
+        else:
+            print(f"[Pass {pass_idx}] REJECT joint action (no improvement).")
+            # Stop or continue depending on your preference:
+            # break
+
+
+
         override_sum_log_sinr = np.array(override_sum_log_sinr)
         override_bler = np.array(override_bler)
 
-        print("Greedy passes executed:", pass_idx)
+        # print("Greedy passes executed:", pass_idx)
         print("Baseline/initial SINR (dB): ", sinr_db_arr)
         print("Best greedy SINR (dB): ", best_sinr_db_arr)
         print("Best greedy sum_log_sinr: ", best_sum_log_sinr)
@@ -974,7 +1261,7 @@ def sim_mu_mimo_all(
 
     for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
         
-        # print("first_slot_idx: ", first_slot_idx)
+        print("first_slot_idx: ", first_slot_idx)
 
         total_cycles += 1
         cfg.first_slot_idx = first_slot_idx

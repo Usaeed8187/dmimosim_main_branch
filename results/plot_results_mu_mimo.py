@@ -348,14 +348,14 @@ def _default_scenarios(
             perfect_csi=False,
             prediction=False,
             quantization=True,
-            label="Worst case: Outdated CSI",
+            label="Outdated CSI",
             link_adapt=link_adapt,
         ),
         Scenario(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Two-Mode WESN prediction",
+            label="Two-Mode WESN Prediction",
             prediction_method="two_mode",
             link_adapt=link_adapt,
         ),
@@ -363,7 +363,7 @@ def _default_scenarios(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Wiener filter prediction",
+            label="Wiener Filter Prediction",
             link_adapt=link_adapt,
             prediction_method="weiner_filter",
         ),
@@ -379,26 +379,43 @@ def _default_scenarios(
             perfect_csi=True,
             prediction=False,
             quantization=True,
-            label="Perfect channel estimation, fb without delay, with quantization",
+            label="Perfect Prediction",
             link_adapt=link_adapt,
         ),
-        Scenario(
-            perfect_csi=True,
-            prediction=False,
-            quantization=False,
-            label="Perfect CSI at BS (no quantization, no delay)",
-            link_adapt=link_adapt,
-        ),
+        # Scenario(
+        #     perfect_csi=True,
+        #     prediction=False,
+        #     quantization=False,
+        #     label="Perfect CSI at BS (no quantization, no delay)",
+        #     link_adapt=link_adapt,
+        # ),
     ]
 
     if include_prediction:
         return scenarios
     return [scenario for scenario in scenarios if not scenario.prediction]
 
+# Different marker styles for different curves
+MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">"]
+
 ################################################################################
 # Plotting helpers
 ################################################################################
 
+def _save_figure_multi_format(output_path: str) -> None:
+    """
+    Save the current matplotlib figure in multiple formats.
+    Keeps the existing PNG and additionally saves SVG and EPS.
+    """
+    base, _ = os.path.splitext(output_path)
+
+    plt.savefig(base + ".png", dpi=300)   # raster (existing behavior)
+    plt.savefig(base + ".svg")            # vector (best for papers)
+    plt.savefig(base + ".eps")            # vector (IEEE-compatible)
+
+    # print(f"Saved: {base}.png")
+    # print(f"Saved: {base}.svg")
+    # print(f"Saved: {base}.eps")
 
 def plot_metric(
     x_values: Sequence[int],
@@ -408,15 +425,16 @@ def plot_metric(
     output_path: str,
 ) -> None:
     plt.figure()
-    for label, y_values in series:
-        plt.plot(x_values, y_values, marker="o", label=label)
+    for idx, (label, y_values) in enumerate(series):
+        marker = MARKERS[idx % len(MARKERS)]
+        plt.plot(x_values, y_values, marker=marker, label=label)
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
-    plt.title(title)
+    # plt.title(title)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(output_path)
+    _save_figure_multi_format(output_path)
     print(f"Saved: {output_path}")
 
 def semilogy_metric(
@@ -427,15 +445,16 @@ def semilogy_metric(
     output_path: str,
 ) -> None:
     plt.figure()
-    for label, y_values in series:
-        plt.semilogy(x_values, y_values, marker="o", label=label)
+    for idx, (label, y_values) in enumerate(series):
+        marker = MARKERS[idx % len(MARKERS)]
+        plt.semilogy(x_values, y_values, marker=marker, label=label)
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
-    plt.title(title)
+    # plt.title(title)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(output_path)
+    _save_figure_multi_format(output_path)
     print(f"Saved: {output_path}")
 
 
@@ -486,8 +505,8 @@ def main() -> None:
         "--drops",
         type=int,
         nargs="+",
-        # default=[1, 2, 3],
-        default=list(range(5, 6)),
+        # default=[1, 2, 3, 5],
+        default=list(range(1, 6)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -501,34 +520,34 @@ def main() -> None:
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[2],
+        default=[2, 4, 6, 8, 10],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
         "--modulation-orders",
         type=int,
         nargs="+",
-        default=[2, 4],
+        default=[4],
         help="Modulation orders that were simulated (e.g., 2 for QPSK, 4 for 16-QAM).",
     )
     parser.add_argument(
         "--code-rates",
         type=_float_or_fraction,
         nargs="+",
-        default=[_float_or_fraction("2/3")],
-        help="Code rates that were simulated (accepts fractions like 2/3).",
+        default=[_float_or_fraction("1/2")],
+        help="Code rates that were simulated (accepts fractions like 1/2).",
     )
     parser.add_argument(
         "--ber-modulation-order",
         type=int,
-        default=2,
+        default=4,
         help="Modulation order to use for BER plots.",
     )
     parser.add_argument(
         "--ber-code-rate",
         type=_float_or_fraction,
-        default=_float_or_fraction("2/3"),
-        help="Code rate to use for BER plots (accepts fractions like 2/3).",
+        default=_float_or_fraction("1/2"),
+        help="Code rate to use for BER plots (accepts fractions like 1/2).",
     )
     parser.add_argument(
         "--fixed-rx",
@@ -598,7 +617,7 @@ def main() -> None:
     )
 
     # BER vs RUs (fixed Rx)
-    tx_display = [tx + 2 for tx in cfg.tx_ues]
+    tx_display = [tx + 1 for tx in cfg.tx_ues]
     rx_display = [rx + 2 for rx in cfg.rx_ues]
 
     ber_tx_series = []

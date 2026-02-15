@@ -84,10 +84,10 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'higher_mobility'
+mobility = 'high_mobility'
 drop_idx = '3'
-rx_ues_arr = [4]
-num_txue_sel = 8
+rx_ues_arr = [2]
+num_txue_sel = 2
 
 modulation_order = 4
 code_rate = 1 / 2
@@ -297,6 +297,7 @@ def run_simulation():
     sinr_dB = []
     snr_dB = []
     phase_1_ue_ber = []
+    chan_pred_nmse = []
 
     for ue_arr_idx in range(np.size(rx_ues_arr)):
         
@@ -344,6 +345,7 @@ def run_simulation():
             sinr_dB.append(rst_zf[11])
         if rst_zf[12] is not None:
             snr_dB.append(rst_zf[12])
+        chan_pred_nmse = rst_zf[14]
 
         folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
         os.makedirs(folder_path, exist_ok=True)
@@ -357,7 +359,7 @@ def run_simulation():
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
                     nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
-                    ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13])
+                    ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13], chan_pred_nmse=chan_pred_nmse)
         else:
             if cfg.scheduling:
                 file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
