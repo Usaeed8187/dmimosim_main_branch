@@ -7,7 +7,6 @@ import sys
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-import tensorflow as tf
 from scipy.io import loadmat
 
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
@@ -31,11 +30,6 @@ tf.get_logger().setLevel('ERROR')
 from dmimo.config import SimConfig, Ns3Config
 from dmimo.phase_1 import sim_phase_1_all
 
-gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
-os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
-
 # Configure to use only a single GPU and allocate only as much memory as needed
 gpus = tf.config.list_physical_devices('GPU')
 if gpus and gpu_num != "":
@@ -50,7 +44,7 @@ dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
 sys.path.append(os.path.join('..'))
-source_dir = '/home/usama/ns3_channels_q4/'
+source_dir = '/home/usama/ns3_channels_q4/channels_high_mobility_1'
 destination_dir = 'ns3/'
 if not os.path.exists(destination_dir):
     os.makedirs(destination_dir)
@@ -132,7 +126,8 @@ if __name__ == "__main__":
     cfg.dl_freq = 3.5e9    
 
     # NS3 Configs
-    cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
+    # cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
+    cfg.ns3_folder = "ns3/"
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
     os.makedirs(os.path.join("results", folder_name), exist_ok=True)
     print("Using channels in {}".format(folder_name))

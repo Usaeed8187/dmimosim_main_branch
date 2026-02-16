@@ -5,7 +5,7 @@ import sionna
 from sionna.utils import flatten_dims
 from sionna.ofdm import RemoveNulledSubcarriers
 
-from .p1_demo_precoding import weighted_mean_precoder, wmmse_precoder
+from .p1_demo_precoding import weighted_mean_precoder, wmmse_precoder, grad_ascent_precoder, multicast_precoder_np_hard_sdr
 
 class P1DemoPrecoder(Layer):
     """Precoders for Phase 1 for demo"""
@@ -66,17 +66,11 @@ class P1DemoPrecoder(Layer):
         h = np.squeeze(h, axis=(1, 2))
         h_pc_desired = tf.transpose(h, [0, 2, 1])
 
-        if precoding_method == 'baseline':
-            x_precoded, g, starting_SINR, best_SINR = weighted_mean_precoder(x_precoded,
-                                    h_pc_desired,
-                                    rx_snr_db,
-                                    num_iterations=0,
-                                    return_precoding_matrix=True)
-        elif precoding_method == 'weighted_mean':
+        if precoding_method == 'weighted_mean':
             x_precoded, g, starting_SINR, best_SINR = weighted_mean_precoder(x_precoded,
                                                         h_pc_desired,
                                                         rx_snr_db,
-                                                        num_iterations=3,
+                                                        num_iterations=10,
                                                         return_precoding_matrix=True)
         elif precoding_method == 'wmmse':
             x_precoded, g, Hg = wmmse_precoder(x_precoded,
@@ -84,6 +78,22 @@ class P1DemoPrecoder(Layer):
                                                         rx_snr_db,
                                                         num_iterations=10,
                                                         return_precoding_matrix=True)
+            starting_SINR = None
+            best_SINR = None
+        elif precoding_method == 'np_hard_sdr':
+            x_precoded, g = grad_ascent_precoder(x_precoded,
+                                                    h_pc_desired,
+                                                    rx_snr_db,
+                                                    num_iterations=10,
+                                                    return_precoding_matrix=True)
+            starting_SINR = None
+            best_SINR = None
+        elif precoding_method == 'grad_ascent':
+            x_precoded, g = grad_ascent_precoder(x_precoded,
+                                                    h_pc_desired,
+                                                    rx_snr_db,
+                                                    num_iterations=10,
+                                                    return_precoding_matrix=True)
             starting_SINR = None
             best_SINR = None
         else:
