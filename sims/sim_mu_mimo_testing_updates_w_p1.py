@@ -84,7 +84,7 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'higher_mobility'
+mobility = 'high_mobility'
 drop_idx = '3'
 rx_ues_arr = [4]
 num_txue_sel = 8
@@ -102,6 +102,7 @@ rl_train_end_drop = 45
 # rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
 rl_checkpoint = None
 rl_evaluation_only = True
+phase_1_enabled = True
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -131,6 +132,7 @@ def parse_arguments():
     global csi_prediction, channel_prediction_method
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
+    global phase_1_enabled
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -164,6 +166,9 @@ def parse_arguments():
 
         if len(arguments) >= 12:
             rl_evaluation_only = _parse_bool(arguments[11])
+
+        if len(arguments) >= 13:
+            phase_1_enabled = _parse_bool(arguments[12])
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -211,8 +216,8 @@ def run_simulation():
     cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
-    cfg.ns3_folder = "ns3/"
-    # cfg.ns3_folder = "ns3/channels/LowMobility/"
+    # cfg.ns3_folder = "ns3/"
+    cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
     cfg.enable_rxsquad = False
@@ -244,6 +249,7 @@ def run_simulation():
 
     cfg.rl_checkpoint = rl_checkpoint
     cfg.rl_evaluation_only = rl_evaluation_only
+    cfg.phase_1_enabled = phase_1_enabled
 
     # Precompute LMMSE resources once per drop when needed
     start_time = time.time()

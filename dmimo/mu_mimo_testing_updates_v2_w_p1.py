@@ -688,7 +688,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     # compute and print the coded BER for phase 1
     print(f"\nPhase 1 coded BER with {phase_1v.rg.num_streams_per_tx} streams, modulation order {chosen_mcs_phase_1[0]}, code rate {chosen_mcs_phase_1[1]}:")
     p1_coded_bers = [compute_ber(info_bits_p2, available_info_bits_list[i]).numpy() for i in range(len(detected_bits_list))]
-    print(p1_coded_bers)
+    if np.mean(p1_coded_bers) != 0:
+        print(p1_coded_bers)
 
     # Saving Rx SNRs
     rx_snr_lin = 10.0 **( rx_snr_db / 10.0)
@@ -738,7 +739,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     coded_bler = compute_bler(info_bits_p2, dec_bits).numpy()
     # print("Uncoded BER: ", uncoded_ber_phase_2)
     # print("Coded BER: ", coded_ber)
-    print("BLER: ", coded_bler)
+    # print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits_p2, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
     node_wise_acks = 1 - np.ceil(node_wise_bler)

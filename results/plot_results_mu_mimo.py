@@ -344,29 +344,29 @@ def _default_scenarios(
     include_prediction: bool = True, link_adapt: bool = False
 ) -> List[Scenario]:
     scenarios = [
-        Scenario(
-            perfect_csi=False,
-            prediction=False,
-            quantization=True,
-            label="Outdated CSI",
-            link_adapt=link_adapt,
-        ),
-        Scenario(
-            perfect_csi=False,
-            prediction=True,
-            quantization=True,
-            label="Two-Mode WESN Prediction",
-            prediction_method="two_mode",
-            link_adapt=link_adapt,
-        ),
-        Scenario(
-            perfect_csi=False,
-            prediction=True,
-            quantization=True,
-            label="Wiener Filter Prediction",
-            link_adapt=link_adapt,
-            prediction_method="weiner_filter",
-        ),
+        # Scenario(
+        #     perfect_csi=False,
+        #     prediction=False,
+        #     quantization=True,
+        #     label="Outdated CSI",
+        #     link_adapt=link_adapt,
+        # ),
+        # Scenario(
+        #     perfect_csi=False,
+        #     prediction=True,
+        #     quantization=True,
+        #     label="Two-Mode WESN Prediction",
+        #     prediction_method="two_mode",
+        #     link_adapt=link_adapt,
+        # ),
+        # Scenario(
+        #     perfect_csi=False,
+        #     prediction=True,
+        #     quantization=True,
+        #     label="Wiener Filter Prediction",
+        #     link_adapt=link_adapt,
+        #     prediction_method="weiner_filter",
+        # ),
         # Scenario(
         #     perfect_csi=False,
         #     prediction=True,
@@ -429,8 +429,8 @@ def plot_metric(
         marker = MARKERS[idx % len(MARKERS)]
         plt.plot(x_values, y_values, marker=marker, label=label)
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
+    plt.xlabel(xlabel, fontsize=14)
+    plt.ylabel(ylabel, fontsize=14)
     # plt.title(title)
     plt.legend()
     plt.tight_layout()
@@ -449,8 +449,8 @@ def semilogy_metric(
         marker = MARKERS[idx % len(MARKERS)]
         plt.semilogy(x_values, y_values, marker=marker, label=label)
     plt.grid(True, which="both", linestyle="--", linewidth=0.5)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
+    plt.xlabel(xlabel, fontsize=14)
+    plt.ylabel(ylabel, fontsize=14)
     # plt.title(title)
     plt.legend()
     plt.tight_layout()
@@ -513,14 +513,14 @@ def main() -> None:
         "--rx-ues",
         type=int,
         nargs="+",
-        default=[4],
+        default=[2, 4, 6, 8, 10],
         help="UE counts that were simulated.",
     )
     parser.add_argument(
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8, 10],
+        default=[10],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
@@ -558,7 +558,7 @@ def main() -> None:
     parser.add_argument(
         "--fixed-tx",
         type=int,
-        default=4,
+        default=10,
         help="RU count to hold fixed when sweeping UEs.",
     )
     parser.add_argument(
