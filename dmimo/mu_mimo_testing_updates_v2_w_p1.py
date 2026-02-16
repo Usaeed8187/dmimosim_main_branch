@@ -624,7 +624,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
     quantized_channels = quantized_channels[:cfg_p1.num_scheduled_tx_ue, ...]
 
-    
+    phase_1_enabled = getattr(cfg, "phase_1_enabled", True)
+
     # Create Phase 1 simulation
     mcs_list = [
         [2, 0.5],      # MCS 1: QPSK 1/2
@@ -641,55 +642,60 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         [12, 0.75],    # MCS 12: 4096-QAM 3/4
         [12, 0.8333]   # MCS 13: 4096-QAM 5/6
     ] # Taken from WiFi 7 (Source: Gemini)
-    chosen_mcs_phase_1  = None
-    for mcs in mcs_list:
-        cfg_p1.modulation_order  = mcs[0]
-        cfg_p1.code_rate = mcs[1]
-        phase_1v = Phase1v(cfg_p1, rg_csi_p1) # I need this here to have rg created before I can calculate the number of info bits for phase 1
-        num_info_bits_p1 = phase_1v.batch_size * phase_1v.rg.num_streams_per_tx * phase_1v.num_codewords * phase_1v.ldpc_k 
-        num_info_bits_p2 = mu_mimo.batch_size * mu_mimo.rg.num_streams_per_tx * mu_mimo.num_codewords * mu_mimo.ldpc_k
-        if num_info_bits_p1 >= num_info_bits_p2:
-            chosen_mcs_phase_1 = mcs
-            break
-    if chosen_mcs_phase_1 is None:
-        raise ValueError("No suitable MCS found for phase 1 to " \
-        "accommodate the number of information bits in phase 2. Consider " \
-        "increasing the time duration for phase 1 or decreasing that of phase 2.")
-    
-    ### End Ramin edit for phase 1
-    # Check the number of info bits in phase 1:
-
 
     # The binary source will create batches of information bits
     binary_source = BinarySource()
     # Generate information bits for phase 2 (which is also the end-to-end total number of bits we want to send)
     info_bits_p2 = binary_source([cfg.num_slots_p2, mu_mimo.num_bits_per_frame])
-    # flatten:
-    info_bits_p1 = tf.reshape(info_bits_p2, [-1]) # size: cfg.num_slots_p2 * mu_mimo.num_bits_per_frame
-    # pad: (to make sure it would be compatible with phase 1's RG)
-    info_bits_p1 = tf.pad(info_bits_p1, [[0, num_info_bits_p1 - num_info_bits_p2]])
-    # reshape:
-    info_bits_p1 = tf.reshape(info_bits_p1, [phase_1v.batch_size, phase_1v.rg.num_streams_per_tx * phase_1v.num_codewords * phase_1v.ldpc_k ])
 
-    ## Time for Phase 1 transmission and reception:
-    detected_bits_list = phase_1v(p1_chans_dl, info_bits_p1, quantized_channels, precoding_method='grad_ascent')
-    available_info_bits_list = []
-    available_info_bits_list.append(info_bits_p2) # The base station has the error-free information 
-    for i_txue in range(len(detected_bits_list)):
-        detected_bits = detected_bits_list[i_txue]
-        # flatten
-        detected_bits = tf.reshape(detected_bits, [-1])
-        # trim to the original number of bits in phase 2 (in case we padded extra bits)
-        detected_bits = detected_bits[:num_info_bits_p2]
-        # reshape to [num_slots_p2, num_bits_per_frame]
-        detected_bits = tf.reshape(detected_bits, [cfg.num_slots_p2, mu_mimo.num_bits_per_frame])
-        available_info_bits_list.append(detected_bits)
-    
-    # compute and print the coded BER for phase 1
-    print(f"\nPhase 1 coded BER with {phase_1v.rg.num_streams_per_tx} streams, modulation order {chosen_mcs_phase_1[0]}, code rate {chosen_mcs_phase_1[1]}:")
-    p1_coded_bers = [compute_ber(info_bits_p2, available_info_bits_list[i]).numpy() for i in range(len(detected_bits_list))]
-    if np.mean(p1_coded_bers) != 0:
-        print(p1_coded_bers)
+    num_info_bits_p2 = mu_mimo.batch_size * mu_mimo.rg.num_streams_per_tx * mu_mimo.num_codewords * mu_mimo.ldpc_k
+
+    if phase_1_enabled:
+        chosen_mcs_phase_1  = None
+        for mcs in mcs_list:
+            cfg_p1.modulation_order  = mcs[0]
+            cfg_p1.code_rate = mcs[1]
+            phase_1v = Phase1v(cfg_p1, rg_csi_p1) # I need this here to have rg created before I can calculate the number of info bits for phase 1
+            num_info_bits_p1 = phase_1v.batch_size * phase_1v.rg.num_streams_per_tx * phase_1v.num_codewords * phase_1v.ldpc_k 
+            if num_info_bits_p1 >= num_info_bits_p2:
+                chosen_mcs_phase_1 = mcs
+                break
+        if chosen_mcs_phase_1 is None:
+            raise ValueError("No suitable MCS found for phase 1 to " \
+            "accommodate the number of information bits in phase 2. Consider " \
+            "increasing the time duration for phase 1 or decreasing that of phase 2.")
+        
+        ### End Ramin edit for phase 1
+        # Check the number of info bits in phase 1:
+
+        # flatten:
+        info_bits_p1 = tf.reshape(info_bits_p2, [-1]) # size: cfg.num_slots_p2 * mu_mimo.num_bits_per_frame
+        # pad: (to make sure it would be compatible with phase 1's RG)
+        info_bits_p1 = tf.pad(info_bits_p1, [[0, num_info_bits_p1 - num_info_bits_p2]])
+        # reshape:
+        info_bits_p1 = tf.reshape(info_bits_p1, [phase_1v.batch_size, phase_1v.rg.num_streams_per_tx * phase_1v.num_codewords * phase_1v.ldpc_k ])
+
+        ## Time for Phase 1 transmission and reception:
+        detected_bits_list = phase_1v(p1_chans_dl, info_bits_p1, quantized_channels, precoding_method='grad_ascent')
+        available_info_bits_list = [info_bits_p2] # The base station has the error-free information
+        for i_txue in range(len(detected_bits_list)):
+            detected_bits = detected_bits_list[i_txue]
+            # flatten
+            detected_bits = tf.reshape(detected_bits, [-1])
+            # trim to the original number of bits in phase 2 (in case we padded extra bits)
+            detected_bits = detected_bits[:num_info_bits_p2]
+            # reshape to [num_slots_p2, num_bits_per_frame]
+            detected_bits = tf.reshape(detected_bits, [cfg.num_slots_p2, mu_mimo.num_bits_per_frame])
+            available_info_bits_list.append(detected_bits)
+        
+        # compute and print the coded BER for phase 1
+        print(f"\nPhase 1 coded BER with {phase_1v.rg.num_streams_per_tx} streams, modulation order {chosen_mcs_phase_1[0]}, code rate {chosen_mcs_phase_1[1]}:")
+        p1_coded_bers = [compute_ber(info_bits_p2, available_info_bits_list[i]).numpy() for i in range(len(detected_bits_list))]
+        if np.mean(p1_coded_bers) != 0:
+            print(p1_coded_bers)
+    else:
+        # Phase 2 only mode: assume all transmitters have the phase-2 bits.
+        available_info_bits_list = [info_bits_p2 for _ in range(ns3cfg.num_txue_sel + 1)]
 
     # Saving Rx SNRs
     rx_snr_lin = 10.0 **( rx_snr_db / 10.0)
