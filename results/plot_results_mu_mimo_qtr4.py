@@ -12,8 +12,8 @@ Expected filename patterns are:
 
 The script averages metrics across drops and produces:
 
-* Uncoded BER vs number of RUs (fixed RX UEs)
-* Uncoded BER vs number of RX UEs (fixed RUs)
+* Coded BER vs number of RUs (fixed RX UEs)
+* Coded BER vs number of RX UEs (fixed RUs)
 * Throughput vs number of RUs (fixed RX UEs)
 * Throughput vs number of RX UEs (fixed RUs)
 """
@@ -171,29 +171,29 @@ def main() -> None:
     args = parse_args()
 
     scenarios = [
-        Scenario(
-            phase_1_enabled=False,
-            phase_3_enabled=True,
-            prediction=False,
-            quantization=True,
-            perfect_csi=True,
-            label="Perfect Phase-1 + Perfect CSI",
-        ),
-        Scenario(
-            phase_1_enabled=False,
-            phase_3_enabled=True,
-            prediction=True,
-            quantization=True,
-            prediction_method=args.prediction_method,
-            label="Perfect Phase-1 + Prediction",
-        ),
+        # Scenario(
+        #     phase_1_enabled=False,
+        #     phase_3_enabled=True,
+        #     prediction=False,
+        #     quantization=True,
+        #     perfect_csi=True,
+        #     label="Perfect Phase-1 + Perfect CSI",
+        # ),
+        # Scenario(
+        #     phase_1_enabled=False,
+        #     phase_3_enabled=True,
+        #     prediction=True,
+        #     quantization=True,
+        #     prediction_method=args.prediction_method,
+        #     label="Perfect Phase-1 + Prediction",
+        # ),
         Scenario(
             phase_1_enabled=True,
             phase_3_enabled=True,
             prediction=True,
             quantization=True,
             prediction_method=args.prediction_method,
-            label="Imperfect Phase-1 + Prediction",
+            label="CJT",
         ),
     ]
 
@@ -214,7 +214,7 @@ def main() -> None:
                 tx_ues=tx,
                 scenario=scenario,
             )
-            y_ber_tx.append(point.uncoded_ber if point else float("nan"))
+            y_ber_tx.append(point.coded_ber if point else float("nan"))
             y_tput_tx.append(point.throughput if point else float("nan"))
 
         y_ber_rx: List[float] = []
@@ -228,7 +228,7 @@ def main() -> None:
                 tx_ues=args.fixed_tx,
                 scenario=scenario,
             )
-            y_ber_rx.append(point.uncoded_ber if point else float("nan"))
+            y_ber_rx.append(point.coded_ber if point else float("nan"))
             y_tput_rx.append(point.throughput if point else float("nan"))
 
         ber_vs_tx.append((scenario.label, y_ber_tx))
@@ -240,16 +240,16 @@ def main() -> None:
         x_values=args.tx_ues,
         y_series=ber_vs_tx,
         xlabel="Number of RUs",
-        ylabel="Uncoded BER",
-        output_path=args.output_dir / "qtr4_uncoded_ber_vs_rus.png",
+        ylabel="Coded BER",
+        output_path=args.output_dir / "qtr4_coded_ber_vs_rus.png",
         semilogy=True,
     )
     _plot(
         x_values=args.rx_ues,
         y_series=ber_vs_rx,
         xlabel="Number of RX UEs",
-        ylabel="Uncoded BER",
-        output_path=args.output_dir / "qtr4_uncoded_ber_vs_rx_ues.png",
+        ylabel="Coded BER",
+        output_path=args.output_dir / "qtr4_coded_ber_vs_rx_ues.png",
         semilogy=True,
     )
     _plot(
