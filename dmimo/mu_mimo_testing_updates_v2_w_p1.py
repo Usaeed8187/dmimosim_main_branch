@@ -744,13 +744,53 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     coded_ber = compute_ber(info_bits_p2, dec_bits).numpy()
     coded_bler = compute_bler(info_bits_p2, dec_bits).numpy()
     # print("Uncoded BER: ", uncoded_ber_phase_2)
-    # print("Coded BER: ", coded_ber)
-    # print("BLER: ", coded_bler)
+    print("Coded BER: ", coded_ber)
+    print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits_p2, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
     node_wise_acks = 1 - np.ceil(node_wise_bler)
     cfg.last_mcs_indices = mcs_indices
     cfg.last_node_wise_acks = node_wise_acks
+
+    # RxSquad transmission (P3)
+    if cfg.enable_rxsquad is True:
+        rxcfg = cfg.clone()
+        rxcfg.csi_delay = 4
+        rxcfg.decoder = "lmmse"
+        rxcfg.perfect_csi = False
+        rxcfg.first_slot_idx = cfg.first_slot_idx + cfg.num_slots_p2
+        num_ue_bits_per_frame = mu_mimo.num_bits_per_frame * (cfg.num_scheduled_ues / (cfg.num_scheduled_ues + 2))
+
+        rx_ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
+        rx_ns3cfg.update_ue_selection(None, rx_ue_mask)
+        rxs_chans = dMIMOChannels(rx_ns3cfg, "RxSquad", add_noise=False)
+        rx_squad = RxSquad(rxcfg, ns3cfg, num_ue_bits_per_frame, rxs_chans)
+        print("Each RxSquad UE transmitting {} streams, each with modulation order {}".format(rx_squad.num_streams_per_tx, rx_squad.num_bits_per_symbol_per_UE))
+
+        forwarding_bits = dec_bits[:,:,-(cfg.num_scheduled_ues * cfg.ue_ranks[0]):, : , :]
+        dec_bits_phase_3, \
+        node_wise_uncoded_ber_phase_3, \
+        uncoded_ber_phase_3, \
+        node_wise_coded_ber_phase_3, \
+        coded_ber_phase_3, \
+        node_wise_coded_bler_phase_3, \
+        coded_bler_phase_3 = rx_squad(rxs_chans, forwarding_bits)
+        print("PHASE 3 STATS\nUNCODED BER: {}\nCODED BER: {}\nBLER: {}".format(uncoded_ber_phase_3 , coded_ber_phase_3, coded_bler_phase_3))
+        # if uncoded_ber_phase_3 >= 1e-2 or coded_ber_phase_3 >= 1e-2:
+        #     print("Warning: High RxSquad transmission BER")
+        
+        # dec_bits_phase_3 = tf.reshape(dec_bits_phase_3, [dec_bits_phase_3.shape[0], forwarding_bits.shape[1], forwarding_bits.shape[2], forwarding_bits.shape[3], forwarding_bits.shape[4]])
+        # gNB_bits_phase_2 = dec_bits[:,:,:-(cfg.num_scheduled_ues * cfg.ue_ranks[0]), : , :]
+        # end_to_end_dec_bits = tf.concat([gNB_bits_phase_2, dec_bits_phase_3], axis=2)
+
+        gNB_bits_phase_2 = dec_bits[:,:,:-(cfg.num_scheduled_ues * cfg.ue_ranks[0]), : , :]
+        end_to_end_dec_bits = tf.concat([gNB_bits_phase_2, dec_bits_phase_3], axis=2)
+
+        coded_ber = compute_ber(info_bits_p2, end_to_end_dec_bits).numpy()
+        coded_bler = compute_bler(info_bits_p2, end_to_end_dec_bits).numpy()
+
+        print("Coded BER with phase 3 enabled: ", coded_ber)
+        print("BLER with phase 3 enabled: ", coded_bler)
 
     # Goodput and throughput estimation
     goodbits = (1.0 - coded_ber) * mu_mimo.num_bits_per_frame

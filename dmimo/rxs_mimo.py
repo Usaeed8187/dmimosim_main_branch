@@ -146,7 +146,7 @@ class RxSquad(Model):
 
         # --- Simple sanity checks ---
         assert self.total_coded_bits > self.total_info_bits
-        assert rxs_bits_per_frame * self.cfg.num_slots_p2 <= self.total_info_bits
+        assert rxs_bits_per_frame * self.cfg.num_slots_p2 <= self.total_info_bits * self.cfg.num_slots_p1
 
         # The mapper maps blocks of information bits to constellation symbols
         self.mapper = Mapper("qam", self.num_bits_per_symbol_per_UE)
@@ -192,24 +192,33 @@ class RxSquad(Model):
         :return: decoded bits, LDPC BER, LDPC BLER
         """
 
-        # payload reshaping
-        b = tf.transpose(info_bits, perm=[2, 0, 1, 3, 4])
-        b = tf.reshape(b, [tf.shape(info_bits)[2], -1])
-
         m = int(self.num_bits_per_symbol_per_UE)
         U = self.ns3cfg.num_rxue_sel
         S = int(self.num_streams_per_tx)
-        K = self.num_RBGs_per_UE * self.num_subcarriers_per_RB * self.num_data_ofdm_syms_per_RBG
+        K = int(self.num_RBGs_per_UE * self.num_subcarriers_per_RB * self.num_data_ofdm_syms_per_RBG)
         T = self.rg_csi.num_ofdm_symbols
         F   = int(self.rg_csi.fft_size)
+
+        # payload reshaping
+        b = tf.transpose(info_bits, perm=[0, 2, 1, 3, 4])
+        b = tf.reshape(b, [self.batch_size, U, -1])
+        info_total_per_ue_per_slot = tf.shape(b)[-1]
+
+        # Capacity PER slot PER UE (coded bits mapped for that UE in one slot)
+        E_total = m * K * S  # per-slot, per-UE coded bits that will be mapped
 
         max_bits_per_ue = int(self.batch_size * m * K * S)
 
         assert b.shape[1] / self.coderate <= max_bits_per_ue
 
-        self.num_codewords, self.ldpc_k, self.ldpc_n = self.plan_ldpc_blocks(max_bits_per_ue, b.shape[1], self.coderate, m, C_min=min_codewords, C_cap=64)
+        info_total_per_slot = int(info_total_per_ue_per_slot.numpy())  # eager mode
+        self.num_codewords, self.ldpc_k, self.ldpc_n = self.plan_ldpc_blocks(
+            E_total, info_total_per_slot, self.coderate, m, C_min=min_codewords, C_cap=64
+        )
+        self.ldpc_n = int(self.ldpc_n)
+        self.ldpc_k = int(self.ldpc_k)
 
-        assert self.ldpc_n*self.num_codewords >= max_bits_per_ue
+        assert self.ldpc_n*self.num_codewords*self.batch_size >= max_bits_per_ue
 
         # The encoder maps information bits to coded bits
         self.encoder = LDPC5GEncoder(self.ldpc_k, self.ldpc_n, num_bits_per_symbol=m)
@@ -217,23 +226,24 @@ class RxSquad(Model):
         self.decoder = LDPC5GDecoder(self.encoder, hard_out=True)
 
         # Pad info bits to self.ldpc_k*self.num_codewords and make code blocks [U, self.num_codewords, self.ldpc_k]
-        pad_len = self.ldpc_k * self.num_codewords - b.shape[1]
-        assert pad_len >= 0
-        pad_vals = tf.random.uniform([tf.shape(b)[0], pad_len], maxval=2, dtype=tf.int32)
-        # Concatenate along the last dimension
-        b = tf.concat([b, tf.cast(pad_vals,b.dtype)], axis=1)
-        b_blocks   = tf.reshape(b, [U, self.num_codewords, self.ldpc_k])
+        pad_len = self.ldpc_k * self.num_codewords - tf.shape(b)[-1]
+        tf.debugging.assert_greater_equal(pad_len, 0)
+
+        pad_vals = tf.random.uniform([self.batch_size, U, pad_len], maxval=2, dtype=tf.int32)
+        b_padded = tf.concat([b, tf.cast(pad_vals, b.dtype)], axis=-1)          # [B, U, C*k]
+
+        b_blocks = tf.reshape(b_padded, [self.batch_size, U, self.num_codewords, self.ldpc_k]) # [B, U, C, k]
 
         # LDPC encoding and interleaving
         c_blocks   = self.encoder(b_blocks)
         d = c_blocks
 
         # Concatenate CBs
-        d_reshaped   = tf.reshape(d, [U, -1])
-        assert d_reshaped.shape[-1] == max_bits_per_ue
+        d_reshaped = tf.reshape(d, [self.batch_size, U, int(self.num_codewords * self.ldpc_n)])  # [B, U, E_total]
+        tf.debugging.assert_equal(tf.shape(d_reshaped)[-1], E_total)
 
         # Reshape to streams
-        d_streams  = tf.reshape(d_reshaped, [self.batch_size, U, S, max_bits_per_ue//S])            # [B, U, S, max_bits_per_ue/S]
+        d_streams = tf.reshape(d_reshaped, [self.batch_size, U, S, int(E_total // S)])  # [B, U, S, K*m] effectively
 
         # QAM mapping on OFDM grid. x has shape [batch_size, num_UEs, num_tx_streams_per_UE, num_qam_symbols_per_UE]
         x = self.mapper(d_streams)
@@ -300,18 +310,22 @@ class RxSquad(Model):
         llr = tf.reshape(llr, [self.batch_size, U, self.num_codewords, self.ldpc_n])
 
         # LDPC hard-decision decoding
-        dec_bits = self.decoder(llr)
-        dec_bits = tf.reshape(dec_bits, [self.batch_size, U, self.num_codewords*self.ldpc_k])
+        dec_bits = self.decoder(llr)  # shape ~ [B, U, C, k] when llr is [B, U, C, n]
 
-        # Remove the padding added before LDPC encoding to recover original info length per UE
-        dec_bits = dec_bits[:, :, :b.shape[1]]
-        dec_bits = tf.transpose(dec_bits, perm=[1, 0, 2])
-        dec_bits = tf.reshape(dec_bits, [U, -1])
+        # Flatten codewords
+        dec_bits = tf.reshape(dec_bits, [self.batch_size, U, self.num_codewords*self.ldpc_k])  # [B, U, C*k]
+
+        # Remove padding: use dynamic length from original b
+        orig_info_len = tf.shape(b)[-1]
+        dec_bits = dec_bits[:, :, :orig_info_len]  # [B, U, info_len]
 
         # Reshaping into codeblocks
-        b_blocks = tf.reshape(b, [U, self.num_codewords, -1])
-        dec_bits_blocks = tf.reshape(dec_bits, [U, self.num_codewords, -1])
-
+        b_blocks = tf.reshape(b_padded,  [self.batch_size, U, self.num_codewords, self.ldpc_k])  # [B,U,C,k]
+        dec_bits_blocks = tf.reshape(
+            tf.concat([dec_bits, tf.zeros([self.batch_size, U, pad_len], dtype=dec_bits.dtype)], axis=-1),
+            [self.batch_size, U, self.num_codewords, self.ldpc_k]
+        )  # [B,U,C,k] (pad back to full blocks for BLER comparison)
+        
         # Coded BER and BLER Calculation
         coded_ber = compute_ber(b, dec_bits).numpy()
         coded_bler = compute_bler(b_blocks, dec_bits_blocks).numpy()
@@ -319,14 +333,22 @@ class RxSquad(Model):
         # Per-node Coded BER and BLER Calculation
         node_wise_coded_ber_list = []
         node_wise_coded_bler_list = []
+        b = tf.transpose(b, perm=[1, 0, 2])  # [U, B, num_info_bits_per_UE]
+        dec_bits = tf.transpose(dec_bits, perm=[1, 0, 2])
+        b_blocks = tf.transpose(b_blocks, perm=[1, 0, 2, 3])  # [U, B, C, k]
+        dec_bits_blocks = tf.transpose(dec_bits_blocks, perm=[1, 0, 2, 3])
         for ue_idx in range(U):
             node_wise_coded_ber_list.append(compute_ber(b[ue_idx], dec_bits[ue_idx]))
             node_wise_coded_bler_list.append(compute_bler(b_blocks[ue_idx], dec_bits_blocks[ue_idx]))
         node_wise_coded_ber  = tf.stack(node_wise_coded_ber_list)   # shape: [U]
         node_wise_coded_bler = tf.stack(node_wise_coded_bler_list)  # shape: [U]
+        dec_bits = tf.transpose(dec_bits, perm=[1, 0, 2])
+        b_blocks = tf.transpose(b_blocks, perm=[1, 0, 2, 3])  # [U, B, C, k]
 
+        dec_bits_reshaped = dec_bits[:, tf.newaxis, ...]
+        dec_bits_reshaped = tf.reshape(dec_bits_reshaped, info_bits.shape)
 
-        return dec_bits, node_wise_uncoded_ber, uncoded_ber, node_wise_coded_ber, coded_ber, node_wise_coded_bler, coded_bler
+        return dec_bits_reshaped, node_wise_uncoded_ber, uncoded_ber, node_wise_coded_ber, coded_ber, node_wise_coded_bler, coded_bler
     
 
     def rb_wise_interpolate(self, h_hat):

@@ -152,33 +152,38 @@ def phase_3_mu_mimo_uplink_precoding(x, x_rg_placeholder, precoding_matrices, rg
 
 def scatter_into_rg(x_rg_placeholder,
                     curr_x_precoded,
-                    curr_UEs,                   # shape [2] (int32/int64)
-                    rbg_data_syms_idx,          # shape [6]
-                    sc_idx):                    # shape [12]
+                    curr_UEs,                   # shape [U] (e.g., [2])
+                    rbg_data_syms_idx,          # shape [T] (e.g., [6])
+                    sc_idx):                    # shape [F] (e.g., [12])
 
     # Ensure integer dtype for indices
-    curr_UEs               = tf.cast(curr_UEs, tf.int32)
-    rbg_data_syms_idx = tf.cast(rbg_data_syms_idx, tf.int32)
-    sc_idx                 = tf.cast(sc_idx, tf.int32)
+    curr_UEs           = tf.cast(curr_UEs, tf.int32)
+    rbg_data_syms_idx  = tf.cast(rbg_data_syms_idx, tf.int32)
+    sc_idx             = tf.cast(sc_idx, tf.int32)
 
-    # Build full index grid for all elements to be updated
-    B  = tf.constant([0], dtype=tf.int32)      # batch axis (size 1)
-    A4 = tf.range(2, dtype=tf.int32)           # axis 4 (size 2)
-    A5 = tf.range(1, dtype=tf.int32)           # axis 5 (size 1)
+    # Batch axis indices: 0..B-1 (B taken from x_rg_placeholder)
+    B = tf.range(tf.shape(x_rg_placeholder)[0], dtype=tf.int32)
+
+    # Remaining fixed axes
+    A4 = tf.range(tf.shape(x_rg_placeholder)[4], dtype=tf.int32)  # typically 2
+    A5 = tf.range(tf.shape(x_rg_placeholder)[5], dtype=tf.int32)  # typically 1
 
     # Meshgrid over all target indices (ij indexing preserves axis order)
     Bg, Ug, Tg, Fg, Gg, Hg = tf.meshgrid(
         B, curr_UEs, rbg_data_syms_idx, sc_idx, A4, A5, indexing='ij'
     )
-    idx = tf.stack([Bg, Ug, Tg, Fg, Gg, Hg], axis=-1)          # [..., 6]
-    idx = tf.reshape(idx, [-1, 6])                             # [N, 6]
+
+    idx = tf.stack([Bg, Ug, Tg, Fg, Gg, Hg], axis=-1)  # [..., 6]
+    idx = tf.reshape(idx, [-1, 6])                     # [N, 6]
 
     # Flatten updates to match N scalar writes
     updates = tf.reshape(curr_x_precoded, [-1])
 
+    # (Optional but very useful) sanity check: same number of indices and updates
+    tf.debugging.assert_equal(tf.shape(idx)[0], tf.size(updates),
+                              message="scatter: #indices != #updates")
+
     # Scatter-update (returns a new tensor)
-    x_rg_updated = tf.tensor_scatter_nd_update(
-        x_rg_placeholder, idx, updates
-    )
+    x_rg_updated = tf.tensor_scatter_nd_update(x_rg_placeholder, idx, updates)
     return x_rg_updated
 

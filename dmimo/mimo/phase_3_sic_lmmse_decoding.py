@@ -268,28 +268,45 @@ def sic_lmmse_equalize(
 
 def scatter_update_single_ue(x_hat, curr_curr_x_hat, UE_idx, syms_idx):
     """
-    x_hat:            [1, U, S, F]
-    curr_curr_x_hat:  [1, S, L]
+    x_hat:            [B, U, S, F]
+    curr_curr_x_hat:  [B, S, L]
     UE_idx:           scalar int (can be tf.Tensor)
     syms_idx:         [L] int tensor
-    
+
     Returns:
         updated x_hat
     """
-    UE_idx = tf.cast(UE_idx, tf.int32)
+    UE_idx  = tf.cast(UE_idx, tf.int32)
     syms_idx = tf.cast(syms_idx, tf.int32)
 
-    B, U, S, F = x_hat.shape
+    # Dynamic shapes (works in tf.function too)
+    B = tf.shape(x_hat)[0]
+    S = tf.shape(x_hat)[2]
     L = tf.shape(syms_idx)[0]
 
-    # Build scatter indices for all (b=0, ue=UE_idx, stream=s, freq=k)
-    b_idx = tf.zeros([S * L], dtype=tf.int32)                       # batch dim = 0
-    ue_idx = tf.fill([S * L], UE_idx)                              # target UE
-    s_idx = tf.repeat(tf.range(S, dtype=tf.int32), repeats=L)      # stream index
-    f_idx = tf.tile(syms_idx, multiples=[S])                       # frequency indices
+    # Build indices for all (b, ue=UE_idx, stream=s, freq=syms_idx[l])
+    # Total updates = B * S * L
 
-    scatter_indices = tf.stack([b_idx, ue_idx, s_idx, f_idx], axis=1)   # [S*L, 4]
-    updates = tf.reshape(curr_curr_x_hat, [-1])                         # [S*L]
+    # b_idx: [B*S*L]
+    b_idx = tf.repeat(tf.range(B, dtype=tf.int32), repeats=S * L)
+
+    # ue_idx: [B*S*L]
+    ue_idx = tf.fill([B * S * L], UE_idx)
+
+    # s_idx: [B*S*L]  (pattern: 0..S-1 each repeated L times, then repeat for each batch)
+    s_one_batch = tf.repeat(tf.range(S, dtype=tf.int32), repeats=L)     # [S*L]
+    s_idx = tf.tile(s_one_batch, multiples=[B])                         # [B*S*L]
+
+    # f_idx: [B*S*L]  (syms_idx tiled S times, then repeat for each batch)
+    f_one_batch = tf.tile(syms_idx, multiples=[S])                      # [S*L]
+    f_idx = tf.tile(f_one_batch, multiples=[B])                         # [B*S*L]
+
+    scatter_indices = tf.stack([b_idx, ue_idx, s_idx, f_idx], axis=1)   # [B*S*L, 4]
+    updates = tf.reshape(curr_curr_x_hat, [-1])                         # [B*S*L]
+
+    # Helpful safety check
+    tf.debugging.assert_equal(tf.shape(scatter_indices)[0], tf.size(updates),
+                              message="scatter: #indices != #updates")
 
     return tf.tensor_scatter_nd_update(x_hat, scatter_indices, updates)
 

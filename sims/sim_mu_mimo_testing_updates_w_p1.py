@@ -93,16 +93,17 @@ modulation_order = 4
 code_rate = 1 / 2
 link_adapt = True
 
-perfect_csi = False
-channel_prediction_setting = "two_mode" # "None", "two_mode", "weiner_filter", "deqn_plus_two_mode"
-csi_prediction = True
-channel_prediction_method = "two_mode" # None, "two_mode", "weiner_filter", "deqn_plus_two_mode"
+perfect_csi = True
+channel_prediction_setting = "None" # "None", "two_mode", "weiner_filter", "deqn_plus_two_mode"
+csi_prediction = False
+channel_prediction_method = None # None, "two_mode", "weiner_filter", "deqn_plus_two_mode"
 csi_quantization_on = True
 rl_train_end_drop = 45
 # rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
 rl_checkpoint = None
 rl_evaluation_only = True
 phase_1_enabled = True
+phase_3_enabled = True
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -133,6 +134,7 @@ def parse_arguments():
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
     global phase_1_enabled
+    global phase_3_enabled
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -169,6 +171,9 @@ def parse_arguments():
 
         if len(arguments) >= 13:
             phase_1_enabled = _parse_bool(arguments[12])
+
+        if len(arguments) >= 14:
+            phase_3_enabled = _parse_bool(arguments[13])
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -220,7 +225,8 @@ def run_simulation():
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
-    cfg.enable_rxsquad = False
+    cfg.phase_1_enabled = phase_1_enabled
+    cfg.enable_rxsquad = phase_3_enabled
     cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT", "SLNR" for quantized CSI feedback
     cfg.csi_quantization_on = csi_quantization_on
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
@@ -249,7 +255,6 @@ def run_simulation():
 
     cfg.rl_checkpoint = rl_checkpoint
     cfg.rl_evaluation_only = rl_evaluation_only
-    cfg.phase_1_enabled = phase_1_enabled
 
     # Precompute LMMSE resources once per drop when needed
     start_time = time.time()
@@ -360,18 +365,18 @@ def run_simulation():
         if cfg.csi_prediction:
             
             if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(phase_1_enabled, MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
+                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_p3_{}_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(phase_1_enabled, phase_3_enabled, MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(phase_1_enabled, MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
+                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_p3_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(phase_1_enabled, phase_3_enabled, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
                     nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
                     ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13])
         else:
             if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(phase_1_enabled, MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
+                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_p3_{}_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(phase_1_enabled, phase_3_enabled, MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(phase_1_enabled, MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
+                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_p3_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(phase_1_enabled, phase_3_enabled, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
 
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
@@ -380,8 +385,9 @@ def run_simulation():
 
 
 if __name__ == "__main__":
-    try:
-        run_simulation()
-    except Exception as exc:  # noqa: BLE001
-        log_error(exc)
-        sys.exit(1)
+    # try:
+    #     run_simulation()
+    # except Exception as exc:  # noqa: BLE001
+    #     log_error(exc)
+    #     sys.exit(1)
+    run_simulation()    
