@@ -183,7 +183,7 @@ class RxSquad(Model):
 
         self._awgn = AWGN(dtype=tf.complex64)
 
-    def call(self, rxs_chans, info_bits, min_codewords=8):
+    def call(self, rxs_chans, info_bits, min_codewords=8, ramin_transpoition = False):
         """
         Signal processing for RxSquad downlink transmission (P1)
 
@@ -201,6 +201,9 @@ class RxSquad(Model):
 
         # payload reshaping
         b = tf.transpose(info_bits, perm=[0, 2, 1, 3, 4])
+        
+        if ramin_transpoition:
+            b_shape = b.shape
         b = tf.reshape(b, [self.batch_size, U, -1])
         info_total_per_ue_per_slot = tf.shape(b)[-1]
 
@@ -343,10 +346,14 @@ class RxSquad(Model):
         node_wise_coded_ber  = tf.stack(node_wise_coded_ber_list)   # shape: [U]
         node_wise_coded_bler = tf.stack(node_wise_coded_bler_list)  # shape: [U]
         dec_bits = tf.transpose(dec_bits, perm=[1, 0, 2])
+        if ramin_transpoition:
+            dec_bits_reshaped = tf.reshape(dec_bits, b_shape)
+            dec_bits_reshaped = tf.transpose(dec_bits_reshaped, perm=[0, 2, 1, 3, 4])
+        else:
+            dec_bits_reshaped = dec_bits[:, tf.newaxis, ...]
+            dec_bits_reshaped = tf.reshape(dec_bits_reshaped, info_bits.shape)
         b_blocks = tf.transpose(b_blocks, perm=[1, 0, 2, 3])  # [U, B, C, k]
 
-        dec_bits_reshaped = dec_bits[:, tf.newaxis, ...]
-        dec_bits_reshaped = tf.reshape(dec_bits_reshaped, info_bits.shape)
 
         return dec_bits_reshaped, node_wise_uncoded_ber, uncoded_ber, node_wise_coded_ber, coded_ber, node_wise_coded_bler, coded_bler
     

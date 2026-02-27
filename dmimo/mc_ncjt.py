@@ -3,6 +3,7 @@ Simulation of single-cluster NCJT scenario
 
 """
 
+import copy
 import os
 import numpy as np
 from typing import List 
@@ -14,11 +15,13 @@ from sionna.fec.ldpc.decoding import LDPC5GDecoder
 from sionna.fec.interleaving import RowColumnInterleaver, Deinterleaver
 from sionna.utils import BinarySource
 from sionna.utils.metrics import compute_ber, compute_bler
+from sionna.ofdm import ResourceGrid
 
 from dmimo.config import SimConfig, Ns3Config
-from dmimo.channel import dMIMOChannels
-from dmimo.mimo import update_node_selection
+from dmimo.channel import dMIMOChannels, lmmse_channel_estimation
+from dmimo.mimo import update_node_selection, quantized_CSI_feedback
 from dmimo.ncjt import MC_NCJT_TxUE, MC_NCJT_RxUE, NCJT_PostCombination
+from dmimo.phase_1 import Phase1v
 
 from .rxs_mimo import RxSquad
 
@@ -61,6 +64,7 @@ class MC_NCJT(Model):
         self.cfg = cfg
         self.ns3cfg = ns3cfg
         self.batch_size = cfg.num_slots_p2  # batch processing for all slots in phase 2
+        self.chosen_mcs_phase_1 = None  # Placeholder for chosen MCS in phase 1, to be updated after phase 1 processing
         # Check if RB based 2 UE selection is enabled in kwargs
         self.RB_based_ue_selection = kwargs.get('RB_based_ue_selection', False)
         if self.RB_based_ue_selection:
@@ -274,7 +278,7 @@ class MC_NCJT(Model):
         # nvar_list[j] shows the noise variance at Rx node j
 
         if self.cfg.enable_rxsquad:
-            raise NotImplementedError("RxSquad is not yet implemented in MC_NCJT.")
+            raise NotImplementedError("RxSquad is not yet implemented in MC_NCJT. Try using MC_NCJT_LLR_Combining instead.")
 
 
         if self.RB_based_ue_selection:
@@ -363,41 +367,215 @@ class MC_NCJT_LLR_Combining(MC_NCJT):
 
         # Tx gNB processing
 
+        ### Start Ramin edit: Phase 1 parameters and quantized channel feedback
+    
+        
 
         # The binary source will create batches of information bits
-        info_bits_list = [self.binary_source([self.batch_size, self.num_codewords_list[i], self.encoder.k]) for i in range(self.num_clusters)]
+        binary_source = BinarySource()
+        # Generate information bits for phase 2 (which is also the end-to-end total number of bits we want to send)
+        
+        num_info_bits_p2 = self.cfg.num_slots_p2 * self.num_bits_per_frame
+        
+        info_bits_p2 = binary_source([self.cfg.num_slots_p2, self.num_bits_per_frame])
 
-        # LDPC encoder processing
-        c_list = [self.encoder(info_bits_list[i]) for i in range(self.num_clusters)] # [batch_size, num_codewords, ldpc_n]
+        phase_1_enabled = getattr(self.cfg, "phase_1_enabled", True)
 
-        # Interleaving for coded bits
-        c_intrlv_list = [self.intlvr(c_list[i]) for i in range(self.num_clusters)] # [batch_size, num_codewords, ldpc_n]
+        if phase_1_enabled:
+            # dMIMO channels from ns-3 simulator
+            p1_chans_dl = dMIMOChannels(self.ns3cfg, "TxSquad", forward=True, add_noise=True)
 
-        # Phase 1 downlink transmission
-        # TODO: assuming ideal transmission for now
-        tx_bit_streams = [tf.reshape(c_intrlv_list[i], [self.batch_size, self.effective_subcarriers, -1]) for i in range(self.num_clusters)]
-        # tx_bit_streams[i].shape: [batch_size , fft_size, num_data_syms * modulation_order_list[i]]
+            # Total number of TX (gNB) antennas in the TxSquad
+            num_txs_ant_p1 = self.ns3cfg.num_bs_ant  # always use all gNB antennas for precoding in phase 1
+            # Least common multiple of number of TX antennas in phase 1 and phase 2, used for adjusting the resource grid
+            # lcm_txs_ant = np.lcm(num_txs_ant_p1, num_txs_ant_p2) # This ensures the number of info bits is the same in phase 1 and phase 2
+            cfg_p1 = copy.deepcopy(self.cfg)
+            # The Tx gNB can broadcast 1 or 2 streams in phase 1.
+            
+            ## Hard coded parameters. TODO: make them configurable later. 
+            # We choose 2 streams for phase 1. 
+            cfg_p1.num_tx_streams = 2   
+            cfg_p1.dc_null = False 
+            # Number of scheduled UEs in phase 1 is cfg.scheduled_tx_ue_indices - 2 because we assume the first 2 UEs in scheduled_tx_ue_indices are the gNB's own antennas
+            cfg_p1.num_scheduled_tx_ue = self.ns3cfg.num_txue_sel
 
-        # --- Phase 2: Multi-cluster transmission signal construction ---
-        # 1. For each cluster, generate the transmit signal (per-cluster, per-Ant pair)
-        tx_signals_list = []
-        for i_cluster in range(self.num_clusters):
-            ue_tx_signal = self.ncjt_tx(tx_bit_streams[i_cluster], is_txbs=False, cluster_idx=i_cluster)
-            tx_signals_list.append(ue_tx_signal)
-        # 2. Concatenate all clusters' signals along the antenna axis
-        #    Result: [batch_size, num_subcarriers, num_ofdm_symbols, num_tx_ant=4] (2 clusters × 2 Alamouti antennas)
-        tx_signals = tf.concat(tx_signals_list, axis=-1)
-        # 3. Add a "null" (all-zeros) antenna as the first antenna.
-        #    This allows us to later map unused physical antennas to a silent stream.
-        #    Padding shape: [batch_size, num_subcarriers, num_ofdm_symbols, 5]
-        padding = [([0,0] if i != tx_signals.ndim-1 else [1,0]) for i in range(tx_signals.ndim)]
-        tx_signals = tf.pad(tx_signals, padding)
-        # 4. Map the 5 streams (null + 4 complex) to the full 24-antenna array using self.ant_to_stream_mapper.
-        #    This expands the signal to [batch_size, num_subcarriers, num_ofdm_symbols, 24],
-        #    with only the selected antennas active and all others silent.
-        tx_signals = tf.gather(tx_signals, self.ant_to_stream_mapper, axis=-1)
+            # Adjust guard subcarriers for channel estimation grid
+            csi_effective_subcarriers = (cfg_p1.fft_size // num_txs_ant_p1) * num_txs_ant_p1
+            csi_guard_carriers_1 = (cfg_p1.fft_size - csi_effective_subcarriers) // 2
+            csi_guard_carriers_2 = (cfg_p1.fft_size - csi_effective_subcarriers) - csi_guard_carriers_1
+
+            # Resource grid for channel estimation
+            rg_csi_p1 = ResourceGrid(num_ofdm_symbols=14,
+                                fft_size=cfg_p1.fft_size,
+                                subcarrier_spacing=cfg_p1.subcarrier_spacing,
+                                num_tx=1,
+                                num_streams_per_tx=num_txs_ant_p1, # -> Ramin edit
+                                cyclic_prefix_length=cfg_p1.cyclic_prefix_len,
+                                num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
+                                dc_null=cfg_p1.dc_null,
+                                pilot_pattern="kronecker",
+                                pilot_ofdm_symbol_indices=[2, 11])
+
+            cfg_p1.num_guard_carriers = rg_csi_p1.num_guard_carriers
+            #### TODO : I think I need to move the following code block to after MCS selection of phase 1
+            # Channel CSI estimation using channels in previous frames/slots
+            if cfg_p1.perfect_csi is True:
+                # Perfect channel estimation
+                h_freq_csi_dl, rx_snr_db_p1, rx_pwr_dbm_dl = p1_chans_dl.load_channel(slot_idx=cfg_p1.first_slot_idx - cfg_p1.csi_delay,
+                                                                                    forward=True,
+                                                                                    batch_size=cfg_p1.num_slots_p1)                                                                            
+            # elif cfg.csi_prediction is True:
+            #     rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams)
+            #     # Get CSI history
+            #     # TODO: optimize channel estimation and optimization procedures (currently very slow)
+            #     h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
+            #                                                       rg_csi, dmimo_chans, 
+            #                                                       cfo_vals=cfg.random_cfo_vals,
+            #                                                       sto_vals=cfg.random_sto_vals)
+            #     # Do channel prediction
+            #     h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
+            else:
+                # LMMSE channel estimation
+                h_freq_csi_dl, _ = lmmse_channel_estimation(p1_chans_dl, rg_csi_p1,
+                                                                slot_idx=cfg_p1.first_slot_idx - cfg_p1.csi_delay,
+                                                                cfo_vals=cfg_p1.random_cfo_vals,
+                                                                sto_vals=cfg_p1.random_sto_vals)
+                precoding_channel = h_freq_csi_dl
+
+                _, rx_snr_db_p1, _ = p1_chans_dl.load_channel(slot_idx=cfg_p1.first_slot_idx - cfg_p1.csi_delay,
+                                                                                    forward=True,
+                                                                                    batch_size=cfg_p1.num_slots_p1)
+
+            # print ("h_freq_dl", h_freq_csi_dl.shape)
+            # print ("h_freq_ul", h_freq_csi_ul.shape)
+            # # TODO: remove this later, this is just for testing 2 Tx PMI feedback
+            # h_freq_csi_dl = h_freq_csi_dl[:,:,:,:,:2,...]
+
+            if cfg_p1.CSI_feedback_method =='5G':
+                generate_CSI_feedback = quantized_CSI_feedback(method='5G', codebook_selection_method='rate', num_tx_streams=cfg_p1.num_tx_streams, architecture='dMIMO_phase1', 
+                                                                snrdb=rx_snr_db_p1, wideband=True)
+                [PMI, rate_for_selected_precoder, quantized_channels] = generate_CSI_feedback(h_freq_csi_dl)
+            else:
+                quantized_channels = None
+
+            quantized_channels = quantized_channels[:cfg_p1.num_scheduled_tx_ue, ...]
+
+
+            # Create Phase 1 simulation
+            mcs_list = [
+                [2, 0.5],      # MCS 1: QPSK 1/2
+                [2, 0.75],     # MCS 2: QPSK 3/4
+                [4, 0.5],      # MCS 3: 16-QAM 1/2
+                [4, 0.75],     # MCS 4: 16-QAM 3/4
+                [6, 0.6667],   # MCS 5: 64-QAM 2/3
+                [6, 0.75],     # MCS 6: 64-QAM 3/4
+                [6, 0.8333],   # MCS 7: 64-QAM 5/6
+                [8, 0.75],     # MCS 8: 256-QAM 3/4
+                [8, 0.8333],   # MCS 9: 256-QAM 5/6
+                [10, 0.75],    # MCS 10: 1024-QAM 3/4
+                [10, 0.8333],  # MCS 11: 1024-QAM 5/6
+                [12, 0.75],    # MCS 12: 4096-QAM 3/4
+                [12, 0.8333]   # MCS 13: 4096-QAM 5/6
+            ] # Taken from WiFi 7 (Source: Gemini)
+            chosen_mcs_phase_1  = None
+            if self.chosen_mcs_phase_1 is None:
+                for mcs in mcs_list:
+                    cfg_p1.modulation_order  = mcs[0]
+                    cfg_p1.code_rate = mcs[1]
+                    phase_1v = Phase1v(cfg_p1, rg_csi_p1) # I need this here to have rg created before I can calculate the number of info bits for phase 1
+                    num_info_bits_p1 = phase_1v.batch_size * phase_1v.rg.num_streams_per_tx * phase_1v.num_codewords * phase_1v.ldpc_k 
+                    if num_info_bits_p1 >= num_info_bits_p2:
+                        chosen_mcs_phase_1 = mcs
+                        break
+                if chosen_mcs_phase_1 is None:
+                    raise ValueError("No suitable MCS found for phase 1 to " \
+                    "accommodate the number of information bits in phase 2. Consider " \
+                    "increasing the time duration for phase 1 or decreasing that of phase 2.")
+                self.chosen_mcs_phase_1 = chosen_mcs_phase_1
+            else:
+                chosen_mcs_phase_1 = self.chosen_mcs_phase_1
+                cfg_p1.modulation_order  = chosen_mcs_phase_1[0]
+                cfg_p1.code_rate = chosen_mcs_phase_1[1]
+                phase_1v = Phase1v(cfg_p1, rg_csi_p1) # I need this here to have rg created before I can calculate the number of info bits for phase 1
+                num_info_bits_p1 = phase_1v.batch_size * phase_1v.rg.num_streams_per_tx * phase_1v.num_codewords * phase_1v.ldpc_k 
+            
+            ### End Ramin edit for phase 1
+            # Check the number of info bits in phase 1:
+
+            # flatten:
+            info_bits_p1 = tf.reshape(info_bits_p2, [-1]) # size: cfg.num_slots_p2 * mu_mimo.num_bits_per_frame
+            # pad: (to make sure it would be compatible with phase 1's RG)
+            info_bits_p1 = tf.pad(info_bits_p1, [[0, num_info_bits_p1 - num_info_bits_p2]])
+            # reshape:
+            info_bits_p1 = tf.reshape(info_bits_p1, [phase_1v.batch_size, phase_1v.rg.num_streams_per_tx * phase_1v.num_codewords * phase_1v.ldpc_k ])
+
+            ## Time for Phase 1 transmission and reception:
+            detected_bits_list = phase_1v(p1_chans_dl, info_bits_p1, quantized_channels, precoding_method='grad_ascent')
+            available_info_bits_list = [info_bits_p2] # The base station has the error-free information
+            for i_txue in range(len(detected_bits_list)):
+                detected_bits = detected_bits_list[i_txue]
+                # flatten
+                detected_bits = tf.reshape(detected_bits, [-1])
+                # trim to the original number of bits in phase 2 (in case we padded extra bits)
+                detected_bits = detected_bits[:num_info_bits_p2]
+                # reshape to [num_slots_p2, num_bits_per_frame]
+                detected_bits = tf.reshape(detected_bits, [self.cfg.num_slots_p2, self.num_bits_per_frame])
+                available_info_bits_list.append(detected_bits)
+            
+            # compute and print the coded BER for phase 1
+            print(f"\nPhase 1 coded BER with {phase_1v.rg.num_streams_per_tx} streams, modulation order {chosen_mcs_phase_1[0]}, code rate {chosen_mcs_phase_1[1]}:")
+            p1_coded_bers = [compute_ber(info_bits_p2, available_info_bits_list[i]).numpy() for i in range(len(detected_bits_list))]
+            if np.mean(p1_coded_bers) != 0:
+                print(p1_coded_bers)
+        else:
+            # Phase 2 only mode: assume all transmitters have the phase-2 bits.
+            available_info_bits_list = [info_bits_p2 for _ in range(self.ns3cfg.num_txue_sel + 1)]
+
+        node_wise_tx_signals = []
+        for i_txnode in range(self.ns3cfg.num_txue_sel + 1):
+            #
+            
+            # # The binary source will create batches of information bits
+            # info_bits_list = [self.binary_source([self.batch_size, self.num_codewords_list[i], self.encoder.k]) for i in range(self.num_clusters)]
+            info_bits = tf.reshape(available_info_bits_list[i_txnode], [self.batch_size, sum(self.num_codewords_list), self.encoder.k])
+            info_bits_list = tf.split(info_bits, self.num_codewords_list, axis=1) # list of [batch_size, num_codewords, ldpc_k] for each cluster
+
+            # LDPC encoder processing
+            c_list = [self.encoder(info_bits_list[i]) for i in range(self.num_clusters)] # [batch_size, num_codewords, ldpc_n]
+
+            # Interleaving for coded bits
+            c_intrlv_list = [self.intlvr(c_list[i]) for i in range(self.num_clusters)] # [batch_size, num_codewords, ldpc_n]
+
+            # Phase 1 downlink transmission
+            # TODO: assuming ideal transmission for now
+            tx_bit_streams = [tf.reshape(c_intrlv_list[i], [self.batch_size, self.effective_subcarriers, -1]) for i in range(self.num_clusters)]
+            # tx_bit_streams[i].shape: [batch_size , fft_size, num_data_syms * modulation_order_list[i]]
+
+            # --- Phase 2: Multi-cluster transmission signal construction ---
+            # 1. For each cluster, generate the transmit signal (per-cluster, per-Ant pair)
+            tx_signals_list = []
+            for i_cluster in range(self.num_clusters):
+                ue_tx_signal = self.ncjt_tx(tx_bit_streams[i_cluster], is_txbs=False, cluster_idx=i_cluster)
+                tx_signals_list.append(ue_tx_signal)
+            # 2. Concatenate all clusters' signals along the antenna axis
+            #    Result: [batch_size, num_subcarriers, num_ofdm_symbols, num_tx_ant=4] (2 clusters × 2 Alamouti antennas)
+            tx_signals = tf.concat(tx_signals_list, axis=-1)
+            # 3. Add a "null" (all-zeros) antenna as the first antenna.
+            #    This allows us to later map unused physical antennas to a silent stream.
+            #    Padding shape: [batch_size, num_subcarriers, num_ofdm_symbols, 5]
+            padding = [([0,0] if i != tx_signals.ndim-1 else [1,0]) for i in range(tx_signals.ndim)]
+            tx_signals = tf.pad(tx_signals, padding)
+            # 4. Map the 5 streams (null + 4 complex) to the full 24-antenna array using self.ant_to_stream_mapper.
+            #    This expands the signal to [batch_size, num_subcarriers, num_ofdm_symbols, num_tx_ant],
+            #    with only the selected antennas active and all others silent.
+            ant_slice = slice(0, self.ns3cfg.num_bs_ant) if i_txnode == 0 else \
+                         slice(self.ns3cfg.num_bs_ant + (i_txnode - 1) * 2, 
+                               self.ns3cfg.num_bs_ant + (i_txnode) * 2)
+            tx_signals = tf.gather(tx_signals, self.ant_to_stream_mapper[ant_slice], axis=-1)
+            node_wise_tx_signals.append(tx_signals)
 
         # new shape [batch_size, num_tx_ant, num_ofdm_sym, fft_size)
+        tx_signals = tf.concat(node_wise_tx_signals, axis=-1)
         tx_signals = tf.transpose(tx_signals, [0, 3, 2, 1])
         tx_signals = tf.expand_dims(tx_signals, axis=1)
 
@@ -503,13 +681,13 @@ class MC_NCJT_LLR_Combining(MC_NCJT):
             node_wise_coded_ber_phase_3, \
             coded_ber_phase_3, \
             node_wise_coded_bler_phase_3, \
-            coded_bler_phase_3 = rx_squad(rxs_chans, forwarding_bits, min_codewords=32)
+            coded_bler_phase_3 = rx_squad(rxs_chans, forwarding_bits, min_codewords=32, ramin_transpoition=True)
             # print("PHASE 3 STATS\nUNCODED BER: {}\nCODED BER: {}\nBLER: {}".format(uncoded_ber_phase_3 , coded_ber_phase_3, coded_bler_phase_3))
             # if uncoded_ber_phase_3 >= 1e-2 or coded_ber_phase_3 >= 1e-2:
             #     print("Warning: High RxSquad transmission BER")
             
-            dec_bits_phase_3 = tf.reshape(dec_bits_phase_3, [dec_bits_phase_3.shape[0], forwarding_bits.shape[0], forwarding_bits.shape[1], forwarding_bits.shape[3], forwarding_bits.shape[4]])
-            dec_bits_phase_3 = tf.transpose(dec_bits_phase_3, perm=[1, 2, 0, 3, 4])
+            # dec_bits_phase_3 = tf.reshape(dec_bits_phase_3, [dec_bits_phase_3.shape[0], forwarding_bits.shape[0], forwarding_bits.shape[1], forwarding_bits.shape[3], forwarding_bits.shape[4]])
+            # dec_bits_phase_3 = tf.transpose(dec_bits_phase_3, perm=[1, 2, 0, 3, 4])
             gNB_bits_phase_2 = dec_bits[:,:,:-(self.ns3cfg.num_rxue_sel), : , :]
             end_to_end_dec_bits = tf.concat([gNB_bits_phase_2, dec_bits_phase_3], axis=2)
 
@@ -526,8 +704,8 @@ class MC_NCJT_LLR_Combining(MC_NCJT):
             received_llrs = decoded_llrs_list_forwarded*tf.sign(decoded_llrs_list)
         llr_based_info_bits = tf.cast(tf.reduce_sum(received_llrs, axis=0) > 0, tf.float32) # Sum LLRs from all Rx nodes shape : [num_clusters, batch_size, num_codewords, ldpc_k]
         # Recall that llr_based_info_bits is of shape [num_clusters, batch_size, num_codewords, ldpc_k]
-        llr_based_coded_ber = compute_ber(tf.concat([llr_based_info_bits[i_cluster] for i_cluster in range(self.num_clusters)], axis=1) , tf.concat(info_bits_list, axis=1))
-        llr_based_coded_bler = compute_bler(tf.concat([llr_based_info_bits[i_cluster] for i_cluster in range(self.num_clusters)], axis=1) , tf.concat(info_bits_list, axis=1))
+        llr_based_coded_ber = compute_ber(tf.concat([llr_based_info_bits[i_cluster] for i_cluster in range(self.num_clusters)], axis=1) , info_bits) # tf.concat(info_bits_list, axis=1))
+        llr_based_coded_bler = compute_bler(tf.concat([llr_based_info_bits[i_cluster] for i_cluster in range(self.num_clusters)], axis=1) , info_bits) # tf.concat(info_bits_list, axis=1))
 
         coded_ber = llr_based_coded_ber.numpy()
         coded_bler = llr_based_coded_bler.numpy()

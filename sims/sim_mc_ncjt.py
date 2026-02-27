@@ -45,8 +45,8 @@ if __name__ == "__main__":
     cfg = SimConfig()
     cfg.total_slots = 26 #65        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 16 #15     # starting slots (must be greater than csi_delay + 5)
-    cfg.num_slots_p1 = 1
-    cfg.num_slots_p2 = 3
+    cfg.num_slots_p1 = 2
+    cfg.num_slots_p2 = 2
 
     # cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels/HighMobilitySeed%d" % channel_seed)  # folder where the ns-3 channels are stored
     # cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels/LowMobility")  # folder where the ns-3 channels are stored
@@ -69,13 +69,15 @@ if __name__ == "__main__":
     # cluster_ant_list = [[0,1,2,4], list(range())]
     modulation_order = 6
     mod_order_list = [modulation_order, modulation_order] # [4,4] # Modulation order cluster 1 and 2
-    ns3cfg.num_rxue_sel = 2
+    ns3cfg.num_rxue_sel = 3
 
     # cfg.modulation_order = 4
     cfg.code_rate = 1/2
 
     cfg.enable_ue_selection = False
 
+    # Tx Squad settings
+    cfg.phase_1_enabled = True
     # Rx Squad settings
     cfg.ncjt_ldpc_decode_and_forward = True
     cfg.enable_rxsquad = True
