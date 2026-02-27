@@ -182,6 +182,8 @@ def _resolve_result_path(
 def _load_datapoint(path: Path) -> DataPoint:
     with np.load(path, allow_pickle=True) as data:
         coded_key = "ldpc_ber_list" if "ldpc_ber_list" in data.files else "coded_ber"
+        if coded_key == 'coded_ber':
+            hold = 1
         return DataPoint(
             uncoded_ber=_nanmean_array(data, "uncoded_ber_list"),
             coded_ber=_nanmean_array(data, coded_key),
@@ -287,13 +289,13 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-dir", type=Path, default=Path("results"))
     parser.add_argument("--mobility", default="high_mobility")
-    parser.add_argument("--drops", type=int, nargs="+", default=[1, 2, 3])
+    parser.add_argument("--drops", type=int, nargs="+", default=[1, 2, 3, 4, 5])
     parser.add_argument("--rx-ues", type=int, nargs="+", default=[2, 3, 4])
     parser.add_argument("--tx-ues", type=int, nargs="+", default=[2, 4, 6, 8, 10])
     parser.add_argument("--fixed-rx", type=int, default=3)
     parser.add_argument("--fixed-tx", type=int, default=10)
     parser.add_argument("--output-dir", type=Path, default=Path("results"))
-    parser.add_argument("--throughput-mod-orders", type=int, nargs="+", default=[2, 4])
+    parser.add_argument("--throughput-mod-orders", type=int, nargs="+", default=[2, 4, 6])
     parser.add_argument(
         "--throughput-code-rates",
         nargs="+",

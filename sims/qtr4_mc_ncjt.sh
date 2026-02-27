@@ -2,7 +2,7 @@
 
 # Sweep settings for sims/sim_mc_ncjt.py
 
-declare -a drop_idx=($(seq 1 3))
+declare -a drop_idx=($(seq 4 5))
 declare -a rx_ues_arr=("3")
 declare -a num_txue_sel_arr=("2" "4" "6" "8" "10")
 declare -a modulation_orders=("4" "6")
