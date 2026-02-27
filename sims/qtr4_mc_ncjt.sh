@@ -3,12 +3,12 @@
 # Sweep settings for sims/sim_mc_ncjt.py
 
 declare -a drop_idx=($(seq 1 3))
-declare -a rx_ues_arr=("2" "3")
+declare -a rx_ues_arr=("3")
 declare -a num_txue_sel_arr=("4" "6" "8" "10")
 declare -a modulation_orders=("4" "6")
 declare -a code_rates=("1/3" "1/2" "2/3")
 
-PARALLEL_JOBS=${PARALLEL_JOBS:-8}
+PARALLEL_JOBS=${PARALLEL_JOBS:-12}
 
 generate_args() {
     for j in "${!drop_idx[@]}"; do

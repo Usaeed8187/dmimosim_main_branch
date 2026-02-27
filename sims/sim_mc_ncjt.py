@@ -46,7 +46,7 @@ def parse_arguments(arguments):
     rx_ues = 3
     modulation_order = 6
     code_rate = 1 / 2
-    num_txue_sel = 10
+    num_txue_sel = 8
 
     if len(arguments) >= 1:
         drop_idx = str(arguments[0])
@@ -100,6 +100,14 @@ if __name__ == "__main__":
     modulation_order = modulation_order
     mod_order_list = [modulation_order, modulation_order] # [4,4] # Modulation order cluster 1 and 2
     ns3cfg.num_rxue_sel = rx_ues
+
+    # Apply explicit UE-selection masks so the loaded dMIMO channel dimensions
+    # match the selected Tx/Rx UEs (instead of the full 10-UE channel tensor).
+    tx_ue_mask = np.zeros(ns3cfg.num_txue, dtype=int)
+    tx_ue_mask[:ns3cfg.num_txue_sel] = 1
+    rx_ue_mask = np.zeros(ns3cfg.num_rxue, dtype=int)
+    rx_ue_mask[:ns3cfg.num_rxue_sel] = 1
+    ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
 
     # cfg.modulation_order = 4
     cfg.code_rate = code_rate
