@@ -38,6 +38,7 @@ class Scenario:
     label: str
     perfect_csi: bool = False
     prediction_method: Optional[str] = None
+    results_subdir: str = "channels_multiple_mu_mimo"
 
 
 @dataclass
@@ -93,6 +94,13 @@ def _build_filename_candidates(
     scenario: Scenario,
     mcs: Optional[MCS] = None,
 ) -> list[str]:
+    
+    if scenario.results_subdir == "channels_multiple_mc_ncjt":
+        return [
+            f"mc_ncjt_results_p1_{scenario.phase_1_enabled}_p3_{scenario.phase_3_enabled}"
+            f"_rx_UE_{rx_ues}_tx_UE_{tx_ues}_{mcs.file_token}.npz"
+        ] if mcs else []
+    
     p1 = str(scenario.phase_1_enabled)
     p3 = str(scenario.phase_3_enabled)
     quant = str(scenario.quantization)
@@ -135,33 +143,48 @@ def _resolve_result_path(
             return path
 
     # Fallback: accept any prediction method when filenames differ.
-    p1 = str(scenario.phase_1_enabled)
-    p3 = str(scenario.phase_3_enabled)
-    quant = str(scenario.quantization)
-    mcs_globs = [""]
-    if mcs:
-        mcs_globs = [f"mod_order_{mcs.mod_order}_code_rate_{rate}_" for rate in mcs.code_rate_variants]
-    for mcs_glob in mcs_globs:
-        if scenario.prediction:
+    if scenario.results_subdir == "channels_multiple_mc_ncjt":
+        if not mcs:
+            return None
+        p1 = str(scenario.phase_1_enabled)
+        p3 = str(scenario.phase_3_enabled)
+        for rate in mcs.code_rate_variants:
             pattern = (
-                f"mu_mimo_results_p1_{p1}_p3_{p3}_{mcs_glob}rx_UE_{rx_ues}_tx_UE_{tx_ues}"
-                f"_prediction_*_pmi_quantization_{quant}.npz"
+                f"mc_ncjt_results_p1_{p1}_p3_{p3}_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
+                f"_mod_order_{mcs.mod_order}_code_rate_{rate}.npz"
             )
-        else:
-            pattern = (
-                f"mu_mimo_results_p1_{p1}_p3_{p3}_{mcs_glob}rx_UE_{rx_ues}_tx_UE_{tx_ues}"
-                f"_perfect_CSI_{scenario.perfect_csi}_pmi_quantization_{quant}.npz"
-            )
-        matches = sorted(folder.glob(pattern))
-        if matches:
-            return matches[0]
+            matches = sorted(folder.glob(pattern))
+            if matches:
+                return matches[0]
+    else:
+        p1 = str(scenario.phase_1_enabled)
+        p3 = str(scenario.phase_3_enabled)
+        quant = str(scenario.quantization)
+        mcs_globs = [""]
+        if mcs:
+            mcs_globs = [f"mod_order_{mcs.mod_order}_code_rate_{rate}_" for rate in mcs.code_rate_variants]
+        for mcs_glob in mcs_globs:
+            if scenario.prediction:
+                pattern = (
+                    f"mu_mimo_results_p1_{p1}_p3_{p3}_{mcs_glob}rx_UE_{rx_ues}_tx_UE_{tx_ues}"
+                    f"_prediction_*_pmi_quantization_{quant}.npz"
+                )
+            else:
+                pattern = (
+                    f"mu_mimo_results_p1_{p1}_p3_{p3}_{mcs_glob}rx_UE_{rx_ues}_tx_UE_{tx_ues}"
+                    f"_perfect_CSI_{scenario.perfect_csi}_pmi_quantization_{quant}.npz"
+                )
+            matches = sorted(folder.glob(pattern))
+            if matches:
+                return matches[0]
     return None
 
 def _load_datapoint(path: Path) -> DataPoint:
     with np.load(path, allow_pickle=True) as data:
+        coded_key = "ldpc_ber_list" if "ldpc_ber_list" in data.files else "coded_ber"
         return DataPoint(
             uncoded_ber=_nanmean_array(data, "uncoded_ber_list"),
-            coded_ber=_nanmean_array(data, "ldpc_ber_list"),
+            coded_ber=_nanmean_array(data, coded_key),
             throughput=_scalar_last(data, "throughput"),
         )
 
@@ -178,7 +201,7 @@ def _mean_across_drops(
 ) -> Optional[DataPoint]:
     points: List[DataPoint] = []
     for drop in drops:
-        folder = base_dir / f"channels_{mobility}_{drop}"
+        folder = base_dir / scenario.results_subdir / f"channels_{mobility}_{drop}"
         path = _resolve_result_path(
             folder=folder,
             rx_ues=rx_ues,
@@ -262,7 +285,7 @@ def _plot(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-dir", type=Path, default=Path("results/channels_multiple_mu_mimo"))
+    parser.add_argument("--base-dir", type=Path, default=Path("results"))
     parser.add_argument("--mobility", default="high_mobility")
     parser.add_argument("--drops", type=int, nargs="+", default=[1, 2, 3])
     parser.add_argument("--rx-ues", type=int, nargs="+", default=[2, 3, 4])
@@ -319,6 +342,14 @@ def main() -> None:
             quantization=True,
             prediction_method=args.prediction_method,
             label="CJT",
+        ),
+        Scenario(
+            phase_1_enabled=True,
+            phase_3_enabled=True,
+            prediction=False,
+            quantization=False,
+            label="MC-NCJT",
+            results_subdir="channels_multiple_mc_ncjt",
         ),
     ]
 
