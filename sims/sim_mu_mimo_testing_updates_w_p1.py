@@ -91,7 +91,7 @@ num_txue_sel = 8
 
 modulation_order = 4
 code_rate = 1 / 2
-link_adapt = True
+link_adapt = False
 
 perfect_csi = True
 channel_prediction_setting = "None" # "None", "two_mode", "weiner_filter", "deqn_plus_two_mode"
@@ -367,7 +367,7 @@ def run_simulation():
             if cfg.scheduling:
                 file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_p3_{}_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(phase_1_enabled, phase_3_enabled, MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_p3_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(phase_1_enabled, phase_3_enabled, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
+                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_p3_{}_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(phase_1_enabled, phase_3_enabled, MCS_string,  rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
                     nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
@@ -376,7 +376,7 @@ def run_simulation():
             if cfg.scheduling:
                 file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_p3_{}_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(phase_1_enabled, phase_3_enabled, MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_p3_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(phase_1_enabled, phase_3_enabled, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
+                file_path = os.path.join(folder_path, "mu_mimo_results_p1_{}_p3_{}_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(phase_1_enabled, phase_3_enabled, MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
 
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
