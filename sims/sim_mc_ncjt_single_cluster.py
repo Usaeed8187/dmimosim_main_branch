@@ -73,7 +73,7 @@ if __name__ == "__main__":
     channel_seed = 4
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 26 #65        # total number of slots in ns-3 channels
+    cfg.total_slots = 99 #65        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 16 #15     # starting slots (must be greater than csi_delay + 5)
     cfg.num_slots_p1 = 2
     cfg.num_slots_p2 = 2
@@ -125,11 +125,11 @@ if __name__ == "__main__":
     start_time = time.time()
     uncoded_ber, coded_ber, coded_bler, goodput, throughput = sim_mc_ncjt(cfg, ns3cfg, cluster_ant_list, mod_order_list, RB_based_ue_selection=False, num_selected_ues = 10 , perSC_SNR=False)
 
-    folder_path = os.path.join(dmimo_root, "results", "channels_multiple_mc_ncjt", folder_name)
+    folder_path = os.path.join(dmimo_root, "results", "channels_multiple_sc_ncjt", folder_name)
     os.makedirs(folder_path, exist_ok=True)
     code_rate_tag = str(code_rate).replace("/", "_")
     file_name = (
-        f"mc_ncjt_results_p1_{cfg.phase_1_enabled}_p3_{cfg.enable_rxsquad}_rx_UE_{rx_ues}_tx_UE_{num_txue_sel}"
+        f"sc_ncjt_results_p1_{cfg.phase_1_enabled}_p3_{cfg.enable_rxsquad}_rx_UE_{rx_ues}_tx_UE_{num_txue_sel}"
         f"_mod_order_{modulation_order}_code_rate_{code_rate_tag}.npz"
     )
     file_path = os.path.join(folder_path, file_name)

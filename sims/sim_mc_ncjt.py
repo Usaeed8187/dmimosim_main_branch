@@ -73,7 +73,7 @@ if __name__ == "__main__":
     channel_seed = 4
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 26 #65        # total number of slots in ns-3 channels
+    cfg.total_slots = 99 #65        # total number of slots in ns-3 channels
     cfg.start_slot_idx = 16 #15     # starting slots (must be greater than csi_delay + 5)
     cfg.num_slots_p1 = 2
     cfg.num_slots_p2 = 2
