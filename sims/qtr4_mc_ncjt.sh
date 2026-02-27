@@ -4,7 +4,7 @@
 
 declare -a drop_idx=($(seq 1 3))
 declare -a rx_ues_arr=("3")
-declare -a num_txue_sel_arr=("4" "6" "8" "10")
+declare -a num_txue_sel_arr=("2" "4" "6" "8" "10")
 declare -a modulation_orders=("4" "6")
 declare -a code_rates=("1/3" "1/2" "2/3")
 
