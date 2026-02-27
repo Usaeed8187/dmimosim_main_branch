@@ -183,7 +183,7 @@ class RxSquad(Model):
 
         self._awgn = AWGN(dtype=tf.complex64)
 
-    def call(self, rxs_chans, info_bits, min_codewords=8, ramin_transpoition = False):
+    def call(self, rxs_chans, info_bits, min_codewords=8, ramin_transpoition = True):
         """
         Signal processing for RxSquad downlink transmission (P1)
 
