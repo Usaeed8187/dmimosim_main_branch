@@ -46,6 +46,15 @@ class DataPoint:
     coded_ber: float
     throughput: float
 
+@dataclass(frozen=True)
+class MCS:
+    mod_order: int
+    code_rate: str
+
+    @property
+    def file_token(self) -> str:
+        return f"mod_order_{self.mod_order}_code_rate_{self.code_rate}"
+
 
 def _scalar_last(data: np.lib.npyio.NpzFile, key: str) -> float:
     arr = np.asarray(data.get(key, []), dtype=float).reshape(-1)
@@ -66,18 +75,20 @@ def _build_filename(
     rx_ues: int,
     tx_ues: int,
     scenario: Scenario,
+    mcs: Optional[MCS] = None,
 ) -> str:
     p1 = str(scenario.phase_1_enabled)
     p3 = str(scenario.phase_3_enabled)
     quant = str(scenario.quantization)
+    mcs_prefix = f"{mcs.file_token}_" if mcs else ""
     if scenario.prediction:
         method = scenario.prediction_method or "two_mode"
         return (
-            f"mu_mimo_results_p1_{p1}_p3_{p3}_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
+            f"mu_mimo_results_p1_{p1}_p3_{p3}_{mcs_prefix}rx_UE_{rx_ues}_tx_UE_{tx_ues}"
             f"_prediction_{method}_pmi_quantization_{quant}.npz"
         )
     return (
-        f"mu_mimo_results_p1_{p1}_p3_{p3}_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
+        f"mu_mimo_results_p1_{p1}_p3_{p3}_{mcs_prefix}rx_UE_{rx_ues}_tx_UE_{tx_ues}"
         f"_perfect_CSI_{scenario.perfect_csi}_pmi_quantization_{quant}.npz"
     )
 
@@ -99,11 +110,12 @@ def _mean_across_drops(
     rx_ues: int,
     tx_ues: int,
     scenario: Scenario,
+    mcs: Optional[MCS] = None,
 ) -> Optional[DataPoint]:
     points: List[DataPoint] = []
     for drop in drops:
         folder = base_dir / f"channels_{mobility}_{drop}"
-        path = folder / _build_filename(rx_ues=rx_ues, tx_ues=tx_ues, scenario=scenario)
+        path = folder / _build_filename(rx_ues=rx_ues, tx_ues=tx_ues, scenario=scenario, mcs=mcs)
         if not path.exists():
             continue
         points.append(_load_datapoint(path))
@@ -116,6 +128,35 @@ def _mean_across_drops(
         coded_ber=float(np.nanmean([p.coded_ber for p in points])),
         throughput=float(np.nanmean([p.throughput for p in points])),
     )
+
+def _best_throughput_point(
+    *,
+    base_dir: Path,
+    mobility: str,
+    drops: Sequence[int],
+    rx_ues: int,
+    tx_ues: int,
+    scenario: Scenario,
+    mcs_candidates: Sequence[MCS],
+) -> Optional[DataPoint]:
+    best_point: Optional[DataPoint] = None
+    best_throughput = -float("inf")
+    for mcs in mcs_candidates:
+        point = _mean_across_drops(
+            base_dir=base_dir,
+            mobility=mobility,
+            drops=drops,
+            rx_ues=rx_ues,
+            tx_ues=tx_ues,
+            scenario=scenario,
+            mcs=mcs,
+        )
+        if point is None or np.isnan(point.throughput):
+            continue
+        if point.throughput > best_throughput:
+            best_throughput = point.throughput
+            best_point = point
+    return best_point
 
 
 def _plot(
@@ -156,9 +197,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--drops", type=int, nargs="+", default=[1, 2, 3])
     parser.add_argument("--rx-ues", type=int, nargs="+", default=[2, 3, 4])
     parser.add_argument("--tx-ues", type=int, nargs="+", default=[2, 4, 6, 8, 10])
-    parser.add_argument("--fixed-rx", type=int, default=3)
-    parser.add_argument("--fixed-tx", type=int, default=8)
+    parser.add_argument("--fixed-rx", type=int, default=4)
+    parser.add_argument("--fixed-tx", type=int, default=10)
     parser.add_argument("--output-dir", type=Path, default=Path("results"))
+    parser.add_argument("--throughput-mod-orders", type=int, nargs="+", default=[2, 4])
+    parser.add_argument(
+        "--throughput-code-rates",
+        nargs="+",
+        default=["1/3", "1/2", "2/3"],
+    )
+    parser.add_argument("--ber-mod-order", type=int, default=4)
+    parser.add_argument("--ber-code-rate", default="1/2")
     parser.add_argument(
         "--prediction-method",
         default="two_mode",
@@ -169,6 +218,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    throughput_mcs = [
+        MCS(mod_order=mod_order, code_rate=code_rate)
+        for mod_order in args.throughput_mod_orders
+        for code_rate in args.throughput_code_rates
+    ]
+    ber_mcs = MCS(mod_order=args.ber_mod_order, code_rate=args.ber_code_rate)
 
     scenarios = [
         # Scenario(
@@ -213,9 +268,19 @@ def main() -> None:
                 rx_ues=args.fixed_rx,
                 tx_ues=tx,
                 scenario=scenario,
+                mcs=ber_mcs,
             )
             y_ber_tx.append(point.coded_ber if point else float("nan"))
-            y_tput_tx.append(point.throughput if point else float("nan"))
+            best_point = _best_throughput_point(
+                base_dir=args.base_dir,
+                mobility=args.mobility,
+                drops=args.drops,
+                rx_ues=args.fixed_rx,
+                tx_ues=tx,
+                scenario=scenario,
+                mcs_candidates=throughput_mcs,
+            )
+            y_tput_tx.append(best_point.throughput if best_point else float("nan"))
 
         y_ber_rx: List[float] = []
         y_tput_rx: List[float] = []
@@ -227,9 +292,19 @@ def main() -> None:
                 rx_ues=rx,
                 tx_ues=args.fixed_tx,
                 scenario=scenario,
+                mcs=ber_mcs,
             )
             y_ber_rx.append(point.coded_ber if point else float("nan"))
-            y_tput_rx.append(point.throughput if point else float("nan"))
+            best_point = _best_throughput_point(
+                base_dir=args.base_dir,
+                mobility=args.mobility,
+                drops=args.drops,
+                rx_ues=rx,
+                tx_ues=args.fixed_tx,
+                scenario=scenario,
+                mcs_candidates=throughput_mcs,
+            )
+            y_tput_rx.append(best_point.throughput if best_point else float("nan"))
 
         ber_vs_tx.append((scenario.label, y_ber_tx))
         tput_vs_tx.append((scenario.label, y_tput_tx))
@@ -239,9 +314,9 @@ def main() -> None:
     _plot(
         x_values=args.tx_ues,
         y_series=ber_vs_tx,
-        xlabel="Number of RUs",
+        xlabel="Number of Tx UEs",
         ylabel="Coded BER",
-        output_path=args.output_dir / "qtr4_coded_ber_vs_rus.png",
+        output_path=args.output_dir / "qtr4_coded_ber_vs_tx_ues.png",
         semilogy=True,
     )
     _plot(
@@ -255,9 +330,9 @@ def main() -> None:
     _plot(
         x_values=args.tx_ues,
         y_series=tput_vs_tx,
-        xlabel="Number of RUs",
+        xlabel="Number of Tx UEs",
         ylabel="Throughput (Mbps)",
-        output_path=args.output_dir / "qtr4_throughput_vs_rus.png",
+        output_path=args.output_dir / "qtr4_throughput_vs_tx_ues.png",
     )
     _plot(
         x_values=args.rx_ues,
