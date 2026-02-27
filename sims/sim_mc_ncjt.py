@@ -6,6 +6,7 @@ Simulation of NCJT scenario with ns-3 channels
 import os
 import sys
 from fractions import Fraction
+import numpy as np
 # import numpy as np
 # import matplotlib.pyplot as plt
 
@@ -116,8 +117,41 @@ if __name__ == "__main__":
     import time
     start_time = time.time()
     uncoded_ber, coded_ber, coded_bler, goodput, throughput = sim_mc_ncjt(cfg, ns3cfg, cluster_ant_list, mod_order_list, RB_based_ue_selection=False, num_selected_ues = 10 , perSC_SNR=False)
+
+    folder_path = os.path.join(dmimo_root, "results", "channels_multiple_mc_ncjt", folder_name)
+    os.makedirs(folder_path, exist_ok=True)
+    code_rate_tag = str(code_rate).replace("/", "_")
+    file_name = (
+        f"mc_ncjt_results_p1_{cfg.phase_1_enabled}_p3_{cfg.enable_rxsquad}_rx_UE_{rx_ues}_tx_UE_{num_txue_sel}"
+        f"_mod_order_{modulation_order}_code_rate_{code_rate_tag}.npz"
+    )
+    file_path = os.path.join(folder_path, file_name)
+
+    np.savez(
+        file_path,
+        drop_idx=drop_idx,
+        ns3_folder=cfg.ns3_folder,
+        total_slots=cfg.total_slots,
+        start_slot_idx=cfg.start_slot_idx,
+        num_slots_p1=cfg.num_slots_p1,
+        num_slots_p2=cfg.num_slots_p2,
+        rx_ues=rx_ues,
+        num_txue_sel=num_txue_sel,
+        modulation_order=modulation_order,
+        code_rate=code_rate,
+        cluster_ant_list=np.array(cluster_ant_list, dtype=object),
+        mod_order_list=np.array(mod_order_list),
+        uncoded_ber=uncoded_ber,
+        coded_ber=coded_ber,
+        coded_bler=coded_bler,
+        goodput=goodput,
+        throughput=throughput,
+    )
+    
     end_time = time.time()
     print(f"Simulation time: {end_time - start_time} seconds ({(end_time - start_time)/(cfg.total_slots - cfg.start_slot_idx)} seconds per slot)")
+
+    print(f"Saved results to {file_path}")
     # Show results
     print(f"Average uncoded/coded BER: {uncoded_ber}  {coded_ber}")
     print(f"Average coded BLER: {coded_bler}")
