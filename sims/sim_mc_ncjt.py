@@ -129,18 +129,6 @@ if __name__ == "__main__":
 
     np.savez(
         file_path,
-        drop_idx=drop_idx,
-        ns3_folder=cfg.ns3_folder,
-        total_slots=cfg.total_slots,
-        start_slot_idx=cfg.start_slot_idx,
-        num_slots_p1=cfg.num_slots_p1,
-        num_slots_p2=cfg.num_slots_p2,
-        rx_ues=rx_ues,
-        num_txue_sel=num_txue_sel,
-        modulation_order=modulation_order,
-        code_rate=code_rate,
-        cluster_ant_list=np.array(cluster_ant_list, dtype=object),
-        mod_order_list=np.array(mod_order_list),
         uncoded_ber=uncoded_ber,
         coded_ber=coded_ber,
         coded_bler=coded_bler,
