@@ -384,7 +384,7 @@ def main() -> None:
     _plot(
         x_values=args.tx_ues,
         y_series=ber_vs_tx,
-        xlabel="Number of Tx UEs",
+        xlabel="Tx UEs",
         ylabel="Coded BER",
         output_path=args.output_dir / "qtr4_coded_ber_vs_tx_ues.png",
         semilogy=True,
@@ -392,7 +392,7 @@ def main() -> None:
     _plot(
         x_values=args.rx_ues,
         y_series=ber_vs_rx,
-        xlabel="Number of RX UEs",
+        xlabel="RX UEs",
         ylabel="Coded BER",
         output_path=args.output_dir / "qtr4_coded_ber_vs_rx_ues.png",
         semilogy=True,
@@ -400,14 +400,14 @@ def main() -> None:
     _plot(
         x_values=args.tx_ues,
         y_series=tput_vs_tx,
-        xlabel="Number of Tx UEs",
+        xlabel="Tx UEs",
         ylabel="Throughput (Mbps)",
         output_path=args.output_dir / "qtr4_throughput_vs_tx_ues.png",
     )
     _plot(
         x_values=args.rx_ues,
         y_series=tput_vs_rx,
-        xlabel="Number of RX UEs",
+        xlabel="RX UEs",
         ylabel="Throughput (Mbps)",
         output_path=args.output_dir / "qtr4_throughput_vs_rx_ues.png",
     )
