@@ -5,6 +5,7 @@ Simulation of NCJT scenario with ns-3 channels
 
 import os
 import sys
+from fractions import Fraction
 # import numpy as np
 # import matplotlib.pyplot as plt
 
@@ -32,10 +33,38 @@ sys.path.append(dmimo_root)
 from dmimo.config import SimConfig, Ns3Config
 from dmimo.mc_ncjt import sim_mc_ncjt
 
+def _parse_code_rate(value):
+    try:
+        return float(Fraction(value))
+    except (ValueError, ZeroDivisionError):
+        return float(value)
+
+
+def parse_arguments(arguments):
+    drop_idx = "5"
+    rx_ues = 3
+    modulation_order = 6
+    code_rate = 1 / 2
+    num_txue_sel = 10
+
+    if len(arguments) >= 1:
+        drop_idx = str(arguments[0])
+    if len(arguments) >= 2:
+        rx_ues = int(arguments[1])
+    if len(arguments) >= 3:
+        num_txue_sel = int(arguments[2])
+    if len(arguments) >= 4:
+        modulation_order = int(arguments[3])
+    if len(arguments) >= 5:
+        code_rate = _parse_code_rate(arguments[4])
+
+    return drop_idx, rx_ues, num_txue_sel, modulation_order, code_rate
 
 # Main function
 if __name__ == "__main__":
     import sionna
+    arguments = sys.argv[1:]
+    drop_idx, rx_ues, num_txue_sel, modulation_order, code_rate = parse_arguments(arguments)
     # for channel_seed in range(2,7):
         # print(f"Running with channel random seed {channel_seed}")
     # Set sionna random seed
@@ -50,7 +79,7 @@ if __name__ == "__main__":
 
     # cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels/HighMobilitySeed%d" % channel_seed)  # folder where the ns-3 channels are stored
     # cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels/LowMobility")  # folder where the ns-3 channels are stored
-    cfg.ns3_folder = os.path.join(dmimo_root, "ns3/channels_high_mobility_5")
+    cfg.ns3_folder = os.path.join(dmimo_root, f"ns3/channels_high_mobility_{drop_idx}")
     cfg.enable_ue_selection = False
     cfg.perfect_csi = False
 
@@ -63,16 +92,16 @@ if __name__ == "__main__":
     # Select different number of Tx/Rx nodes
 
     # We set the antennas of each cluster such that the total transmit power is the same between transmit clusters.
-    ns3cfg.num_txue_sel = 10
+    ns3cfg.num_txue_sel = num_txue_sel
     # cluster_ant_list = [list(range(4)), list(range(4,24))]
     cluster_ant_list = [[0,1] + list(range(4,4+ns3cfg.num_txue_sel//2*2)) , [2,3] + list(range(4+ns3cfg.num_txue_sel//2*2,4+ns3cfg.num_txue_sel*2))]
     # cluster_ant_list = [[0,1,2,4], list(range())]
-    modulation_order = 6
+    modulation_order = modulation_order
     mod_order_list = [modulation_order, modulation_order] # [4,4] # Modulation order cluster 1 and 2
-    ns3cfg.num_rxue_sel = 3
+    ns3cfg.num_rxue_sel = rx_ues
 
     # cfg.modulation_order = 4
-    cfg.code_rate = 1/2
+    cfg.code_rate = code_rate
 
     cfg.enable_ue_selection = False
 
