@@ -435,8 +435,26 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             else:
                 start_time_all_loops = time.time()
 
+                h_freq_csi_up_to_date, _ = lmmse_channel_estimation(dmimo_chans, rg_csi,
+                                                           slot_idx=cfg.first_slot_idx,
+                                                           cfo_vals=cfg.random_cfo_vals,
+                                                           sto_vals=cfg.random_sto_vals,
+                                                           freq_cov_mat=freq_cov_mat,
+                                                           lmmse_interpolator=lmmse_interpolator)
+
                 h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg, max_workers=8)
                 # h_freq_csi = predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg)
+
+                nmse_outdated = tf.reduce_mean(tf.abs(h_freq_csi_history[-1, ...] - h_freq_csi_up_to_date) ** 2) / tf.reduce_mean(tf.abs(h_freq_csi_up_to_date) ** 2)
+                nmse_pred = tf.reduce_mean(tf.abs(h_freq_csi - h_freq_csi_up_to_date) ** 2) / tf.reduce_mean(tf.abs(h_freq_csi_up_to_date) ** 2)
+                print(f"NMSE of outdated CSI: {nmse_outdated:.4f}, NMSE of predicted CSI: {nmse_pred:.4f}")
+                
+                h_freq_csi_history_abs = tf.abs(h_freq_csi_history)
+                h_freq_csi_up_to_date_abs = tf.abs(h_freq_csi_up_to_date)
+                h_freq_csi_abs = predict_all_links(h_freq_csi_history_abs, rc_config, ns3cfg, max_workers=8)
+                nmse_outdated_abs = tf.reduce_mean(tf.abs(h_freq_csi_history[-1, ...] - h_freq_csi_up_to_date_abs) ** 2) / tf.reduce_mean(tf.abs(h_freq_csi_up_to_date_abs) ** 2)
+                nmse_pred = tf.reduce_mean(tf.abs(h_freq_csi - h_freq_csi_up_to_date_abs) ** 2) / tf.reduce_mean(tf.abs(h_freq_csi_up_to_date_abs) ** 2)
+
 
                 end_time_all_loops = time.time()
                 # print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
