@@ -100,6 +100,11 @@ def _build_filename_candidates(
             f"mc_ncjt_results_p1_{scenario.phase_1_enabled}_p3_{scenario.phase_3_enabled}"
             f"_rx_UE_{rx_ues}_tx_UE_{tx_ues}_{mcs.file_token}.npz"
         ] if mcs else []
+    if scenario.results_subdir == "channels_multiple_sc_ncjt":
+        return [
+            f"sc_ncjt_results_p1_{scenario.phase_1_enabled}_p3_{scenario.phase_3_enabled}"
+            f"_rx_UE_{rx_ues}_tx_UE_{tx_ues}_{mcs.file_token}.npz"
+        ] if mcs else []
     
     p1 = str(scenario.phase_1_enabled)
     p3 = str(scenario.phase_3_enabled)
@@ -143,14 +148,15 @@ def _resolve_result_path(
             return path
 
     # Fallback: accept any prediction method when filenames differ.
-    if scenario.results_subdir == "channels_multiple_mc_ncjt":
+    if scenario.results_subdir in {"channels_multiple_mc_ncjt", "channels_multiple_sc_ncjt"}:
         if not mcs:
             return None
         p1 = str(scenario.phase_1_enabled)
         p3 = str(scenario.phase_3_enabled)
+        prefix = "mc_ncjt" if scenario.results_subdir == "channels_multiple_mc_ncjt" else "sc_ncjt"
         for rate in mcs.code_rate_variants:
             pattern = (
-                f"mc_ncjt_results_p1_{p1}_p3_{p3}_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
+                f"{prefix}_results_p1_{p1}_p3_{p3}_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
                 f"_mod_order_{mcs.mod_order}_code_rate_{rate}.npz"
             )
             matches = sorted(folder.glob(pattern))
@@ -265,11 +271,18 @@ def _plot(
 ) -> None:
     plt.figure(figsize=(8, 5))
     markers = ["o", "s", "^", "D", "v", "P", "X"]
+    style_by_label = {
+        "MC-NCJT": {"color": "red", "marker": "s"},
+        "SC-NCJT": {"color": "red", "marker": "^"},
+    }
     for idx, (label, y) in enumerate(y_series):
+        style = style_by_label.get(label, {})
+        marker = style.get("marker", markers[idx % len(markers)])
+        color = style.get("color")
         if semilogy:
-            plt.semilogy(x_values, y, marker=markers[idx % len(markers)], label=label)
+            plt.semilogy(x_values, y, marker=marker, color=color, label=label)
         else:
-            plt.plot(x_values, y, marker=markers[idx % len(markers)], label=label)
+            plt.plot(x_values, y, marker=marker, color=color, label=label)
 
     plt.xlabel(xlabel, fontsize=12)
     plt.ylabel(ylabel, fontsize=12)
@@ -352,6 +365,14 @@ def main() -> None:
             quantization=False,
             label="MC-NCJT",
             results_subdir="channels_multiple_mc_ncjt",
+        ),
+        Scenario(
+            phase_1_enabled=True,
+            phase_3_enabled=True,
+            prediction=False,
+            quantization=False,
+            label="SC-NCJT",
+            results_subdir="channels_multiple_sc_ncjt",
         ),
     ]
 
