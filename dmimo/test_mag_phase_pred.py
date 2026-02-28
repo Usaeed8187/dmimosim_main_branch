@@ -21,8 +21,9 @@ from dmimo.config import Ns3Config, SimConfig, RCConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation, estimate_freq_cov, LMMSELinearInterp
 from dmimo.channel import standard_rc_pred_freq_mimo, default_ddpg_predictor
 from dmimo.channel.ddpg_predictor import DDPGChannelPredictor
-from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred
+from dmimo.channel import weiner_filter_pred
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
+from dmimo.channel.twomode_wesn_pred_real import predict_all_links_real, predict_all_links_simple_real
 from dmimo.channel.rl_beam_selector_v2 import RLBeamSelector
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
@@ -451,10 +452,31 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                 
                 h_freq_csi_history_abs = tf.abs(h_freq_csi_history)
                 h_freq_csi_up_to_date_abs = tf.abs(h_freq_csi_up_to_date)
-                h_freq_csi_abs = predict_all_links(h_freq_csi_history_abs, rc_config, ns3cfg, max_workers=8)
-                nmse_outdated_abs = tf.reduce_mean(tf.abs(h_freq_csi_history[-1, ...] - h_freq_csi_up_to_date_abs) ** 2) / tf.reduce_mean(tf.abs(h_freq_csi_up_to_date_abs) ** 2)
-                nmse_pred = tf.reduce_mean(tf.abs(h_freq_csi - h_freq_csi_up_to_date_abs) ** 2) / tf.reduce_mean(tf.abs(h_freq_csi_up_to_date_abs) ** 2)
+                h_freq_csi_abs = predict_all_links_simple_real(h_freq_csi_history_abs, rc_config, ns3cfg)
+                nmse_outdated_abs = tf.reduce_mean((h_freq_csi_history_abs[-1, ...] - h_freq_csi_up_to_date_abs) ** 2) / tf.reduce_mean((h_freq_csi_up_to_date_abs) ** 2)
+                nmse_pred_abs = tf.reduce_mean((h_freq_csi_abs - h_freq_csi_up_to_date_abs) ** 2) / tf.reduce_mean((h_freq_csi_up_to_date_abs) ** 2)
+                print(f"NMSE of outdated CSI (Abs): {nmse_outdated_abs:.4f}, NMSE of predicted CSI (Abs): {nmse_pred_abs:.4f}")
 
+                h_freq_csi_history_phase = tf.math.angle(h_freq_csi_history)
+                h_freq_csi_up_to_date_phase = tf.math.angle(h_freq_csi_up_to_date)
+                h_freq_csi_phase = predict_all_links_simple_real(h_freq_csi_history_phase, rc_config, ns3cfg)
+                nmse_outdated_phase = tf.reduce_mean((h_freq_csi_history_phase[-1, ...] - h_freq_csi_up_to_date_phase) ** 2) / tf.reduce_mean((h_freq_csi_up_to_date_phase) ** 2)
+                nmse_pred_phase = tf.reduce_mean((h_freq_csi_phase - h_freq_csi_up_to_date_phase) ** 2) / tf.reduce_mean((h_freq_csi_up_to_date_phase) ** 2)
+                print(f"NMSE of outdated CSI (Phase): {nmse_outdated_phase:.4f}, NMSE of predicted CSI (Phase): {nmse_pred_phase:.4f}")
+
+                h_freq_csi_history_real = tf.math.real(h_freq_csi_history)
+                h_freq_csi_up_to_date_real = tf.math.real(h_freq_csi_up_to_date)
+                h_freq_csi_real = predict_all_links_simple_real(h_freq_csi_history_real, rc_config, ns3cfg)
+                nmse_outdated_real = tf.reduce_mean((h_freq_csi_history_real[-1, ...] - h_freq_csi_up_to_date_real) ** 2) / tf.reduce_mean((h_freq_csi_up_to_date_real) ** 2)
+                nmse_pred_real = tf.reduce_mean((h_freq_csi_real - h_freq_csi_up_to_date_real) ** 2) / tf.reduce_mean((h_freq_csi_up_to_date_real) ** 2)
+                print(f"NMSE of outdated CSI (Real): {nmse_outdated_real:.4f}, NMSE of predicted CSI (Real): {nmse_pred_real:.4f}")
+
+                h_freq_csi_history_imag = tf.math.imag(h_freq_csi_history)
+                h_freq_csi_up_to_date_imag = tf.math.imag(h_freq_csi_up_to_date)
+                h_freq_csi_imag = predict_all_links_simple_real(h_freq_csi_history_imag, rc_config, ns3cfg)
+                nmse_outdated_imag = tf.reduce_mean((h_freq_csi_history_imag[-1, ...] - h_freq_csi_up_to_date_imag) ** 2) / tf.reduce_mean((h_freq_csi_up_to_date_imag) ** 2)
+                nmse_pred_imag = tf.reduce_mean((h_freq_csi_imag - h_freq_csi_up_to_date_imag) ** 2) / tf.reduce_mean((h_freq_csi_up_to_date_imag) ** 2)
+                print(f"NMSE of outdated CSI (Imag): {nmse_outdated_imag:.4f}, NMSE of predicted CSI (Imag): {nmse_pred_imag:.4f}")
 
                 end_time_all_loops = time.time()
                 # print("total time for prediction: ", end_time_all_loops-start_time_all_loops)

@@ -9,8 +9,8 @@ from dmimo.channel import lmmse_channel_estimation
 
 class twomode_wesn_pred:
 
-    def __init__(self, rc_config, num_freq_re, num_rx_ant, num_tx_ant, type=np.complex64):
-        
+    def __init__(self, rc_config, num_freq_re, num_rx_ant, num_tx_ant, type=np.float32):
+
         self.rc_config = rc_config
         self.dtype = type
 
@@ -50,8 +50,11 @@ class twomode_wesn_pred:
         self.W_res_left = self.sparse_mat(self.d_left)
         self.W_res_right = self.sparse_mat(self.d_right)
 
-        self.W_in_left = 2 * (self.RS.rand(self.d_left, self.N_in_left) - 0.5) # TODO: check if I should make this complex later
-        self.W_in_right = 2 * (self.RS.rand(self.N_in_right, self.d_right) - 0.5) # TODO: check if I should make this complex later
+        if np.isnan(self.W_res_left).any() or np.isnan(self.W_res_right).any():
+            raise ValueError("\n NaN values found in reservoir weights")
+
+        self.W_in_left = 2 * (self.RS.rand(self.d_left, self.N_in_left) - 0.5)
+        self.W_in_right = 2 * (self.RS.rand(self.N_in_right, self.d_right) - 0.5)
 
         # TODO: using a vectorization trick to learn one vectorized W_out instead of left and right W_outs.
         # This is mathematically equivalent to 
@@ -112,6 +115,7 @@ class twomode_wesn_pred:
 
                         S_f, Y_f = self.build_S_Y(Y_in, Y_out, curr_window_weights=None)
                         S_list.append(S_f); Y_list.append(Y_f)
+                        
 
                 S_all = np.concatenate(S_list, axis=1)  # (F, sum_T)
                 Y_all = np.concatenate(Y_list, axis=1)  # (N_r*N_t, sum_T)
@@ -144,12 +148,21 @@ class twomode_wesn_pred:
         Y_3D = channel_input
         Y_target_3D = channel_output
 
+        if np.isnan(channel_input).any():
+            hold = 1
+
+        if np.isnan(channel_output).any():
+            hold = 1
+
         if self.enable_window:
             Y_3D_win = self.form_window_input_signal(Y_3D, curr_window_weights)
         else:
             # Safe fallback if forget_length not set:
             forget = getattr(self, "forget_length", 0)
             Y_3D_win = np.concatenate([Y_3D, np.zeros([Y_3D.shape[0], forget, Y_3D.shape[2]], dtype=self.dtype)], axis=1)
+        
+        if np.isnan(Y_3D_win).any():
+            hold = 1
 
         S_3D_transit = self.state_transit(Y_3D_win * self.input_scale)
         S_3D = np.concatenate([S_3D_transit, Y_3D_win], axis=-1)
@@ -189,23 +202,28 @@ class twomode_wesn_pred:
         
         return window_weights
 
-    def sparse_mat(self, m):
-        
-        W = 2*(self.RS.rand(m, m) - 0.5) + 2j*(self.RS.rand(m, m) - 0.5)
-        W[self.RS.rand(*W.shape) < self.sparsity] = 0+1j*0
-        radius = np.max(np.abs(np.linalg.eigvals(W)))
-        W = W * (self.spectral_radius / radius)
-        
-        return W
+    def sparse_mat(self, m, max_tries=100, eps=1e-12):
+        for attempt in range(max_tries):
+            W = 2 * (self.RS.rand(m, m) - 0.5)
+            W[self.RS.rand(m, m) < self.sparsity] = 0
 
-    def complex_to_real_target(self, Y_target_2D):
-        Y_target_2D_real_list = []
-        for t in range(self.N_t):
-            target = Y_target_2D[t, :].reshape(1, -1) # (1, N_symbols * (N_fft+N_cp))
-            real_target = np.concatenate((np.real(target), np.imag(target)), axis=0)  # (2, N_symbols * (N_fft+N_cp))
-            Y_target_2D_real_list.append(real_target)
-        Y_target_2D_real = np.concatenate(Y_target_2D_real_list, axis=0)
-        return Y_target_2D_real
+            # Reject all-zero matrix immediately
+            if not np.any(W):
+                continue
+
+            radius = np.max(np.abs(np.linalg.eigvals(W)))
+
+            if np.isfinite(radius) and radius > eps:
+                return W * (self.spectral_radius / radius)
+
+        raise RuntimeError(
+            f"Failed to generate a valid sparse matrix after {max_tries} attempts. "
+            f"m={m}, sparsity={self.sparsity}, eps={eps}. "
+            "Spectral radius was zero or numerically unstable each time."
+        )
+
+    def ensure_real_target(self, Y_target_2D):
+        return np.asarray(Y_target_2D, dtype=self.dtype)
 
     def fitting_time(self, channel_input, channel_output, curr_window_weights):
 
@@ -250,18 +268,15 @@ class twomode_wesn_pred:
     def reg_p_inv(self, X):
         # X: (F, T)
         F = X.shape[0]
-        G = X @ X.conj().T + self.reg * np.eye(F, dtype=self.dtype)  # (F,F)
-        G = X.conj().T @ np.linalg.pinv(G)                 # (T,F)
+        G = X @ X.T + self.reg * np.eye(F, dtype=self.dtype)  # (F,F)
+        G = X.T @ np.linalg.pinv(G)                 # (T,F)
 
         return G
 
-    def form_window_input_signal(self, Y_3D_complex, curr_window_weights):
+    def form_window_input_signal(self, Y_3D_real, curr_window_weights):
 
-        # if self.window_weight_application == 'across_inputs' or self.window_weight_application == 'across_time_and_inputs':
-        #     Y_2D_complex = Y_2D_complex * curr_window_weights
-
-        assert Y_3D_complex.ndim == 3, "Y must be [T, N_r, N_t]"
-        T, N_r, N_t = Y_3D_complex.shape
+        assert Y_3D_real.ndim == 3, "Y must be [T, N_r, N_t]"
+        T, N_r, N_t = Y_3D_real.shape
         L = int(self.window_length)
 
         Y_3D_window = np.zeros((T, N_r, L * N_t), dtype=self.dtype)
@@ -271,7 +286,7 @@ class twomode_wesn_pred:
             for ell in range(L):
                 t = k - ell
                 if t >= 0:
-                    blocks.append(Y_3D_complex[t])       # [N_r, N_t]
+                    blocks.append(Y_3D_real[t])       # [N_r, N_t]
                 else:
                     blocks.append(np.zeros((N_r, N_t), dtype=self.dtype))  # causal zero-pad
             # Concatenate along Tx axis → [N_r, L*N_t]
@@ -309,7 +324,10 @@ class twomode_wesn_pred:
         S_2D = copy.deepcopy(self.S_0)
         S_3D = []
         for t in range(T):
-            S_2D = self.complex_tanh(self.W_res_left @ S_2D @ self.W_res_right + self.W_in_left @ Y_3D[t,:,:] @ self.W_in_right)
+            S_2D = self.real_tanh(self.W_res_left @ S_2D @ self.W_res_right + self.W_in_left @ Y_3D[t,:,:] @ self.W_in_right)
+
+            if np.isnan(S_2D).any():
+                hold = 1
             S_3D.append(S_2D)
 
         S_3D = np.stack(S_3D, axis=0)
@@ -318,8 +336,8 @@ class twomode_wesn_pred:
 
         return S_3D
 
-    def complex_tanh(self, Y):
-        return np.tanh(np.real(Y)) + 1j * np.tanh(np.imag(Y))
+    def real_tanh(self, Y):
+        return np.tanh(Y)
 
 def _predict_pair_worker(args):
     base_history, rc_config, RB, tx_ant_idx, rx_ant_idx = args
@@ -338,7 +356,7 @@ def _predict_pair_worker(args):
     rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
     return rx_idx, tx_idx, tmp
     
-def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2, max_workers=None):
+def predict_all_links_real(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2, max_workers=None):
 
     base_history = np.asarray(h_freq_csi_history)
     _, _, _, _, _, _, _, RB = base_history.shape
@@ -375,10 +393,11 @@ def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_u
     return h_freq_csi
 
 
-def predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2):
+def predict_all_links_simple_real(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2):
 
     T, _, _, RxAnt, _, TxAnt, num_syms, RB = h_freq_csi_history.shape
-    h_freq_csi = np.zeros(h_freq_csi_history[0, ...].shape, dtype=h_freq_csi_history.dtype)
+    h_freq_csi = np.zeros(h_freq_csi_history[0, ...].shape, dtype=h_freq_csi_history.dtype.as_numpy_dtype)
+    h_freq_csi_history = np.asarray(h_freq_csi_history)
 
     for tx_node_idx in range(ns3cfg.num_txue_sel + 1):
         for rx_node_idx in range(ns3cfg.num_rxue_sel + 1):
