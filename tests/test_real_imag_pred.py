@@ -45,6 +45,7 @@ if __name__ == "__main__":
     data = np.load("tests/H_real_imag_1kmph.npz")
     H_real_imag = data["H_real_imag"]
     H_real_imag = H_real_imag[-300:,...]
+    # H_real_imag = H_real_imag[..., :32]
 
     sigma = (2, 0, 0, 0, 0)  # adjust 2 and 1 as needed
     H_real_imag = gaussian_filter(H_real_imag, sigma=sigma)
