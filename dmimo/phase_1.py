@@ -138,11 +138,7 @@ class Phase1(Model):
         x = self.mapper(d)
         x_rg = self.rg_mapper(x)
 
-        # h_freq_csi = np.linalg.pinv(precoding_matrices)
-        h_freq_csi = np.conj(np.swapaxes(precoding_matrices, -2, -1))
-
-        h_freq_csi = h_freq_csi
-        h_freq_csi = tf.transpose(h_freq_csi, perm=[0, 1, 2, 4, 3])
+        h_freq_csi = precoding_matrices
 
         all_symbols = tf.range(self.rg.num_ofdm_symbols)
         pilot_symbols = self.rg._pilot_ofdm_symbol_indices
@@ -175,7 +171,6 @@ class Phase1(Model):
                     x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'grad_ascent'])
                 elif curr_method == 2:
                     # x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'np_hard_sdr'])
-                    pass
                     continue
                 
                 y = self.apply_channel([x_precoded, h_freq])
@@ -311,9 +306,7 @@ class Phase1v(Phase1):
         x = self.mapper(d)
         x_rg = self.rg_mapper(x)
 
-        # Prepare CSI for precoder (same transformation as Phase1)
-        h_freq_csi = np.conj(np.swapaxes(precoding_matrices, -2, -1))
-        h_freq_csi = tf.transpose(h_freq_csi, perm=[0, 1, 2, 4, 3])
+        h_freq_csi = precoding_matrices
 
         # Get channel and per-antenna SNR from dmimo_chans for this batch
         h_freq, rx_snr_db_full, _ = dmimo_chans.load_channel(slot_idx=self.cfg.first_slot_idx,

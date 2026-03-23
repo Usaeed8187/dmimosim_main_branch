@@ -81,11 +81,9 @@ class P1DemoPrecoder(Layer):
             starting_SINR = None
             best_SINR = None
         elif precoding_method == 'np_hard_sdr':
-            x_precoded, g = grad_ascent_precoder(x_precoded,
+            x_precoded, g = multicast_precoder_np_hard_sdr(x_precoded,
                                                     h_pc_desired,
-                                                    rx_snr_db,
-                                                    num_iterations=num_iterations,
-                                                    return_precoding_matrix=True)
+                                                    rx_snr_db)
             starting_SINR = None
             best_SINR = None
         elif precoding_method == 'grad_ascent':

@@ -27,6 +27,8 @@ def weighted_mean_precoder(x, h, rx_snr_db, num_iterations=3, return_precoding_m
     num_user_streams = h.shape[-2]
     assert num_user_streams == num_streams_per_tx, "total number of streams must match"
 
+    h = np.conj(h)
+
     rx_snr_linear = 10**(rx_snr_db / 10)
     n_var = 1 / rx_snr_linear
 
