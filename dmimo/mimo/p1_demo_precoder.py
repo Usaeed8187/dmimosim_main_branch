@@ -38,7 +38,7 @@ class P1DemoPrecoder(Layer):
 
         return h_eff
 
-    def call(self, inputs, num_iterations=10):
+    def call(self, inputs, num_iterations=50):
 
         ue_rank_adapt = False
         if len(inputs) == 4:
