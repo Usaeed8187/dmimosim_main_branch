@@ -16,7 +16,7 @@ import time
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
+os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm-16/lib/libLLVM.so'
 
 import tensorflow as tf
 
