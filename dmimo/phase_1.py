@@ -157,7 +157,7 @@ class Phase1(Model):
                                                             batch_size=self.batch_size)
         h_freq = tf.gather(h_freq, tf.range(0, self.cfg.num_scheduled_tx_ue*2), axis=2)
 
-        SNR_range = np.arange(0,40,2)
+        SNR_range = self.cfg.SNR_range
 
         uncoded_bers = np.zeros((3, SNR_range.shape[0], self.cfg.num_scheduled_tx_ue))
         
@@ -174,7 +174,9 @@ class Phase1(Model):
                 elif curr_method == 1:
                     x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'grad_ascent'])
                 elif curr_method == 2:
-                    x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'np_hard_sdr'])              
+                    # x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'np_hard_sdr'])
+                    pass
+                    continue
                 
                 y = self.apply_channel([x_precoded, h_freq])
                 rx_snr_linear =  10**(rx_snr_db / 10)
@@ -211,18 +213,18 @@ class Phase1(Model):
                     uncoded_bers[curr_method, snr_idx, rx_node] = compute_ber(d, d_hard).numpy()
 
         plt.figure()
-
         worst_users = np.argmax(uncoded_bers, axis=-1)
         worst_users  = mode(worst_users, axis=1, keepdims=False).mode
         plt.semilogy(SNR_range, uncoded_bers[0,:,worst_users[0]], label='BER for worst user (user {}) after Weighted Mean precoding'.format(worst_users[0]))
         plt.semilogy(SNR_range, uncoded_bers[1,:,worst_users[1]], label='BER for worst user (user {}) after grad ascent precoding'.format(worst_users[1]))
-        plt.semilogy(SNR_range, uncoded_bers[2,:,worst_users[2]], label='BER for worst user (user {}) after Numerical Optimizer precoding'.format(worst_users[2]))
+        # plt.semilogy(SNR_range, uncoded_bers[2,:,worst_users[2]], label='BER for worst user (user {}) after Numerical Optimizer precoding'.format(worst_users[2]))
         plt.legend()
         plt.grid()
         plt.xlabel('SNR (dB)')
         plt.ylabel('BER')
         plt.title('')
         plt.savefig('Grad Ascent Precoder Evaluation - {} Users'.format(self.cfg.num_scheduled_tx_ue))
+        plt.close()
 
 
         return uncoded_bers, x_hat
@@ -479,7 +481,7 @@ def sim_phase_1(cfg: SimConfig, ns3cfg: Ns3Config):
 
     if cfg.CSI_feedback_method =='5G':
         generate_CSI_feedback = quantized_CSI_feedback(method='5G', codebook_selection_method='rate', num_tx_streams=cfg.num_tx_streams, architecture='dMIMO_phase1', 
-                                                        snrdb=rx_snr_db, wideband=True)
+                                                        snrdb=rx_snr_db, N_1=4, wideband=True)
         [PMI, rate_for_selected_precoder, quantized_channels] = generate_CSI_feedback(h_freq_csi_dl)
     else:
         quantized_channels = None
@@ -502,7 +504,7 @@ def sim_phase_1(cfg: SimConfig, ns3cfg: Ns3Config):
     for ue_idx in range(cfg.num_scheduled_tx_ue):
         detected_bits = detected_bits_list[ue_idx]
         ber = compute_ber(detected_bits, info_bits)
-        print("UE {}: Coded BER = {}".format(ue_idx, ber))
+        # print("UE {}: Coded BER = {}".format(ue_idx, ber))
 
     uncoded_bers, x_hat = phase_1(p1_chans_dl, info_bits, quantized_channels)
 
@@ -528,5 +530,20 @@ def sim_phase_1_all(cfg: SimConfig, ns3cfg: Ns3Config):
         curr_uncoded_bers = sim_phase_1(cfg, ns3cfg)
 
         uncoded_bers.append(curr_uncoded_bers)
+
+    uncoded_bers_arr = np.asarray(uncoded_bers)
+    uncoded_bers_arr_avg = np.mean(uncoded_bers_arr,axis=0)
+    worst_users = np.argmax(uncoded_bers_arr_avg, axis=-1)
+    worst_users  = mode(worst_users, axis=1, keepdims=False).mode
+    plt.figure()
+    plt.semilogy(cfg.SNR_range, uncoded_bers_arr_avg[0,:,worst_users[0]], label='BER for worst user (user {}) after Weighted Mean precoding'.format(worst_users[0]))
+    plt.semilogy(cfg.SNR_range, uncoded_bers_arr_avg[1,:,worst_users[1]], label='BER for worst user (user {}) after grad ascent precoding'.format(worst_users[1]))
+    # plt.semilogy(cfg.SNR_range, uncoded_bers_arr_avg[2,:,worst_users[2]], label='BER for worst user (user {}) after Numerical Optimizer precoding'.format(worst_users[2]))
+    plt.legend()
+    plt.grid()
+    plt.xlabel('SNR (dB)')
+    plt.ylabel('BER')
+    plt.title('Wideband Precoding')
+    plt.savefig('Wideband Precoding')
 
     return uncoded_bers

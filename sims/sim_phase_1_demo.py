@@ -12,7 +12,6 @@ from scipy.io import loadmat
 gpu_num = 0  # Use "" to use the CPU, Use 0 to select first GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = f"{gpu_num}"
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-os.environ['DRJIT_LIBLLVM_PATH'] = '/usr/lib/llvm/16/lib64/libLLVM.so'
 
 import tensorflow as tf
 
@@ -94,7 +93,7 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 75                                            # total number of slots in ns-3 channels
+    cfg.total_slots = 99                                            # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15                                         # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = cfg.num_slots_p1 + cfg.num_slots_p2             # feedback delay in number of subframe
     cfg.perfect_csi = False
@@ -106,7 +105,7 @@ if __name__ == "__main__":
     cfg.dc_null = False
     if arguments == []:
         mobility = 'high_mobility'
-        drop_idx = '8'
+        drop_idx = '4'
         rx_ues_arr = [2]
         precoding_method = 'weighted_mean'                               # 'weighted_mean', 'wmmse'
     cfg.num_rx_ue_sel = rx_ues_arr[0]
@@ -123,7 +122,8 @@ if __name__ == "__main__":
         sto_arr = [0]
         cfo_arr = [0]
     cfg.ul_freq = 3.5e9
-    cfg.dl_freq = 3.5e9    
+    cfg.dl_freq = 3.5e9
+    cfg.SNR_range = np.arange(0,30,2)
 
     # NS3 Configs
     # cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'

@@ -35,7 +35,10 @@ class quantized_CSI_feedback(Layer):
         self.method = method
         if "phase2" not in architecture:
             if self.method == '5G':
-                self.N_1 = 2 # Number of quantization points in the horizontal dimension
+                if N_1 is None:
+                    self.N_1 = 4 # Number of quantization points in the horizontal dimension
+                else:
+                    self.N_1 = N_1 # Number of quantization points in the horizontal dimension
                 self.N_2 = 1 # Number of quantization points in the vertical dimension
                 self.O_1 = 4 # Horizontal oversampling factor
                 self.O_2 = 1 # Vertical oversampling factor
@@ -696,10 +699,8 @@ class quantized_CSI_feedback(Layer):
 
                 if self.wideband:
                     precoding_matrices = np.zeros((1, codebook.shape[1], codebook.shape[2]), dtype=complex)
-                    for n in range(h_est.shape[-1]):
-                        PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
-                    unique, counts = np.unique(PMI, return_counts=True)
-                    PMI = unique[np.argmax(counts)]
+                    summed_precoder_rate = np.sum(per_precoder_rate, axis=0)
+                    PMI = np.argmax(summed_precoder_rate)
                     rate_for_selected_precoder = np.mean(per_precoder_rate[:, PMI])
                     precoding_matrices[0, ...] = codebook[PMI]
                 else:
@@ -792,10 +793,8 @@ class quantized_CSI_feedback(Layer):
 
                 if self.wideband:
                     precoding_matrices = np.zeros((1, codebook.shape[1], codebook.shape[2]), dtype=complex)
-                    for n in range(h_est.shape[-1]):
-                        PMI[n] = np.where(per_precoder_rate[n, :] == np.max(per_precoder_rate[n, :]))[0][0]
-                    unique, counts = np.unique(PMI, return_counts=True)
-                    PMI = unique[np.argmax(counts)]
+                    summed_precoder_rate = np.sum(per_precoder_rate, axis=0)
+                    PMI = np.argmax(summed_precoder_rate)
                     rate_for_selected_precoder = np.mean(per_precoder_rate[:, PMI])
                     precoding_matrices[0, ...] = codebook[PMI]
                 else:
@@ -1346,6 +1345,8 @@ class quantized_CSI_feedback(Layer):
 
         if N_t == 2:
 
+            raise ValueError("This branch needs to be updated")
+
             if self.num_tx_streams == 1:
                 # Table 5.2.2.2.1-1, v=1, codebook indices 0..3
                 # W = (1/sqrt(2)) * [1; exp(j*pi*n/2)], n=0..3
@@ -1395,22 +1396,30 @@ class quantized_CSI_feedback(Layer):
                 m_all = i_12
                 n_all = i_2
 
-                W = np.zeros((len(l_all), len(m_all), len(n_all), N_t, self.num_tx_streams), dtype=complex)
-
+                W = np.zeros((len(l_all), len(m_all), N_t, self.num_tx_streams), dtype=complex)
                 for l in l_all:
                     for m in m_all:
 
                         v_lm = self.compute_v_lm(l, m)
+                        W[l,m,...] = v_lm
+
+                # W = np.zeros((len(l_all), len(m_all), len(n_all), N_t, self.num_tx_streams), dtype=complex)
+                # for l in l_all:
+                #     for m in m_all:
+
+                #         v_lm = self.compute_v_lm(l, m)
                         
-                        for n in n_all:
+                #         for n in n_all:
 
-                            phi_n = np.exp(1j * np.pi * n / 2)
+                #             phi_n = np.exp(1j * np.pi * n / 2)
 
-                            W[l,m,n,...] = np.vstack((v_lm, phi_n * v_lm))
+                #             W[l,m,n,...] = np.vstack((v_lm, phi_n * v_lm))
 
                 W = 1/np.sqrt(P_CSI_RS) * W
 
             elif self.num_tx_streams == 2:
+
+                raise ValueError("This branch needs to be updated")
 
                 i_11 = np.arange(0, self.N_1 * self.O_1)
                 i_12 = np.arange(0, self.N_2 * self.O_2)
@@ -1448,6 +1457,8 @@ class quantized_CSI_feedback(Layer):
             
             elif self.num_tx_streams == 3:
 
+                raise ValueError("This branch needs to be updated")
+
                 i_11 = np.arange(0, self.N_1 * self.O_1)
                 i_12 = np.arange(0, self.N_2 * self.O_2)
                 k_1 = self.O_1
@@ -1481,6 +1492,8 @@ class quantized_CSI_feedback(Layer):
                 W = 1/np.sqrt(3 * P_CSI_RS) * W
             
             elif self.num_tx_streams == 4:
+
+                raise ValueError("This branch needs to be updated")
 
                 i_11 = np.arange(0, self.N_1 * self.O_1)
                 i_12 = np.arange(0, self.N_2 * self.O_2)

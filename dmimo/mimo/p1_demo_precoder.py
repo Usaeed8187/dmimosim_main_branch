@@ -38,7 +38,7 @@ class P1DemoPrecoder(Layer):
 
         return h_eff
 
-    def call(self, inputs):
+    def call(self, inputs, num_iterations=10):
 
         ue_rank_adapt = False
         if len(inputs) == 4:
@@ -70,13 +70,13 @@ class P1DemoPrecoder(Layer):
             x_precoded, g, starting_SINR, best_SINR = weighted_mean_precoder(x_precoded,
                                                         h_pc_desired,
                                                         rx_snr_db,
-                                                        num_iterations=10,
+                                                        num_iterations=num_iterations,
                                                         return_precoding_matrix=True)
         elif precoding_method == 'wmmse':
             x_precoded, g, Hg = wmmse_precoder(x_precoded,
                                                         h_pc_desired,
                                                         rx_snr_db,
-                                                        num_iterations=10,
+                                                        num_iterations=num_iterations,
                                                         return_precoding_matrix=True)
             starting_SINR = None
             best_SINR = None
@@ -84,7 +84,7 @@ class P1DemoPrecoder(Layer):
             x_precoded, g = grad_ascent_precoder(x_precoded,
                                                     h_pc_desired,
                                                     rx_snr_db,
-                                                    num_iterations=10,
+                                                    num_iterations=num_iterations,
                                                     return_precoding_matrix=True)
             starting_SINR = None
             best_SINR = None
@@ -92,7 +92,7 @@ class P1DemoPrecoder(Layer):
             x_precoded, g = grad_ascent_precoder(x_precoded,
                                                     h_pc_desired,
                                                     rx_snr_db,
-                                                    num_iterations=10,
+                                                    num_iterations=num_iterations,
                                                     return_precoding_matrix=True)
             starting_SINR = None
             best_SINR = None
