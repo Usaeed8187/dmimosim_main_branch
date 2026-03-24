@@ -49,7 +49,12 @@ class kalman_filter_pred:
         return a_blocks, q_proc
 
     def _build_augmented_system(self, a_blocks, q_proc):
-        """Build AR(p) companion-form state-space matrices."""
+        """Build AR(p) companion-form state-space matrices.
+
+        Expects column-state transition blocks: x_t(col) = sum_k A_k(col) x_{t-k}(col).
+        If coefficients were learned in row-regression form
+        x_t(row) ≈ sum_k x_{t-k}(row) A_k(row)^H, convert before calling.
+        """
         p = len(a_blocks)
         d = a_blocks[0].shape[0]
         pd = p * d
@@ -158,7 +163,6 @@ class kalman_filter_pred:
 
                     p = min(self.ar_order, t_len - 1)
                     a_blocks, q_proc = self._estimate_ar_p_q_joint(y_hist_tiles, p)
-                    f_aug, q_aug = self._build_augmented_system(a_blocks, q_proc)
 
                     if h_freq_csi_perfect_debug is not None:
                         joint_wiener_pred_tiles = np.zeros((num_syms * num_sc, RxAnt * TxAnt), dtype=np.complex128)
@@ -171,8 +175,10 @@ class kalman_filter_pred:
                         numer = np.linalg.norm(joint_wiener_pred - curr_perfect_block) ** 2
                         denom = np.linalg.norm(curr_perfect_block) ** 2 + self.eps
                         weiner_nmse = float(np.real(numer / denom))
-                        print("Weiner Filter NMSE: ", weiner_nmse)
-
+                        # print("Weiner Filter NMSE: ", weiner_nmse)
+                    
+                    a_blocks_kalman = [a_block.conj() for a_block in a_blocks]
+                    f_aug, q_aug = self._build_augmented_system(a_blocks_kalman, q_proc)
                     y_next_tiles = np.zeros((num_syms * num_sc, RxAnt * TxAnt), dtype=np.complex128)
                     
                     for tile_idx in range(num_syms * num_sc):
@@ -190,6 +196,6 @@ class kalman_filter_pred:
                         numer = np.linalg.norm(y_next_block - curr_perfect_block) ** 2
                         denom = np.linalg.norm(curr_perfect_block) ** 2 + self.eps
                         kalman_nmse = float(np.real(numer / denom))
-                        print("Kalman Filter NMSE: ", kalman_nmse, "\n")
+                        # print("Kalman Filter NMSE: ", kalman_nmse, "\n")
 
         return pred.astype(h_hist.dtype, copy=False)
