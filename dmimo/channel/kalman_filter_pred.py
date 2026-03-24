@@ -61,7 +61,7 @@ class kalman_filter_pred:
     def predict(self, h_freq_csi_history, err_var_history):
         """Predict one-step-ahead channel using vector AR(1) Kalman filtering.
 
-        h_freq_csi_history: [T, B, RXN, RXA, TXN, TXA, SYM, SC]
+        h_freq_csi_history: [T, B, 1, all_rx_ants, 1, all_tx_ants, SYM, SC]
         err_var_history: same shape, real-valued channel estimation error variance.
         """
         h_hist = np.asarray(h_freq_csi_history)

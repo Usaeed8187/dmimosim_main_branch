@@ -439,6 +439,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                 
         end_time = time.time()
         # print("Total time for channel history gathering: ", end_time - start_time)
+
+        h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+                                                batch_size=cfg.num_slots_p2)
         
         if "two_mode" in cfg.channel_prediction_method:
 
@@ -481,9 +484,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                            sto_vals=cfg.random_sto_vals,
                                                            freq_cov_mat=freq_cov_mat,
                                                            lmmse_interpolator=lmmse_interpolator)
-    
-    h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
-                                                batch_size=cfg.num_slots_p2)
     
     chan_pred_nmse = tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...] - h_freq_csi)**2) / tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...])**2)
     print("{} Prediction NMSE: {}".format(cfg.channel_prediction_method, chan_pred_nmse))
