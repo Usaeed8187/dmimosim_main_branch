@@ -21,7 +21,7 @@ from dmimo.config import Ns3Config, SimConfig, RCConfig
 from dmimo.channel import dMIMOChannels, lmmse_channel_estimation, estimate_freq_cov, LMMSELinearInterp
 from dmimo.channel import standard_rc_pred_freq_mimo, default_ddpg_predictor
 from dmimo.channel.ddpg_predictor import DDPGChannelPredictor
-from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred
+from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred, kalman_filter_pred
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
 from dmimo.channel.rl_beam_selector_v2 import RLBeamSelector
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
@@ -405,18 +405,37 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         # TODO: optimize channel estimation and optimization procedures (currently very slow)        
 
         start_time = time.time()
+        err_var_csi_history = None
         if cfg.use_perfect_csi_history_for_prediction:
             h_freq_csi_history = rc_predictor.get_ideal_csi_history(cfg.first_slot_idx, cfg.csi_delay,
                                                           dmimo_chans)
         else:
         
-            h_freq_csi_history = rc_predictor.get_csi_history(cfg.first_slot_idx, cfg.csi_delay,
-                                                            rg_csi, dmimo_chans, 
-                                                            cfo_vals=cfg.random_cfo_vals,
-                                                            sto_vals=cfg.random_sto_vals,
-                                                            estimated_channels_dir=cfg.estimated_channels_dir,
-                                                            freq_cov_mat=freq_cov_mat,
-                                                            lmmse_interpolator=lmmse_interpolator)
+            if "kalman" in cfg.channel_prediction_method:
+                h_freq_csi_history, err_var_csi_history = rc_predictor.get_csi_history_with_err_var(
+                    cfg.first_slot_idx,
+                    cfg.csi_delay,
+                    rg_csi,
+                    dmimo_chans,
+                    cfo_vals=cfg.random_cfo_vals,
+                    sto_vals=cfg.random_sto_vals,
+                    estimated_channels_dir=cfg.estimated_channels_dir,
+                    freq_cov_mat=freq_cov_mat,
+                    lmmse_interpolator=lmmse_interpolator,
+                )
+            else:
+                h_freq_csi_history = rc_predictor.get_csi_history(
+                    cfg.first_slot_idx,
+                    cfg.csi_delay,
+                    rg_csi,
+                    dmimo_chans,
+                    cfo_vals=cfg.random_cfo_vals,
+                    sto_vals=cfg.random_sto_vals,
+                    estimated_channels_dir=cfg.estimated_channels_dir,
+                    freq_cov_mat=freq_cov_mat,
+                    lmmse_interpolator=lmmse_interpolator,
+                )
+
                 
         end_time = time.time()
         # print("Total time for channel history gathering: ", end_time - start_time)
@@ -447,12 +466,11 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             # Weiner Filter based prediction (MIMO) (per_tx_rx_node_pair)
             weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
             h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.history_len-1))
-        elif cfg.channel_prediction_method == "ddpg":
-            ddpg_actions = getattr(cfg, "ddpg_pred_channel", None)
-            if ddpg_actions is None:
-                h_freq_csi = h_freq_csi_history[-1, ...]
-            else:
-                h_freq_csi = ddpg_actions
+        elif "kalman" in cfg.channel_prediction_method:
+            if err_var_csi_history is None:
+                raise ValueError("Kalman predictor requires measurement error variance history.")
+            kalman_predictor = kalman_filter_pred()
+            h_freq_csi = kalman_predictor.predict(h_freq_csi_history, err_var_csi_history)
         else:
             raise ValueError("Channel prediction method not implemented here.")
     else:
@@ -468,6 +486,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                 batch_size=cfg.num_slots_p2)
     
     chan_pred_nmse = tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...] - h_freq_csi)**2) / tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...])**2)
+    print("{} Prediction NMSE: {}".format(cfg.channel_prediction_method, chan_pred_nmse))
     
     # Pick the selected UE's channels
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)

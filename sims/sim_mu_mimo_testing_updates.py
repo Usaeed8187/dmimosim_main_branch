@@ -94,12 +94,11 @@ code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "two_mode" # "None", "two_mode", "weiner_filter", "deqn_plus_two_mode"
+channel_prediction_setting = "kalman_filter" # "None", "two_mode", "weiner_filter", "kalman_filter"
 csi_prediction = True
-channel_prediction_method = "two_mode" # None, "two_mode", "weiner_filter", "deqn_plus_two_mode"
+channel_prediction_method = "kalman_filter" # None, "two_mode", "weiner_filter", "kalman_filter"
 csi_quantization_on = True
 rl_train_end_drop = 45
-# rl_checkpoint = "results/rl_models/{}/drop_{}_rx_UE_{}_tx_UE_{}_imitation_none_steps_0".format(mobility, rl_train_end_drop, rx_ues_arr[0], num_txue_sel)
 rl_checkpoint = None
 rl_evaluation_only = True
 
@@ -206,7 +205,7 @@ def run_simulation():
     cfg.link_adapt = link_adapt      # enable/disable link adaptation,. .
     cfg.csi_prediction = csi_prediction
     cfg.use_perfect_csi_history_for_prediction = False
-    cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter"
+    cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter", "kalman_filter"
     cfg.enable_ue_selection = False
     cfg.scheduling = False
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'

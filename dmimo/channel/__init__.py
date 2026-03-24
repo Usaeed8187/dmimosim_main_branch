@@ -14,6 +14,7 @@ from .ddpg_predictor import default_ddpg_predictor, DDPGChannelPredictor
 from .twomode_wesn_pred import twomode_wesn_pred
 from .twomode_wesn_pred_tf import twomode_wesn_pred_tf
 from .weiner_filter_pred import weiner_filter_pred
+from .kalman_filter_pred import kalman_filter_pred
 
 from.dl_to_ul_channel_adapt import dl_to_ul_channel_adapt
 
