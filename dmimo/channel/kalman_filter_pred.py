@@ -3,90 +3,105 @@ import numpy as np
 
 class kalman_filter_pred:
 
-    def __init__(self, lam=1e-3, eps=1e-8):
+    def __init__(self, lam=1e-3, eps=1e-8, ar_order=7):
         self.lam = lam
         self.eps = eps
+        self.ar_order = ar_order
         self.num_bs_ant = 4
         self.num_ue_ant = 2
 
-    def _estimate_f_q(self, y_hist):
-        """Estimate AR(1) transition matrix F and process covariance Q.
+    def _estimate_ar_p_q_joint(self, y_hist_tiles, p):
+        """Estimate shared AR(p) coefficients and process covariance across tiles.
 
-        y_hist: [T, D] complex, row-wise temporal samples.
-        """
-        t_len, d = y_hist.shape
-        if t_len < 2:
-            return np.eye(d, dtype=np.complex128), self.eps * np.eye(d, dtype=np.complex128)
+        y_hist_tiles: [T, Ntiles, D] complex.
+        Returns:
+            a_blocks: list of p matrices [D,D], where
+                x_t ≈ sum_{k=1..p} A_k x_{t-k}
+            q_proc: process covariance for x_t, shape [D,D]
 
-        x_prev = y_hist[:-1, :]
-        x_next = y_hist[1:, :]
-
-        r0 = (x_prev.conj().T @ x_prev) / max(t_len - 1, 1)
-        r1 = (x_next.conj().T @ x_prev) / max(t_len - 1, 1)
-
-        f_hat = r1 @ np.linalg.pinv(r0 + self.lam * np.eye(d, dtype=np.complex128))
-
-        residual = x_next - x_prev @ f_hat.T
-        q_hat = (residual.conj().T @ residual) / max(residual.shape[0], 1)
-        q_hat = 0.5 * (q_hat + q_hat.conj().T)
-        q_hat += self.eps * np.eye(d, dtype=np.complex128)
-
-        return f_hat, q_hat
-
-    def _estimate_f_q_joint(self, y_hist_tiles):
-        """Estimate shared AR(1) transition F and Q across all (sym, sc) tiles.
-
-        y_hist_tiles: [T, Ntiles, D] complex, where each tile is one (sym, sc).
         """
         t_len, _, d = y_hist_tiles.shape
-        if t_len < 2:
+        if p < 1:
+            raise ValueError("AR order p must be >= 1")
+        if t_len <= p:
             ident = np.eye(d, dtype=np.complex128)
-            return ident, self.eps * ident
+            return [ident] + [np.zeros((d, d), dtype=np.complex128) for _ in range(p - 1)], self.eps * ident
 
-        x_prev = y_hist_tiles[:-1].reshape(-1, d)
-        x_next = y_hist_tiles[1:].reshape(-1, d)
+        x_target = y_hist_tiles[p:].reshape(-1, d)  # [N, D]
+        x_lags = []
+        for k in range(1, p + 1):
+            x_lags.append(y_hist_tiles[p - k:t_len - k].reshape(-1, d))
+        phi = np.concatenate(x_lags, axis=1)  # [N, pD]
 
-        denom = max(x_prev.shape[0], 1)
-        r0 = (x_prev.conj().T @ x_prev) / denom
-        r1 = (x_next.conj().T @ x_prev) / denom
-        f_hat = r1 @ np.linalg.pinv(r0 + self.lam * np.eye(d, dtype=np.complex128))
+        n_samples = max(phi.shape[0], 1)
+        r0 = (phi.conj().T @ phi) / n_samples
+        r1 = (x_target.conj().T @ phi) / n_samples
+        theta = r1 @ np.linalg.pinv(
+            r0 + self.lam * np.eye(p * d, dtype=np.complex128)
+        )  # [D, pD]
 
-        residual = x_next - x_prev @ f_hat.T
-        q_hat = (residual.conj().T @ residual) / max(residual.shape[0], 1)
-        q_hat = 0.5 * (q_hat + q_hat.conj().T)
-        q_hat += self.eps * np.eye(d, dtype=np.complex128)
-        return f_hat, q_hat
+        residual = x_target - phi @ theta.conj().T
+        q_proc = (residual.conj().T @ residual) / max(residual.shape[0], 1)
+        q_proc = 0.5 * (q_proc + q_proc.conj().T)
+        q_proc += self.eps * np.eye(d, dtype=np.complex128)
 
-    def _kalman_predict_one_step(self, y_hist, r_diag, f_hat=None, q_hat=None):
+        a_blocks = [theta[:, k * d:(k + 1) * d] for k in range(p)]
+        return a_blocks, q_proc
 
-        """Run Kalman filter over y_hist and return one-step-ahead prediction."""
+    def _build_augmented_system(self, a_blocks, q_proc):
+        """Build AR(p) companion-form state-space matrices."""
+        p = len(a_blocks)
+        d = a_blocks[0].shape[0]
+        pd = p * d
+
+        f_aug = np.zeros((pd, pd), dtype=np.complex128)
+        f_aug[:d, :] = np.concatenate(a_blocks, axis=1)
+        for row in range(1, p):
+            f_aug[row * d:(row + 1) * d, (row - 1) * d:row * d] = np.eye(d, dtype=np.complex128)
+
+        q_aug = np.zeros((pd, pd), dtype=np.complex128)
+        q_aug[:d, :d] = q_proc
+        q_aug += self.eps * np.eye(pd, dtype=np.complex128)
+        return f_aug, q_aug
+
+    def _kalman_predict_one_step_ar_p(self, y_hist, r_diag, f_aug, q_aug):
+        """Run Kalman filter for AR(p) augmented state and predict next x."""
+
         t_len, d = y_hist.shape
-        if f_hat is None or q_hat is None:
-            f_hat, q_hat = self._estimate_f_q(y_hist)
+        p = f_aug.shape[0] // d
+        if t_len <= p:
+            return y_hist[-1].astype(np.complex128)
 
         r_diag = np.maximum(np.asarray(r_diag, dtype=np.float64), self.eps)
         r_mat = np.diag(r_diag.astype(np.complex128))
 
-        x_hat = y_hist[0].astype(np.complex128)
-        p_hat = np.diag(r_diag + self.eps).astype(np.complex128)
-        eye = np.eye(d, dtype=np.complex128)
+        p0_diag = np.tile(r_diag, p)
 
-        for t_idx in range(1, t_len):
-            x_pred = f_hat @ x_hat
-            p_pred = f_hat @ p_hat @ f_hat.conj().T + q_hat
+        h_mat = np.zeros((d, p * d), dtype=np.complex128)
+        h_mat[:, :d] = np.eye(d, dtype=np.complex128)
+
+        state_stack = [y_hist[p - 1 - k].astype(np.complex128) for k in range(p)]
+        z_hat = np.concatenate(state_stack, axis=0)
+        p_hat = np.diag(p0_diag + self.eps).astype(np.complex128)
+        eye_pd = np.eye(p * d, dtype=np.complex128)
+
+        for t_idx in range(p, t_len):
+            z_pred = f_aug @ z_hat
+            p_pred = f_aug @ p_hat @ f_aug.conj().T + q_aug
 
             y_obs = y_hist[t_idx].astype(np.complex128)
-            innovation = y_obs - x_pred
-            s_mat = p_pred + r_mat
-            k_gain = p_pred @ np.linalg.pinv(s_mat)
+            innovation = y_obs - h_mat @ z_pred
+            s_mat = h_mat @ p_pred @ h_mat.conj().T + r_mat
+            k_gain = p_pred @ h_mat.conj().T @ np.linalg.pinv(s_mat)
 
-            x_hat = x_pred + k_gain @ innovation
-            p_hat = (eye - k_gain) @ p_pred
+            z_hat = z_pred + k_gain @ innovation
+            p_hat = (eye_pd - k_gain @ h_mat) @ p_pred
 
-        return f_hat @ x_hat
+        z_next = f_aug @ z_hat
+        return z_next[:d]
 
     def predict(self, h_freq_csi_history, err_var_history, h_freq_csi_perfect_debug=None):
-        """Predict one-step-ahead channel using vector AR(1) Kalman filtering.
+        """Predict one-step-ahead channel using vector AR(p) Kalman filtering.
 
         h_freq_csi_history: [T, B, 1, all_rx_ants, 1, all_tx_ants, SYM, SC]
         err_var_history: same shape, real-valued channel estimation error variance.
@@ -141,11 +156,15 @@ class kalman_filter_pred:
                     curr_evar = curr_e_hist[:, batch_idx, 0, :, 0, :, :, :]
                     e_tiles = np.real(curr_evar).transpose(0, 3, 4, 1, 2).reshape(t_len, num_syms * num_sc, -1)
 
-                    f_hat, q_hat = self._estimate_f_q_joint(y_hist_tiles)
+                    p = min(self.ar_order, t_len - 1)
+                    a_blocks, q_proc = self._estimate_ar_p_q_joint(y_hist_tiles, p)
+                    f_aug, q_aug = self._build_augmented_system(a_blocks, q_proc)
 
                     if h_freq_csi_perfect_debug is not None:
-                        last_hist_tiles = y_hist_tiles[-1]
-                        joint_wiener_pred_tiles = last_hist_tiles @ f_hat.T
+                        joint_wiener_pred_tiles = np.zeros((num_syms * num_sc, RxAnt * TxAnt), dtype=np.complex128)
+                        for lag_idx in range(1, p + 1):
+                            joint_wiener_pred_tiles += y_hist_tiles[-lag_idx] @ a_blocks[lag_idx - 1].conj().T
+
                         joint_wiener_pred = joint_wiener_pred_tiles.reshape(num_syms, num_sc, RxAnt, TxAnt).transpose(2, 3, 0, 1)
                         curr_perfect_block = h_freq_csi_perfect_debug[ :, :, rx_ant_idx,  ...]
                         curr_perfect_block = np.squeeze(curr_perfect_block[:, :, :, :, tx_ant_idx, ...])
@@ -159,17 +178,18 @@ class kalman_filter_pred:
                     for tile_idx in range(num_syms * num_sc):
                         y_hist = y_hist_tiles[:, tile_idx, :]
                         r_diag = e_tiles[:, tile_idx, :].mean(axis=0)
-                        y_next_tiles[tile_idx] = self._kalman_predict_one_step(
-                            y_hist, r_diag, f_hat=f_hat, q_hat=q_hat
+                        y_next_tiles[tile_idx] = self._kalman_predict_one_step_ar_p(
+                            y_hist, r_diag, f_aug=f_aug, q_aug=q_aug
                         )
                     
                     rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
                     y_next_block = y_next_tiles.reshape(num_syms, num_sc, RxAnt, TxAnt).transpose(2, 3, 0, 1)
                     pred[batch_idx, 0, rx_idx, 0, tx_idx, :, :] = y_next_block
 
-                    numer = np.linalg.norm(y_next_block - curr_perfect_block) ** 2
-                    denom = np.linalg.norm(curr_perfect_block) ** 2 + self.eps
-                    kalman_nmse = float(np.real(numer / denom))
-                    print("Kalman Filter NMSE: ", kalman_nmse, "\n")
+                    if h_freq_csi_perfect_debug is not None:
+                        numer = np.linalg.norm(y_next_block - curr_perfect_block) ** 2
+                        denom = np.linalg.norm(curr_perfect_block) ** 2 + self.eps
+                        kalman_nmse = float(np.real(numer / denom))
+                        print("Kalman Filter NMSE: ", kalman_nmse, "\n")
 
         return pred.astype(h_hist.dtype, copy=False)
