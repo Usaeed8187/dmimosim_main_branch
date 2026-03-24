@@ -58,7 +58,7 @@ class kalman_filter_pred:
 
         return f_hat @ x_hat
 
-    def predict(self, h_freq_csi_history, err_var_history):
+    def predict(self, h_freq_csi_history, err_var_history, h_freq_csi_perfect_debug=None):
         """Predict one-step-ahead channel using vector AR(1) Kalman filtering.
 
         h_freq_csi_history: [T, B, 1, all_rx_ants, 1, all_tx_ants, SYM, SC]

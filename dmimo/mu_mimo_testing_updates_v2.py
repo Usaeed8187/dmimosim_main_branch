@@ -473,7 +473,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             if err_var_csi_history is None:
                 raise ValueError("Kalman predictor requires measurement error variance history.")
             kalman_predictor = kalman_filter_pred()
-            h_freq_csi = kalman_predictor.predict(h_freq_csi_history, err_var_csi_history)
+            h_freq_csi = kalman_predictor.predict(h_freq_csi_history, err_var_csi_history, h_freq_csi_perfect_debug=h_freq_csi_perfect[0:1,...])
         else:
             raise ValueError("Channel prediction method not implemented here.")
     else:
