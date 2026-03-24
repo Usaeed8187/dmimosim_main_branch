@@ -94,9 +94,9 @@ code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "weiner_filter" # "None", "two_mode", "weiner_filter", "kalman_filter"
+channel_prediction_setting = "kalman_filter" # "None", "two_mode", "weiner_filter", "kalman_filter"
 csi_prediction = True
-channel_prediction_method = "weiner_filter" # None, "two_mode", "weiner_filter", "kalman_filter"
+channel_prediction_method = "kalman_filter" # None, "two_mode", "weiner_filter", "kalman_filter"
 csi_quantization_on = True
 rl_train_end_drop = 45
 rl_checkpoint = None
