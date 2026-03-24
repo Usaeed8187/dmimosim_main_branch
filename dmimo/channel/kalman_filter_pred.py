@@ -151,8 +151,8 @@ class kalman_filter_pred:
                         curr_perfect_block = np.squeeze(curr_perfect_block[:, :, :, :, tx_ant_idx, ...])
                         numer = np.linalg.norm(joint_wiener_pred - curr_perfect_block) ** 2
                         denom = np.linalg.norm(curr_perfect_block) ** 2 + self.eps
-                        last_joint_f_nmse = float(np.real(numer / denom))
-                        print("Weiner Filter NMSE: ", last_joint_f_nmse)
+                        weiner_nmse = float(np.real(numer / denom))
+                        print("Weiner Filter NMSE: ", weiner_nmse)
 
                     y_next_tiles = np.zeros((num_syms * num_sc, RxAnt * TxAnt), dtype=np.complex128)
                     
@@ -166,5 +166,10 @@ class kalman_filter_pred:
                     rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
                     y_next_block = y_next_tiles.reshape(num_syms, num_sc, RxAnt, TxAnt).transpose(2, 3, 0, 1)
                     pred[batch_idx, 0, rx_idx, 0, tx_idx, :, :] = y_next_block
+
+                    numer = np.linalg.norm(y_next_block - curr_perfect_block) ** 2
+                    denom = np.linalg.norm(curr_perfect_block) ** 2 + self.eps
+                    kalman_nmse = float(np.real(numer / denom))
+                    print("Kalman Filter NMSE: ", kalman_nmse, "\n")
 
         return pred.astype(h_hist.dtype, copy=False)
