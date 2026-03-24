@@ -105,14 +105,14 @@ if __name__ == "__main__":
     cfg.dc_null = False
     if arguments == []:
         mobility = 'high_mobility'
-        drop_idx = '3'
+        drop_idx = '5'
         rx_ues_arr = [2]
         precoding_method = 'weighted_mean'                               # 'weighted_mean', 'wmmse'
     cfg.num_rx_ue_sel = rx_ues_arr[0]
     cfg.num_scheduled_tx_ue = rx_ues_arr[0]
     streams_per_tx = 1
     cfg.num_tx_streams = streams_per_tx
-    cfg.modulation_order = 4
+    cfg.modulation_order = 8
     cfg.precoding_method = precoding_method
     cfg.gen_sync_errors = False
     if cfg.gen_sync_errors:
@@ -124,6 +124,7 @@ if __name__ == "__main__":
     cfg.ul_freq = 3.5e9
     cfg.dl_freq = 3.5e9
     cfg.SNR_range = np.arange(0,30,2)
+    cfg.drop_idx = drop_idx
 
     # NS3 Configs
     # cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'

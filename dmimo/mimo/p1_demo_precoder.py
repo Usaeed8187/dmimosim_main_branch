@@ -34,7 +34,10 @@ class P1DemoPrecoder(Layer):
 
         # Compute post precoding channel:
         # [num_rx, num_rx_ant, num_streams_per_tx]
-        h_eff = tf.matmul(h, g)
+        if len(g.shape) == 1:
+            h_eff = tf.matmul(h, g[:, tf.newaxis])
+        else:
+            h_eff = tf.matmul(h, g)
 
         return h_eff
 

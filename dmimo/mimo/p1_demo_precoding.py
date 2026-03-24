@@ -297,7 +297,8 @@ def multicast_precoder_np_hard_sdr(
 
     # 2) SDR: maximize t s.t. Tr(Rk W) >= t, Tr(W) <= P, W >> 0
     W = cp.Variable((Nt, Nt), complex=True, hermitian=True)
-    t = cp.Variable(real=True)
+    t = cp.Variable(nonneg=True)
+    # t = cp.Variable(real=True)
 
     constraints = [W >> 0, cp.trace(W) <= ptx]
     for k in range(K):
@@ -355,6 +356,7 @@ def multicast_precoder_np_hard_sdr(
     #    x is [1,1,Nos,Nsc,1], we multiply last dim by [1,Nt]
     p_row = p_best.reshape(1, Nt)
     x_precoded = np.matmul(x, p_row)  # [1,1,Nos,Nsc,Nt]
+    x_precoded = tf.cast(x_precoded, tf.complex64)
 
     return x_precoded, p_best#, W_sdr, t_sdr
 

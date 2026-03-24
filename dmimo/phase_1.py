@@ -174,8 +174,9 @@ class Phase1(Model):
                     continue
                 
                 y = self.apply_channel([x_precoded, h_freq])
-                rx_snr_linear =  10**(rx_snr_db / 10)
-                no = np.mean(np.abs(y)**2) / rx_snr_linear
+                # rx_snr_linear =  10**(rx_snr_db / 10)
+                # no = np.mean(np.abs(y)**2) / rx_snr_linear
+                no = np.power(10.0, -rx_snr_db / 10.0).astype(np.float32)
                 y = self.awgn([y, no])
 
                 # LS channel estimation with linear interpolation
@@ -537,6 +538,6 @@ def sim_phase_1_all(cfg: SimConfig, ns3cfg: Ns3Config):
     plt.xlabel('SNR (dB)')
     plt.ylabel('BER')
     plt.title('Wideband Precoding')
-    plt.savefig('Wideband Precoding')
+    plt.savefig('Wideband Precoding Drop {}'.format(cfg.drop_idx))
 
     return uncoded_bers
