@@ -118,7 +118,13 @@ class kalman_filter_pred:
             h_freq_csi_perfect_debug = np.asarray(h_freq_csi_perfect_debug)
 
         if h_hist.shape != e_hist.shape:
-            raise ValueError("h_freq_csi_history and err_var_history must have the same shape")
+            sc_diff = h_hist.shape[-1] - e_hist.shape[-1]
+            left_pad  = np.repeat(e_hist[..., :1], sc_diff // 2, axis=-1)
+            right_pad = np.repeat(e_hist[..., -1:], sc_diff - sc_diff // 2, axis=-1)
+            e_hist = np.concatenate([left_pad, e_hist, right_pad], axis=-1)
+
+            if h_hist.shape != e_hist.shape:
+                raise ValueError("h_freq_csi_history and err_var_history must have the same shape")
         if h_hist.ndim != 8:
             raise ValueError("Expected history tensor rank 8")
 
@@ -175,7 +181,7 @@ class kalman_filter_pred:
                         numer = np.linalg.norm(joint_wiener_pred - curr_perfect_block) ** 2
                         denom = np.linalg.norm(curr_perfect_block) ** 2 + self.eps
                         weiner_nmse = float(np.real(numer / denom))
-                        # print("Weiner Filter NMSE: ", weiner_nmse)
+                        print("Weiner Filter NMSE: ", weiner_nmse)
                     
                     a_blocks_kalman = [a_block.conj() for a_block in a_blocks]
                     f_aug, q_aug = self._build_augmented_system(a_blocks_kalman, q_proc)
@@ -196,6 +202,6 @@ class kalman_filter_pred:
                         numer = np.linalg.norm(y_next_block - curr_perfect_block) ** 2
                         denom = np.linalg.norm(curr_perfect_block) ** 2 + self.eps
                         kalman_nmse = float(np.real(numer / denom))
-                        # print("Kalman Filter NMSE: ", kalman_nmse, "\n")
+                        print("Kalman Filter NMSE: ", kalman_nmse, "\n")
 
         return pred.astype(h_hist.dtype, copy=False)

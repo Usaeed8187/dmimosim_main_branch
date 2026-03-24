@@ -86,17 +86,17 @@ arguments = sys.argv[1:]
 
 mobility = 'high_mobility'
 drop_idx = '3'
-rx_ues_arr = [2]
-num_txue_sel = 2
+rx_ues_arr = [4]
+num_txue_sel = 4
 
 modulation_order = 4
 code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "kalman_filter" # "None", "two_mode", "weiner_filter", "kalman_filter"
+channel_prediction_setting = "weiner_filter" # "None", "two_mode", "weiner_filter", "kalman_filter"
 csi_prediction = True
-channel_prediction_method = "kalman_filter" # None, "two_mode", "weiner_filter", "kalman_filter"
+channel_prediction_method = "weiner_filter" # None, "two_mode", "weiner_filter", "kalman_filter"
 csi_quantization_on = True
 rl_train_end_drop = 45
 rl_checkpoint = None
