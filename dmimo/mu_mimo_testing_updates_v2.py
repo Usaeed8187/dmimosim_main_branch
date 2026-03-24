@@ -440,7 +440,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         end_time = time.time()
         # print("Total time for channel history gathering: ", end_time - start_time)
 
-        h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx - cfg.csi_delay,
+        h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
                                                 batch_size=cfg.num_slots_p2)
         
         if "two_mode" in cfg.channel_prediction_method:
@@ -477,6 +477,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         else:
             raise ValueError("Channel prediction method not implemented here.")
     else:
+        h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
+                                                batch_size=cfg.num_slots_p2)
+        
         # LMMSE channel estimation. h_freq_csi shape: [_, _, num_rx_ants, _ num_tx_ants, num_syms, num_subcarriers]
         h_freq_csi, err_var_csi = lmmse_channel_estimation(dmimo_chans, rg_csi,
                                                            slot_idx=cfg.first_slot_idx - cfg.csi_delay,
