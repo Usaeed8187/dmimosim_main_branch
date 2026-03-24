@@ -123,7 +123,7 @@ if __name__ == "__main__":
         cfo_arr = [0]
     cfg.ul_freq = 3.5e9
     cfg.dl_freq = 3.5e9
-    cfg.SNR_range = np.arange(0,30,2)
+    cfg.SNR_range = np.arange(20,30,2)
     cfg.drop_idx = drop_idx
 
     # NS3 Configs
