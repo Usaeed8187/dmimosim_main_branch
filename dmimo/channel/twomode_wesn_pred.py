@@ -448,6 +448,15 @@ def _predict_pair_worker(args):
         curr_err_var_history = err_var_history[:, :, :, rx_ant_idx, :, ...]
         curr_err_var_history = curr_err_var_history[:, :, :, :, :, tx_ant_idx, ...]
 
+        if curr_h_freq_csi_history.shape != curr_err_var_history.shape:
+            sc_diff = curr_h_freq_csi_history.shape[-1] - curr_err_var_history.shape[-1]
+            left_pad  = np.repeat(curr_err_var_history[..., :1], sc_diff // 2, axis=-1)
+            right_pad = np.repeat(curr_err_var_history[..., -1:], sc_diff - sc_diff // 2, axis=-1)
+            curr_err_var_history = np.concatenate([left_pad, curr_err_var_history, right_pad], axis=-1)
+
+            if curr_h_freq_csi_history.shape != curr_err_var_history.shape:
+                raise ValueError("curr_h_freq_csi_history and curr_err_var_history must have the same shape")
+
     twomode_predictor = twomode_wesn_pred(
         rc_config=rc_config,
         num_freq_re=RB,
