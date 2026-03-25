@@ -23,7 +23,10 @@ class RCConfig(Config):
         self._history_len = 8 # number of subframes that we use to train
         self._prediction_on = True
         self._treatment = 'SISO' # SISO, vectorized_MIMO, piece_wise_vectorized_MIMO, TODO: piece_wise_MIMO not currently implemented
-
+        self._enable_kalman_weight_config = False
+        self._kalman_weight_ar_order = 4
+        self._kalman_gain_iters = 100
+        self._kalman_eps = 1e-8
 
         super().__init__(**kwargs)
 
@@ -154,3 +157,35 @@ class RCConfig(Config):
     @treatment.setter
     def treatment(self, val):
         self._treatment = val
+    
+    @property
+    def enable_kalman_weight_config(self):
+        return self._enable_kalman_weight_config
+
+    @enable_kalman_weight_config.setter
+    def enable_kalman_weight_config(self, val):
+        self._enable_kalman_weight_config = val
+
+    @property
+    def kalman_weight_ar_order(self):
+        return self._kalman_weight_ar_order
+
+    @kalman_weight_ar_order.setter
+    def kalman_weight_ar_order(self, val):
+        self._kalman_weight_ar_order = val
+
+    @property
+    def kalman_gain_iters(self):
+        return self._kalman_gain_iters
+
+    @kalman_gain_iters.setter
+    def kalman_gain_iters(self, val):
+        self._kalman_gain_iters = val
+
+    @property
+    def kalman_eps(self):
+        return self._kalman_eps
+
+    @kalman_eps.setter
+    def kalman_eps(self, val):
+        self._kalman_eps = val

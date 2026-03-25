@@ -5,6 +5,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from dmimo.config import Ns3Config, RCConfig
 from dmimo.channel import lmmse_channel_estimation
+from dmimo.channel.kalman_filter_pred import kalman_filter_pred
 
 class twomode_wesn_pred:
 
@@ -24,6 +25,10 @@ class twomode_wesn_pred:
         self.reg = rc_config.regularization
         self.enable_window = rc_config.enable_window
         self.history_len = rc_config.history_len
+        self.enable_kalman_weight_config = bool(getattr(rc_config, "enable_kalman_weight_config", False))
+        self.kalman_weight_ar_order = int(getattr(rc_config, "kalman_weight_ar_order", 4))
+        self.kalman_gain_iters = int(getattr(rc_config, "kalman_gain_iters", 100))
+        self.kalman_eps = float(getattr(rc_config, "kalman_eps", 1e-8))
 
         seed = 10
         self.RS = np.random.RandomState(seed)
@@ -60,6 +65,8 @@ class twomode_wesn_pred:
         self.W_out = self.RS.randn(self.N_r * self.N_t, self.feature_dim).astype(self.dtype)        
 
         self.S_0 = np.zeros([self.d_left, self.d_right], dtype=self.dtype)
+        self.W_res_kron = None
+        self.W_in_kron = None
 
     
     def predict(self, h_freq_csi_history):
@@ -113,6 +120,9 @@ class twomode_wesn_pred:
                 Y_out_seq = np.transpose(Y_out_all, (3, 4, 0, 1, 2)).reshape(
                     B_fo * T_train, self.N_r, self.N_t
                 )
+
+                if self.enable_kalman_weight_config:
+                    self.configure_weights_from_kalman(Y_in_seq, curr_window_weights=None)
 
                 S_all, Y_all = self.build_S_Y(Y_in_seq, Y_out_seq, curr_window_weights=None)
 
@@ -301,9 +311,16 @@ class twomode_wesn_pred:
 
         S_4D = []
         for t in range(T):
-            recurrent_term = (self.W_res_left @ S_3D) @ self.W_res_right
-            input_term = (self.W_in_left @ Y_4D[t]) @ self.W_in_right
-            S_3D = self.complex_tanh(recurrent_term + input_term)
+            if self.enable_kalman_weight_config and self.W_res_kron is not None and self.W_in_kron is not None:
+                S_vec = S_3D.reshape(B, -1)
+                U_vec = Y_4D[t].reshape(B, -1)
+                next_vec = (S_vec @ self.W_res_kron.T) + (U_vec @ self.W_in_kron.T)
+                S_3D = self.complex_tanh(next_vec.reshape(B, self.d_left, self.d_right))
+            else:
+                recurrent_term = (self.W_res_left @ S_3D) @ self.W_res_right
+                input_term = (self.W_in_left @ Y_4D[t]) @ self.W_in_right
+                S_3D = self.complex_tanh(recurrent_term + input_term)
+
             S_4D.append(S_3D)
 
         S_4D = np.stack(S_4D, axis=0)
@@ -346,6 +363,47 @@ class twomode_wesn_pred:
 
     def complex_tanh(self, Y):
         return np.tanh(np.real(Y)) + 1j * np.tanh(np.imag(Y))
+    
+    def configure_weights_from_kalman(self, channel_input, curr_window_weights):
+        Y_4D, _ = self._ensure_batch_axis(channel_input)
+        Y_4D = self._prepare_inputs(Y_4D, curr_window_weights)
+        if Y_4D.shape[1] != 1:
+            Y_seq = Y_4D.reshape(Y_4D.shape[0] * Y_4D.shape[1], self.d_left, self.d_right)
+        else:
+            Y_seq = Y_4D[:, 0, :, :]
+
+        x_hist = Y_seq.reshape(Y_seq.shape[0], -1).astype(np.complex128)
+        if x_hist.shape[0] < 2:
+            return
+
+        kf = kalman_filter_pred(lam=self.reg, eps=self.kalman_eps, ar_order=max(1, self.kalman_weight_ar_order))
+        p = min(kf.ar_order, x_hist.shape[0] - 1)
+        y_hist_tiles = x_hist[:, None, :]
+        a_blocks, q_proc = kf._estimate_ar_p_q_joint(y_hist_tiles, p)
+        a1 = a_blocks[0]
+
+        q_proc = 0.5 * (q_proc + q_proc.conj().T)
+        q_proc += self.kalman_eps * np.eye(q_proc.shape[0], dtype=np.complex128)
+        r_diag = np.maximum(np.real(np.diag(q_proc)), self.kalman_eps)
+        r_mat = np.diag(r_diag.astype(np.complex128))
+
+        H = np.eye(a1.shape[0], dtype=np.complex128)
+        K = self._compute_steady_kalman_gain(a1, q_proc, r_mat, H)
+
+        self.W_res_kron = (a1 @ (np.eye(a1.shape[0], dtype=np.complex128) - K @ H)).astype(self.dtype)
+        self.W_in_kron = (a1 @ K).astype(self.dtype)
+
+    def _compute_steady_kalman_gain(self, F, Q, R, H):
+        P = np.eye(F.shape[0], dtype=np.complex128)
+        I = np.eye(F.shape[0], dtype=np.complex128)
+
+        for _ in range(max(1, self.kalman_gain_iters)):
+            P_pred = F @ P @ F.conj().T + Q
+            S = H @ P_pred @ H.conj().T + R
+            K = P_pred @ H.conj().T @ np.linalg.pinv(S)
+            P = (I - K @ H) @ P_pred
+
+        return K
 
 def _predict_pair_worker(args):
     base_history, rc_config, RB, tx_ant_idx, rx_ant_idx = args

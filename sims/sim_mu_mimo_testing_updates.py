@@ -94,9 +94,9 @@ code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "two_mode" # "None", "two_mode", "weiner_filter", "kalman_filter"
+channel_prediction_setting = "two_mode_kalman_config" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
 csi_prediction = True
-channel_prediction_method = "two_mode" # None, "two_mode", "weiner_filter", "kalman_filter"
+channel_prediction_method = "two_mode_kalman_config" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
 csi_quantization_on = True
 rl_train_end_drop = 45
 rl_checkpoint = None
@@ -238,6 +238,10 @@ def run_simulation():
     rc_config.window_length = 4
     rc_config.num_neurons = 16
     rc_config.history_len = 8
+    if channel_prediction_setting == "two_mode_kalman_config":
+        rc_config.enable_kalman_weight_config = True
+    else:
+        rc_config.enable_kalman_weight_config = False
 
     cfg.rl_checkpoint = rl_checkpoint
     cfg.rl_evaluation_only = rl_evaluation_only
