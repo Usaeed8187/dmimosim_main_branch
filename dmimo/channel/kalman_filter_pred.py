@@ -292,8 +292,8 @@ class kalman_filter_pred:
                             best_model_name = min(model_nmse, key=model_nmse.get)
                             self._debug_pass_fail(
                                 "AR convention check",
-                                best_model_name == "conj",
-                                f"nmse={model_nmse}, selected='{best_model_name}'"
+                                best_model_name == selected_model_name,
+                                f"nmse={model_nmse}, selected='{best_model_name}', active='{selected_model_name}'"
                             )
                             # Keep inference behavior identical between debug and non-debug runs.
                             # Diagnostics should never switch the active transition model.
