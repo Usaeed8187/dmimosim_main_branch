@@ -295,9 +295,10 @@ class kalman_filter_pred:
                                 best_model_name == "conj",
                                 f"nmse={model_nmse}, selected='{best_model_name}'"
                             )
-                            selected_model_name = best_model_name
-                            selected_a_blocks = model_candidates[selected_model_name]
-                            selected_f_aug, selected_q_aug = self._build_augmented_system(selected_a_blocks, q_proc)
+                            # Keep inference behavior identical between debug and non-debug runs.
+                            # Diagnostics should never switch the active transition model.
+                            # Non-debug mode uses the "conj" convention by default.
+                            selected_model_name = "conj"
                         else:
                             self._debug_print(
                                 "[DEBUG] Skipping oracle Q/R and AR convention diagnostics because perfect history was not provided."
