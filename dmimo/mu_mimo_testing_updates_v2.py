@@ -393,6 +393,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         # Perfect channel estimation
         h_freq_csi, rx_snr_db, rx_pwr_dbm = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
                                                                      batch_size=cfg.num_slots_p2)
+        h_freq_csi_perfect = h_freq_csi
     elif cfg.csi_prediction is True:
         rc_predictor = getattr(cfg, "rc_predictor", None)
 
@@ -401,9 +402,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             cfg.rc_predictor = rc_predictor
         if cfg.first_slot_idx == cfg.start_slot_idx:
             rc_predictor.reset_csi_history()
+        
         # Get CSI history
-        # TODO: optimize channel estimation and optimization procedures (currently very slow)        
-
         start_time = time.time()
         err_var_csi_history = None
         if cfg.use_perfect_csi_history_for_prediction:
@@ -472,8 +472,12 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         elif "kalman" in cfg.channel_prediction_method:
             if err_var_csi_history is None:
                 raise ValueError("Kalman predictor requires measurement error variance history.")
-            kalman_predictor = kalman_filter_pred()
-            h_freq_csi = kalman_predictor.predict(h_freq_csi_history, err_var_csi_history, h_freq_csi_perfect_debug=h_freq_csi_perfect[0:1,...])
+            kalman_predictor = kalman_filter_pred(debug=True)
+            h_freq_csi = kalman_predictor.predict(
+                h_freq_csi_history,
+                err_var_csi_history,
+                h_freq_csi_perfect_debug=h_freq_csi_perfect,
+            )
         else:
             raise ValueError("Channel prediction method not implemented here.")
     else:
@@ -488,7 +492,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                            freq_cov_mat=freq_cov_mat,
                                                            lmmse_interpolator=lmmse_interpolator)
     
-    chan_pred_nmse = tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...] - h_freq_csi)**2) / tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...])**2)
+    chan_pred_nmse = tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...] - h_freq_csi[0:1,...])**2) / tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...])**2)
     print("{} Prediction NMSE: {}".format(cfg.channel_prediction_method, chan_pred_nmse))
     
     # Pick the selected UE's channels
@@ -714,7 +718,7 @@ def sim_mu_mimo_all(
             PMI_feedback_bits.append(additional_KPIs[6])
             nodewise_bler_list.append(additional_KPIs[7])
             chan_pred_nmse.append(additional_KPIs[8])
-        
+
         hold = 1
 
     goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
@@ -745,6 +749,8 @@ def sim_mu_mimo_all(
 
     per_step_throughput = np.array(per_step_throughput)
     chan_pred_nmse = np.array(chan_pred_nmse)
+
+    print("Drop {} Average throughput: {:.2f} Mbps\n".format(cfg.drop_idx, throughput))
 
     return [
         uncoded_ber / total_cycles,

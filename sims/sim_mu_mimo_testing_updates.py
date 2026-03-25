@@ -217,6 +217,7 @@ def run_simulation():
     cfg.csi_quantization_on = csi_quantization_on
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
     cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
+    cfg.drop_idx = drop_idx
 
     if cfg.perfect_csi:
         cfg.csi_prediction = False
