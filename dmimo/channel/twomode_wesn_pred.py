@@ -100,21 +100,22 @@ class twomode_wesn_pred:
                 self.init_weights()
 
                 # --------- (A) FEATURE BUILD PHASE: stack all RBs (and OFDM syms) ----------
-                S_list, Y_list = [], []
-                for freq_re in range(num_freq_res):
-                    for ofdm_sym in range(num_ofdm_syms):
-                        # Train sequences for this RB/symbol → [T, N_r, N_t]
-                        Y_in  = channel_train_input[:, 0, tx_node, :, rx_node, :, freq_re, ofdm_sym]
-                        Y_out = channel_train_gt[:,    0, tx_node, :, rx_node, :, freq_re, ofdm_sym]
+                # Flatten (freq_re, ofdm_sym) into a single axis and build one long sequence:
+                # [T, N_r, N_t, F, O] -> [F, O, T, N_r, N_t] -> [F*O*T, N_r, N_t]
+                Y_in_all = channel_train_input[:, 0, tx_node, :, rx_node, :, :, :]
+                Y_out_all = channel_train_gt[:, 0, tx_node, :, rx_node, :, :, :]
 
-                        # Optional: do NOT reset S_0 here if you want cross-RB continuity
-                        # self.S_0 = np.zeros([self.d_left, self.d_right], dtype=self.dtype)
+                T_train = Y_in_all.shape[0]
+                B_fo = num_freq_res * num_ofdm_syms
 
-                        S_f, Y_f = self.build_S_Y(Y_in, Y_out, curr_window_weights=None)
-                        S_list.append(S_f); Y_list.append(Y_f)
+                Y_in_seq = np.transpose(Y_in_all, (3, 4, 0, 1, 2)).reshape(
+                    B_fo * T_train, self.N_r, self.N_t
+                )
+                Y_out_seq = np.transpose(Y_out_all, (3, 4, 0, 1, 2)).reshape(
+                    B_fo * T_train, self.N_r, self.N_t
+                )
 
-                S_all = np.concatenate(S_list, axis=1)  # (F, sum_T)
-                Y_all = np.concatenate(Y_list, axis=1)  # (N_r*N_t, sum_T)
+                S_all, Y_all = self.build_S_Y(Y_in_seq, Y_out_seq, curr_window_weights=None)
 
                 # --------- (B) SINGLE READOUT SOLVE (shared across RBs) ----------
                 # Prefer ridge for stability:
@@ -122,19 +123,23 @@ class twomode_wesn_pred:
                 self.W_out = Y_all @ G                  # (N_r*N_t, F)
 
                 # --------- (C) PREDICTION PHASE with the shared W_out ----------
-                for freq_re in range(num_freq_res):
-                    for ofdm_sym in range(num_ofdm_syms):
-                        # Use last known channel as test input; predict next step
-                        channel_test_input = channel_train_gt[:, 0, tx_node, :, rx_node, :, freq_re, ofdm_sym]
+                # Predict all (freq_re, ofdm_sym) streams in one batched pass.
+                channel_test_input_all = channel_train_gt[:, 0, tx_node, :, rx_node, :, :, :]
+                T_test = channel_test_input_all.shape[0]
+                B_fo = num_freq_res * num_ofdm_syms
 
-                        # Optional: either carry S_0 across RBs for smoothness,
-                        # or reset it per RB. Start with reset; then try carry-over.
-                        self.S_0 = np.zeros([self.d_left, self.d_right], dtype=self.dtype)
+                # [T, N_r, N_t, F, O] -> [T, F, O, N_r, N_t] -> [T, B_fo, N_r, N_t]
+                channel_test_input_batch = np.transpose(channel_test_input_all, (0, 3, 4, 1, 2)).reshape(
+                    T_test, B_fo, self.N_r, self.N_t
+                )
 
-                        channel_pred_temp = self.test_train_predict(channel_test_input, curr_window_weights=None)
-                        channel_pred_temp = channel_pred_temp[:, :, -1:]       # keep last step
-                        channel_pred_temp = np.squeeze(channel_pred_temp)      # [N_r, N_t]
-                        chan_pred[:, tx_node, :, rx_node, :, freq_re, ofdm_sym] = channel_pred_temp
+                channel_pred_batch = self.test_train_predict_batch(channel_test_input_batch, curr_window_weights=None)
+                channel_pred_last = channel_pred_batch[:, :, :, -1]  # [B_fo, N_r, N_t]
+
+                # [B_fo, N_r, N_t] -> [F, O, N_r, N_t] -> [N_r, N_t, F, O]
+                channel_pred_fo = channel_pred_last.reshape(num_freq_res, num_ofdm_syms, self.N_r, self.N_t)
+                channel_pred_fo = np.transpose(channel_pred_fo, (2, 3, 0, 1))
+                chan_pred[:, tx_node, :, rx_node, :, :, :] = channel_pred_fo
 
         chan_pred = chan_pred.transpose([0,1,2,3,4,6,5])
         return chan_pred
@@ -278,6 +283,53 @@ class twomode_wesn_pred:
             Y_3D_window[k] = np.concatenate(blocks, axis=-1)
 
         return Y_3D_window
+    
+    def test_train_predict_batch(self, channel_train_input_batch, curr_window_weights):
+        # channel_train_input_batch: [T, B, N_r, N_t]
+        Y_4D_org = channel_train_input_batch
+
+        if self.enable_window:
+            Y_4D = self.form_window_input_signal_batch(Y_4D_org, curr_window_weights)
+        else:
+            forget = getattr(self, "forget_length", 0)
+            Y_4D = np.concatenate([
+                Y_4D_org,
+                np.zeros([Y_4D_org.shape[0], Y_4D_org.shape[1], forget, Y_4D_org.shape[3]], dtype=self.dtype)
+            ], axis=2)
+
+        S_4D = self.state_transit_batch(Y_4D * self.input_scale)
+        S_4D = np.concatenate([S_4D, Y_4D], axis=-1)
+
+        T, B = S_4D.shape[0], S_4D.shape[1]
+        S = np.column_stack([
+            S_4D[t, b].reshape(-1, order='C') for t in range(T) for b in range(B)
+        ])  # (feature_dim, T*B)
+
+        curr_channel_pred = self.W_out @ S
+        curr_channel_pred = curr_channel_pred.reshape([self.N_r, self.N_t, T, B])
+        curr_channel_pred = np.transpose(curr_channel_pred, (3, 0, 1, 2))
+
+        return curr_channel_pred
+
+    def form_window_input_signal_batch(self, Y_4D_complex, curr_window_weights):
+
+        assert Y_4D_complex.ndim == 4, "Y must be [T, B, N_r, N_t]"
+        T, B, N_r, N_t = Y_4D_complex.shape
+        L = int(self.window_length)
+
+        Y_4D_window = np.zeros((T, B, N_r, L * N_t), dtype=self.dtype)
+
+        for k in range(T):
+            blocks = []
+            for ell in range(L):
+                t = k - ell
+                if t >= 0:
+                    blocks.append(Y_4D_complex[t])       # [B, N_r, N_t]
+                else:
+                    blocks.append(np.zeros((B, N_r, N_t), dtype=self.dtype))
+            Y_4D_window[k] = np.concatenate(blocks, axis=-1)
+
+        return Y_4D_window
 
     def test_train_predict(self, channel_train_input, curr_window_weights):
         self.S_0 = np.zeros([self.d_left, self.d_right], dtype=self.dtype)
@@ -301,6 +353,25 @@ class twomode_wesn_pred:
         curr_channel_pred = curr_channel_pred.reshape([self.N_r, self.N_t, -1])
 
         return curr_channel_pred
+    
+    def state_transit_batch(self, Y_4D):
+
+        T = Y_4D.shape[0]
+        B = Y_4D.shape[1]
+
+        S_3D = np.zeros([B, self.d_left, self.d_right], dtype=self.dtype)
+        S_4D = []
+        for t in range(T):
+            recurrent_term = (self.W_res_left @ S_3D) @ self.W_res_right
+            input_term = (self.W_in_left @ Y_4D[t, :, :, :]) @ self.W_in_right
+            S_3D = self.complex_tanh(
+                recurrent_term + input_term
+            )
+            S_4D.append(S_3D)
+
+        S_4D = np.stack(S_4D, axis=0)
+
+        return S_4D
 
     def state_transit(self, Y_3D):
 
