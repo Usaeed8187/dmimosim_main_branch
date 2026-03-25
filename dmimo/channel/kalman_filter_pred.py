@@ -3,7 +3,7 @@ import numpy as np
 
 class kalman_filter_pred:
 
-    def __init__(self, lam=1e-3, eps=1e-8, ar_order=7):
+    def __init__(self, lam=1e-3, eps=1e-8, ar_order=4):
         self.lam = lam
         self.eps = eps
         self.ar_order = ar_order
@@ -181,7 +181,7 @@ class kalman_filter_pred:
                         numer = np.linalg.norm(joint_wiener_pred - curr_perfect_block) ** 2
                         denom = np.linalg.norm(curr_perfect_block) ** 2 + self.eps
                         weiner_nmse = float(np.real(numer / denom))
-                        # print("Weiner Filter NMSE: ", weiner_nmse)
+                        print("Weiner Filter NMSE: ", weiner_nmse)
                     
                     a_blocks_kalman = [a_block.conj() for a_block in a_blocks]
                     f_aug, q_aug = self._build_augmented_system(a_blocks_kalman, q_proc)
@@ -202,6 +202,6 @@ class kalman_filter_pred:
                         numer = np.linalg.norm(y_next_block - curr_perfect_block) ** 2
                         denom = np.linalg.norm(curr_perfect_block) ** 2 + self.eps
                         kalman_nmse = float(np.real(numer / denom))
-                        # print("Kalman Filter NMSE: ", kalman_nmse, "\n")
+                        print("Kalman Filter NMSE: ", kalman_nmse, "\n")
 
         return pred.astype(h_hist.dtype, copy=False)
