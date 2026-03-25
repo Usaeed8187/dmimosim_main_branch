@@ -449,7 +449,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
                 start_time_all_loops = time.time()
 
-                h_freq_csi = predict_all_links_tf(h_freq_csi_history, rc_config, ns3cfg)
+                h_freq_csi = predict_all_links_tf(h_freq_csi_history, rc_config, ns3cfg, err_var_csi_history=None)
 
                 end_time_all_loops = time.time()
                 # print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
@@ -457,7 +457,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             else:
                 start_time_all_loops = time.time()
 
-                h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg, max_workers=8)
+                h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg, max_workers=8, err_var_csi_history=None)
                 # h_freq_csi = predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg)
 
                 end_time_all_loops = time.time()

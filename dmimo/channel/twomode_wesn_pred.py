@@ -1,4 +1,5 @@
 import os
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 import tensorflow as tf
@@ -69,17 +70,29 @@ class twomode_wesn_pred:
         self.W_in_kron = None
 
     
-    def predict(self, h_freq_csi_history):
+    def predict(self, h_freq_csi_history, err_var_history=None):
 
-        h_freq_csi_predicted = self.pred(h_freq_csi_history)
+        if self.enable_kalman_weight_config and err_var_history is None:
+            warnings.warn(
+                "enable_kalman_weight_config=True but err_var_history was not provided. "
+                "Falling back to heuristic observation-noise covariance R.",
+                RuntimeWarning,
+            )
+
+        h_freq_csi_predicted = self.pred(h_freq_csi_history, err_var_history=err_var_history)
 
         return h_freq_csi_predicted
     
-    def pred(self, h_freq_csi_history):
+    def pred(self, h_freq_csi_history, err_var_history=None):
         
         h_freq_csi_history = np.asarray(h_freq_csi_history)
+        err_var_hist_aligned = None
+        if err_var_history is not None:
+            err_var_hist_aligned = np.asarray(err_var_history)
         if h_freq_csi_history.ndim == 8:
             h_freq_csi_history = h_freq_csi_history.transpose([0,1,2,3,4,5,7,6])
+            if err_var_hist_aligned is not None:
+                err_var_hist_aligned = err_var_hist_aligned.transpose([0,1,2,3,4,5,7,6])
             num_batches = h_freq_csi_history.shape[1]
             num_rx_nodes = h_freq_csi_history.shape[2]
             num_rx_antennas = h_freq_csi_history.shape[3]
@@ -92,6 +105,9 @@ class twomode_wesn_pred:
 
         channel_train_input = h_freq_csi_history[:-1, ...]
         channel_train_gt    = h_freq_csi_history[1:,  ...]
+        err_var_train_input = None
+        if err_var_hist_aligned is not None:
+            err_var_train_input = err_var_hist_aligned[:-1, ...]
         
         if not self.enable_window:
             window_weights = None
@@ -122,7 +138,13 @@ class twomode_wesn_pred:
                 )
 
                 if self.enable_kalman_weight_config:
-                    self.configure_weights_from_kalman(Y_in_seq, curr_window_weights=None)
+                    E_in_seq = None
+                    if err_var_train_input is not None:
+                        E_in_all = err_var_train_input[:, 0, tx_node, :, rx_node, :, :, :]
+                        E_in_seq = np.transpose(E_in_all, (3, 4, 0, 1, 2)).reshape(
+                            B_fo * T_train, self.N_r, self.N_t
+                        )
+                    self.configure_weights_from_kalman(Y_in_seq, curr_window_weights=None, err_var_input=E_in_seq)
 
                 S_all, Y_all = self.build_S_Y(Y_in_seq, Y_out_seq, curr_window_weights=None)
 
@@ -364,7 +386,7 @@ class twomode_wesn_pred:
     def complex_tanh(self, Y):
         return np.tanh(np.real(Y)) + 1j * np.tanh(np.imag(Y))
     
-    def configure_weights_from_kalman(self, channel_input, curr_window_weights):
+    def configure_weights_from_kalman(self, channel_input, curr_window_weights, err_var_input=None):
         Y_4D, _ = self._ensure_batch_axis(channel_input)
         Y_4D = self._prepare_inputs(Y_4D, curr_window_weights)
         if Y_4D.shape[1] != 1:
@@ -384,7 +406,17 @@ class twomode_wesn_pred:
 
         q_proc = 0.5 * (q_proc + q_proc.conj().T)
         q_proc += self.kalman_eps * np.eye(q_proc.shape[0], dtype=np.complex128)
-        r_diag = np.maximum(np.real(np.diag(q_proc)), self.kalman_eps)
+        if err_var_input is not None:
+            E_4D, _ = self._ensure_batch_axis(err_var_input)
+            E_4D = self._prepare_inputs(E_4D, curr_window_weights)
+            if E_4D.shape[1] != 1:
+                E_seq = E_4D.reshape(E_4D.shape[0] * E_4D.shape[1], self.d_left, self.d_right)
+            else:
+                E_seq = E_4D[:, 0, :, :]
+            e_hist = np.real(E_seq.reshape(E_seq.shape[0], -1))
+            r_diag = np.maximum(np.mean(e_hist, axis=0), self.kalman_eps)
+        else:
+            r_diag = np.maximum(np.real(np.diag(q_proc)), self.kalman_eps)
         r_mat = np.diag(r_diag.astype(np.complex128))
 
         H = np.eye(a1.shape[0], dtype=np.complex128)
@@ -406,10 +438,15 @@ class twomode_wesn_pred:
         return K
 
 def _predict_pair_worker(args):
-    base_history, rc_config, RB, tx_ant_idx, rx_ant_idx = args
+    base_history, err_var_history, rc_config, RB, tx_ant_idx, rx_ant_idx = args
 
     curr_h_freq_csi_history = base_history[:, :, :, rx_ant_idx, :, ...]
     curr_h_freq_csi_history = curr_h_freq_csi_history[:, :, :, :, :, tx_ant_idx, ...]
+
+    curr_err_var_history = None
+    if err_var_history is not None:
+        curr_err_var_history = err_var_history[:, :, :, rx_ant_idx, :, ...]
+        curr_err_var_history = curr_err_var_history[:, :, :, :, :, tx_ant_idx, ...]
 
     twomode_predictor = twomode_wesn_pred(
         rc_config=rc_config,
@@ -418,13 +455,25 @@ def _predict_pair_worker(args):
         num_tx_ant=len(tx_ant_idx),
     )
 
-    tmp = twomode_predictor.predict(curr_h_freq_csi_history)
+    tmp = twomode_predictor.predict(
+        curr_h_freq_csi_history,
+        err_var_history=curr_err_var_history,
+    )
     rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
     return rx_idx, tx_idx, tmp
     
-def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2, max_workers=None):
-
+def predict_all_links(
+    h_freq_csi_history,
+    rc_config,
+    ns3cfg,
+    num_bs_ant=4,
+    num_ue_ant=2,
+    max_workers=None,
+    err_var_csi_history=None,
+):
     base_history = np.asarray(h_freq_csi_history)
+    err_var_history = None if err_var_csi_history is None else np.asarray(err_var_csi_history)
+
     _, _, _, _, _, _, _, RB = base_history.shape
     h_freq_csi = np.zeros(base_history[0, ...].shape, dtype=base_history.dtype)
 
@@ -436,22 +485,27 @@ def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_u
             else:
                 tx_ant_idx = np.arange(
                     num_bs_ant + (tx_node_idx - 1) * num_ue_ant,
-                    num_bs_ant + (tx_node_idx) * num_ue_ant,
+                    num_bs_ant + tx_node_idx * num_ue_ant,
                 )
+
             if rx_node_idx == 0:
                 rx_ant_idx = np.arange(0, num_bs_ant)
             else:
                 rx_ant_idx = np.arange(
                     num_bs_ant + (rx_node_idx - 1) * num_ue_ant,
-                    num_bs_ant + (rx_node_idx) * num_ue_ant,
+                    num_bs_ant + rx_node_idx * num_ue_ant,
                 )
 
-            tasks.append((base_history, rc_config, RB, tx_ant_idx, rx_ant_idx))
+            tasks.append((base_history, err_var_history, rc_config, RB, tx_ant_idx, rx_ant_idx))
 
     if max_workers is None:
         max_workers = min(len(tasks), os.cpu_count() or 1)
+
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        future_to_task = {executor.submit(_predict_pair_worker, task): task for task in tasks}
+        future_to_task = {
+            executor.submit(_predict_pair_worker, task): task
+            for task in tasks
+        }
         for future in as_completed(future_to_task):
             rx_idx, tx_idx, tmp = future.result()
             h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
@@ -459,7 +513,7 @@ def predict_all_links(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_u
     return h_freq_csi
 
 
-def predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2):
+def predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4, num_ue_ant=2, err_var_csi_history=None):
 
     T, _, _, RxAnt, _, TxAnt, num_syms, RB = h_freq_csi_history.shape
     h_freq_csi = np.zeros(h_freq_csi_history[0, ...].shape, dtype=h_freq_csi_history.dtype)
@@ -496,7 +550,11 @@ def predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4
                 num_tx_ant=TxAnt,
             )
             rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
-            tmp = np.asarray(twomode_predictor.predict(curr_h_freq_csi_history))
+            curr_err_var_csi_history = None
+            if err_var_csi_history is not None:
+                curr_err_var_csi_history = err_var_csi_history[:, :, :, rx_ant_idx, :, ...]
+                curr_err_var_csi_history = curr_err_var_csi_history[:, :, :, :, :, tx_ant_idx, ...]
+            tmp = np.asarray(twomode_predictor.predict(curr_h_freq_csi_history, err_var_csi_history))
             h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
 
     return h_freq_csi
