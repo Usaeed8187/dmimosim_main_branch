@@ -1,4 +1,3 @@
-import copy
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
@@ -145,23 +144,13 @@ class twomode_wesn_pred:
         return chan_pred
 
     def build_S_Y(self, channel_input, channel_output, curr_window_weights):
-        # channel_input, channel_output: [T, N_r, N_t]
-        Y_3D = channel_input
-        Y_target_3D = channel_output
+        Y_4D, _ = self._ensure_batch_axis(channel_input)
+        Y_target_4D, _ = self._ensure_batch_axis(channel_output)
+        Y_4D = self._prepare_inputs(Y_4D, curr_window_weights)
 
-        if self.enable_window:
-            Y_3D_win = self.form_window_input_signal(Y_3D, curr_window_weights)
-        else:
-            # Safe fallback if forget_length not set:
-            forget = getattr(self, "forget_length", 0)
-            Y_3D_win = np.concatenate([Y_3D, np.zeros([Y_3D.shape[0], forget, Y_3D.shape[2]], dtype=self.dtype)], axis=1)
-
-        S_3D_transit = self.state_transit(Y_3D_win * self.input_scale)
-        S_3D = np.concatenate([S_3D_transit, Y_3D_win], axis=-1)
-
-        T = S_3D.shape[0]
-        S = np.column_stack([S_3D[t].reshape(-1, order='C') for t in range(T)])  # (feature_dim, T)
-        Y = np.column_stack([Y_target_3D[t].reshape(-1, order='C') for t in range(T)])  # (N_r*N_t, T)
+        S_4D = self._state_transit_core(Y_4D * self.input_scale, reset_state=True)
+        S = self._flatten_features(S_4D, Y_4D)
+        Y = self._flatten_targets(Y_target_4D)
         return S, Y
 
 
@@ -260,60 +249,16 @@ class twomode_wesn_pred:
 
         return G
 
-    def form_window_input_signal(self, Y_3D_complex, curr_window_weights):
-
-        # if self.window_weight_application == 'across_inputs' or self.window_weight_application == 'across_time_and_inputs':
-        #     Y_2D_complex = Y_2D_complex * curr_window_weights
-
-        assert Y_3D_complex.ndim == 3, "Y must be [T, N_r, N_t]"
-        T, N_r, N_t = Y_3D_complex.shape
-        L = int(self.window_length)
-
-        Y_3D_window = np.zeros((T, N_r, L * N_t), dtype=self.dtype)
-
-        for k in range(T):
-            blocks = []
-            for ell in range(L):
-                t = k - ell
-                if t >= 0:
-                    blocks.append(Y_3D_complex[t])       # [N_r, N_t]
-                else:
-                    blocks.append(np.zeros((N_r, N_t), dtype=self.dtype))  # causal zero-pad
-            # Concatenate along Tx axis → [N_r, L*N_t]
-            Y_3D_window[k] = np.concatenate(blocks, axis=-1)
-
-        return Y_3D_window
+    def _ensure_batch_axis(self, Y):
+        Y = np.asarray(Y)
+        if Y.ndim == 3:
+            return Y[:, None, :, :], False
+        if Y.ndim == 4:
+            return Y, True
+        raise ValueError("Input must be [T, N_r, N_t] or [T, B, N_r, N_t]")
     
-    def test_train_predict_batch(self, channel_train_input_batch, curr_window_weights):
-        # channel_train_input_batch: [T, B, N_r, N_t]
-        Y_4D_org = channel_train_input_batch
-
-        if self.enable_window:
-            Y_4D = self.form_window_input_signal_batch(Y_4D_org, curr_window_weights)
-        else:
-            forget = getattr(self, "forget_length", 0)
-            Y_4D = np.concatenate([
-                Y_4D_org,
-                np.zeros([Y_4D_org.shape[0], Y_4D_org.shape[1], forget, Y_4D_org.shape[3]], dtype=self.dtype)
-            ], axis=2)
-
-        S_4D = self.state_transit_batch(Y_4D * self.input_scale)
-        S_4D = np.concatenate([S_4D, Y_4D], axis=-1)
-
-        T, B = S_4D.shape[0], S_4D.shape[1]
-        S = np.column_stack([
-            S_4D[t, b].reshape(-1, order='C') for t in range(T) for b in range(B)
-        ])  # (feature_dim, T*B)
-
-        curr_channel_pred = self.W_out @ S
-        curr_channel_pred = curr_channel_pred.reshape([self.N_r, self.N_t, T, B])
-        curr_channel_pred = np.transpose(curr_channel_pred, (3, 0, 1, 2))
-
-        return curr_channel_pred
-
-    def form_window_input_signal_batch(self, Y_4D_complex, curr_window_weights):
-
-        assert Y_4D_complex.ndim == 4, "Y must be [T, B, N_r, N_t]"
+    def _form_window_input_signal_core(self, Y_4D_complex, curr_window_weights):
+        # Y: [T, B, N_r, N_t]
         T, B, N_r, N_t = Y_4D_complex.shape
         L = int(self.window_length)
 
@@ -331,63 +276,73 @@ class twomode_wesn_pred:
 
         return Y_4D_window
 
-    def test_train_predict(self, channel_train_input, curr_window_weights):
-        self.S_0 = np.zeros([self.d_left, self.d_right], dtype=self.dtype)
+    def _prepare_inputs(self, Y_4D_org, curr_window_weights):
+        if self.enable_window:
+            return self._form_window_input_signal_core(Y_4D_org, curr_window_weights)
 
-        Y_3D_org = channel_train_input
+        forget = getattr(self, "forget_length", 0)
+        if forget == 0:
+            return Y_4D_org
 
-        Y_3D = self.form_window_input_signal(Y_3D_org, curr_window_weights)
+        return np.concatenate(
+            [
+                Y_4D_org,
+                np.zeros([Y_4D_org.shape[0], Y_4D_org.shape[1], forget, Y_4D_org.shape[3]], dtype=self.dtype),
+            ],
+            axis=2,
+        )
 
-        S_3D = self.state_transit(Y_3D * self.input_scale)
+    def _state_transit_core(self, Y_4D, reset_state):
+        T, B = Y_4D.shape[0], Y_4D.shape[1]
+        if reset_state:
+            S_3D = np.zeros([B, self.d_left, self.d_right], dtype=self.dtype)
+        else:
+            S_3D = np.broadcast_to(self.S_0, (B, self.d_left, self.d_right)).copy()
 
-        S_3D = np.concatenate([S_3D, Y_3D], axis=-1)
-
-        # vectorization trick. equivalent to having two W_out matrices on either side of the feature matrix being fed to the output
-        T = S_3D.shape[0]
-        S = np.column_stack([
-            S_3D[t].reshape(-1, order='C') for t in range(T)
-        ])  # (feature_dim, T)
-
-        curr_channel_pred = self.W_out @ S
-
-        curr_channel_pred = curr_channel_pred.reshape([self.N_r, self.N_t, -1])
-
-        return curr_channel_pred
-    
-    def state_transit_batch(self, Y_4D):
-
-        T = Y_4D.shape[0]
-        B = Y_4D.shape[1]
-
-        S_3D = np.zeros([B, self.d_left, self.d_right], dtype=self.dtype)
         S_4D = []
         for t in range(T):
             recurrent_term = (self.W_res_left @ S_3D) @ self.W_res_right
-            input_term = (self.W_in_left @ Y_4D[t, :, :, :]) @ self.W_in_right
-            S_3D = self.complex_tanh(
-                recurrent_term + input_term
-            )
+            input_term = (self.W_in_left @ Y_4D[t]) @ self.W_in_right
+            S_3D = self.complex_tanh(recurrent_term + input_term)
             S_4D.append(S_3D)
 
         S_4D = np.stack(S_4D, axis=0)
 
+        self.S_0 = S_3D[0]
+
         return S_4D
 
+    def _flatten_features(self, S_4D, Y_4D):
+        S_aug_4D = np.concatenate([S_4D, Y_4D], axis=-1)
+        T, B = S_aug_4D.shape[:2]
+        return S_aug_4D.reshape(T * B, -1).T
+    
+    def _flatten_targets(self, Y_4D):
+        T, B = Y_4D.shape[:2]
+        return Y_4D.reshape(T * B, -1).T
+    
+    def form_window_input_signal(self, Y_3D_complex, curr_window_weights):
+        Y_4D, _ = self._ensure_batch_axis(Y_3D_complex)
+        return self._form_window_input_signal_core(Y_4D, curr_window_weights)[:, 0]
+    
+    def test_train_predict_batch(self, channel_train_input_batch, curr_window_weights):
+        Y_4D_org, _ = self._ensure_batch_axis(channel_train_input_batch)
+        Y_4D = self._prepare_inputs(Y_4D_org, curr_window_weights)
+        S_4D = self._state_transit_core(Y_4D * self.input_scale, reset_state=True)
+        S = self._flatten_features(S_4D, Y_4D)
+
+        T, B = Y_4D.shape[0], Y_4D.shape[1]
+        curr_channel_pred = self.W_out @ S
+        curr_channel_pred = curr_channel_pred.reshape([self.N_r, self.N_t, T, B])
+        return np.transpose(curr_channel_pred, (3, 0, 1, 2))
+    
+    def state_transit_batch(self, Y_4D):
+        Y_4D, _ = self._ensure_batch_axis(Y_4D)
+        return self._state_transit_core(Y_4D, reset_state=True)
+    
     def state_transit(self, Y_3D):
-
-        T = Y_3D.shape[0] # number of samples
-
-        S_2D = copy.deepcopy(self.S_0)
-        S_3D = []
-        for t in range(T):
-            S_2D = self.complex_tanh(self.W_res_left @ S_2D @ self.W_res_right + self.W_in_left @ Y_3D[t,:,:] @ self.W_in_right)
-            S_3D.append(S_2D)
-
-        S_3D = np.stack(S_3D, axis=0)
-
-        self.S_0 = S_2D
-
-        return S_3D
+        Y_4D, _ = self._ensure_batch_axis(Y_3D)
+        return self._state_transit_core(Y_4D, reset_state=False)[:, 0]
 
     def complex_tanh(self, Y):
         return np.tanh(np.real(Y)) + 1j * np.tanh(np.imag(Y))
