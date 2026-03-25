@@ -213,10 +213,10 @@ class kalman_filter_pred:
                             joint_wiener_pred_tiles += y_hist_tiles[-lag_idx] @ a_blocks[lag_idx - 1].conj().T
 
                         joint_wiener_pred = joint_wiener_pred_tiles.reshape(num_syms, num_sc, RxAnt, TxAnt).transpose(2, 3, 0, 1)
-                        curr_perfect_block = h_freq_csi_perfect_debug[ :, :, rx_ant_idx,  ...]
-                        curr_perfect_block = np.squeeze(curr_perfect_block[:, :, :, :, tx_ant_idx, ...])
-                        numer = np.linalg.norm(joint_wiener_pred - curr_perfect_block[0,...]) ** 2
-                        denom = np.linalg.norm(curr_perfect_block[0,...]) ** 2 + self.eps
+                        curr_perfect_block = h_freq_csi_perfect_debug[ :, :, :, rx_ant_idx,  ...]
+                        curr_perfect_block = np.squeeze(curr_perfect_block[:, :, :, :, :, tx_ant_idx, ...])
+                        numer = np.linalg.norm(joint_wiener_pred - curr_perfect_block[-1,...]) ** 2
+                        denom = np.linalg.norm(curr_perfect_block[-1,...]) ** 2 + self.eps
                         weiner_nmse = float(np.real(numer / denom))
                         print("Weiner Filter NMSE: ", weiner_nmse)
                     
@@ -347,9 +347,11 @@ class kalman_filter_pred:
                         )
 
                     if h_freq_csi_perfect_debug is not None:
-                        numer = np.linalg.norm(y_next_block - curr_perfect_block[0,...]) ** 2
-                        denom = np.linalg.norm(curr_perfect_block[0,...]) ** 2 + self.eps
+                        numer = np.linalg.norm(y_next_block - curr_perfect_block[-1,...]) ** 2
+                        denom = np.linalg.norm(curr_perfect_block[-1,...]) ** 2 + self.eps
                         kalman_nmse = float(np.real(numer / denom))
                         print("Kalman Filter NMSE: ", kalman_nmse, "\n")
+
+                    hold = 1
 
         return pred.astype(h_hist.dtype, copy=False)
