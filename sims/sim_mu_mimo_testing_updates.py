@@ -198,7 +198,7 @@ def run_simulation():
     cfg = SimConfig()
     cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
     cfg.total_slots = 99       # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 33     # starting slots (must be greater than csi_delay + 5)
+    cfg.start_slot_idx = 66     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = perfect_csi
     cfg.rank_adapt = False      # enable/disable rank adaptation
@@ -235,9 +235,9 @@ def run_simulation():
 
     rc_config = RCConfig()
     rc_config.enable_window = True
-    rc_config.window_length = 6
+    rc_config.window_length = 3
     rc_config.num_neurons = 16
-    rc_config.history_len = 8
+    rc_config.history_len = 4
     if channel_prediction_setting == "two_mode_kalman_config":
         rc_config.enable_kalman_weight_config = True
     else:
