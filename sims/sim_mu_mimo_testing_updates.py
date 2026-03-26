@@ -235,7 +235,7 @@ def run_simulation():
 
     rc_config = RCConfig()
     rc_config.enable_window = True
-    rc_config.window_length = 4
+    rc_config.window_length = 6
     rc_config.num_neurons = 16
     rc_config.history_len = 8
     if channel_prediction_setting == "two_mode_kalman_config":

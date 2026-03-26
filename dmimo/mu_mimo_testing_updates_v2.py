@@ -468,14 +468,14 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         elif "weiner_filter" in cfg.channel_prediction_method:
             # Weiner Filter based prediction (MIMO) (per_tx_rx_node_pair)
             weiner_filter_predictor = weiner_filter_pred(method="using_one_link_MIMO")
-            h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=4))
+            h_freq_csi = np.asarray(weiner_filter_predictor.predict(h_freq_csi_history, K=rc_config.window_length))
         elif "kalman" in cfg.channel_prediction_method:
             if err_var_csi_history is None:
                 raise ValueError("Kalman predictor requires measurement error variance history.")
 
             h_freq_csi_history_perfect = rc_predictor.get_ideal_csi_history(cfg.first_slot_idx+cfg.csi_delay, cfg.csi_delay,
                                                           dmimo_chans)
-            kalman_predictor = kalman_filter_pred(debug=True)
+            kalman_predictor = kalman_filter_pred(ar_order=rc_config.window_length, debug=False)
             h_freq_csi = kalman_predictor.predict(
                 h_freq_csi_history,
                 err_var_csi_history,

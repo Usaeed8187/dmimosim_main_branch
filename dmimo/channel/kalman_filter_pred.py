@@ -207,7 +207,9 @@ class kalman_filter_pred:
                     p = min(self.ar_order, t_len - 1)
                     a_blocks, q_proc = self._estimate_ar_p_q_joint(y_hist_tiles, p)
 
-                    if h_freq_csi_perfect_debug is not None:
+                    use_debug = self.debug and h_freq_csi_perfect_debug is not None
+
+                    if use_debug and h_freq_csi_perfect_debug is not None:
                         joint_wiener_pred_tiles = np.zeros((num_syms * num_sc, RxAnt * TxAnt), dtype=np.complex128)
                         for lag_idx in range(1, p + 1):
                             joint_wiener_pred_tiles += y_hist_tiles[-lag_idx] @ a_blocks[lag_idx - 1].conj().T
@@ -220,7 +222,6 @@ class kalman_filter_pred:
                         weiner_nmse = float(np.real(numer / denom))
                         print("Weiner Filter NMSE: ", weiner_nmse)
                     
-                    use_debug = self.debug and h_freq_csi_perfect_debug is not None
                     selected_model_name = "conj"
                     selected_a_blocks = [a_block.conj() for a_block in a_blocks]
                     selected_f_aug, selected_q_aug = self._build_augmented_system(selected_a_blocks, q_proc)
@@ -347,7 +348,7 @@ class kalman_filter_pred:
                             f"transition='{selected_model_name}'"
                         )
 
-                    if h_freq_csi_perfect_debug is not None:
+                    if use_debug and h_freq_csi_perfect_debug is not None:
                         numer = np.linalg.norm(y_next_block - curr_perfect_block[-1,...]) ** 2
                         denom = np.linalg.norm(curr_perfect_block[-1,...]) ** 2 + self.eps
                         kalman_nmse = float(np.real(numer / denom))
