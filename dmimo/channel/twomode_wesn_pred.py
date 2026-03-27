@@ -59,12 +59,12 @@ class twomode_wesn_pred:
         self.W_in_left = 2 * (self.RS.rand(self.d_left, self.N_in_left) - 0.5) # TODO: check if I should make this complex later
         self.W_in_right = 2 * (self.RS.rand(self.N_in_right, self.d_right) - 0.5) # TODO: check if I should make this complex later
 
-        # TODO: using a vectorization trick to learn one vectorized W_out instead of left and right W_outs.
-        # This is mathematically equivalent to 
-        # self.W_out_left = self.RS.randn(self.N_r, self.d_left)
-        # self.W_out_right = self.RS.randn(self.d_right + self.N_in_right, self.N_t)
         self.feature_dim = int(self.d_left * self.d_right * (self.window_length + 1))
-        self.W_out = self.RS.randn(self.N_r * self.N_t, self.feature_dim).astype(self.dtype)        
+        # vectorization readout (legacy/default path)
+        self.W_out = self.RS.randn(self.N_r * self.N_t, self.feature_dim).astype(self.dtype)
+        # bilinear readout (ALS path)
+        self.W_out_left = self.RS.randn(self.N_r, self.d_left).astype(self.dtype)
+        self.W_out_right = self.RS.randn(self.d_right + self.N_in_right, self.N_t).astype(self.dtype)
 
         self.S_0 = np.zeros([self.d_left, self.d_right], dtype=self.dtype)
         self.W_res_kron = None
@@ -150,9 +150,19 @@ class twomode_wesn_pred:
                 S_all, Y_all = self.build_S_Y(Y_in_seq, Y_out_seq, curr_window_weights=None)
 
                 # --------- (B) SINGLE READOUT SOLVE (shared across RBs) ----------
-                # Prefer ridge for stability:
-                G = self.reg_p_inv(S_all)               # (sum_T, F)  :=  S_all^H (S_all S_all^H + λI)^{-1}
-                self.W_out = Y_all @ G                  # (N_r*N_t, F)
+                if self.readout_solve_method == "ALS":
+                    X_all = self._feature_matrices_from_flat(S_all)
+                    Y_all_mats = self._target_matrices_from_flat(Y_all)
+                    self.W_out_left, self.W_out_right = self.solve_readout_als(X_all, Y_all_mats)
+                elif self.readout_solve_method == "vectorization_trick":
+                    # Prefer ridge for stability:
+                    G = self.reg_p_inv(S_all)               # (sum_T, F)  :=  S_all^H (S_all S_all^H + λI)^{-1}
+                    self.W_out = Y_all @ G                  # (N_r*N_t, F)
+                else:
+                    raise ValueError(
+                        f"Unsupported readout_solve_method='{self.readout_solve_method}'. "
+                        "Use 'vectorization_trick' or 'ALS'."
+                    )
 
                 # --------- (C) PREDICTION PHASE with the shared W_out ----------
                 # Predict all (freq_re, ofdm_sym) streams in one batched pass.
@@ -259,11 +269,19 @@ class twomode_wesn_pred:
             Y_target_3D[t].reshape(-1, order='C') for t in range(T)
         ])
         
-        self.W_out = Y @ np.linalg.pinv(S)
-        
-        pred_channel = self.W_out @ S
-
-        pred_channel = pred_channel.reshape([self.N_r, self.N_t, -1])
+        if self.readout_solve_method == "ALS":
+            X_samples = self._feature_matrices_from_flat(S)
+            Y_samples = self._target_matrices_from_flat(Y)
+            self.W_out_left, self.W_out_right = self.solve_readout_als(X_samples, Y_samples)
+            pred_stack = np.array(
+                [self.W_out_left @ X_samples[i] @ self.W_out_right for i in range(X_samples.shape[0])],
+                dtype=self.dtype,
+            )
+            pred_channel = np.transpose(pred_stack, (1, 2, 0))
+        else:
+            self.W_out = Y @ np.linalg.pinv(S)
+            pred_channel = self.W_out @ S
+            pred_channel = pred_channel.reshape([self.N_r, self.N_t, -1])
 
         return pred_channel
 
@@ -360,6 +378,51 @@ class twomode_wesn_pred:
     def _flatten_targets(self, Y_4D):
         T, B = Y_4D.shape[:2]
         return Y_4D.reshape(T * B, -1).T
+
+    def _feature_matrices_from_flat(self, S_flat):
+        # S_flat: [feature_dim, N_samples] -> X: [N_samples, d_left, d_right + N_in_right]
+        S_samples = np.asarray(S_flat).T
+        return S_samples.reshape(-1, self.d_left, self.d_right + self.N_in_right)
+
+    def _target_matrices_from_flat(self, Y_flat):
+        # Y_flat: [N_r*N_t, N_samples] -> Y: [N_samples, N_r, N_t]
+        Y_samples = np.asarray(Y_flat).T
+        return Y_samples.reshape(-1, self.N_r, self.N_t)
+
+    def _ridge_left_solve(self, Y_cat, X_cat):
+        # Solve min_W ||Y - W X||_F^2 + reg||W||_F^2
+        XXH = X_cat @ X_cat.conj().T + self.reg * np.eye(X_cat.shape[0], dtype=self.dtype)
+        return (Y_cat @ X_cat.conj().T) @ np.linalg.pinv(XXH)
+
+    def solve_readout_als(self, X_samples, Y_samples, max_iters=25, tol=1e-5):
+        # X_samples: [N, d_left, d_right + N_in_right], Y_samples: [N, N_r, N_t]
+        W_left = self.W_out_left.copy()
+        W_right = self.W_out_right.copy()
+
+        prev_rel_err = np.inf
+        for _ in range(max_iters):
+            # Update left: Y_i ~= W_left (X_i W_right)
+            Z_list = [X_samples[i] @ W_right for i in range(X_samples.shape[0])]
+            Z_cat = np.concatenate(Z_list, axis=1)           # [d_left, N*N_t]
+            Y_cat = np.concatenate([Y_samples[i] for i in range(Y_samples.shape[0])], axis=1)  # [N_r, N*N_t]
+            W_left = self._ridge_left_solve(Y_cat, Z_cat).astype(self.dtype)
+
+            # Update right via transpose: Y_i^T ~= W_right^T (W_left X_i)^T
+            A_list = [W_left @ X_samples[i] for i in range(X_samples.shape[0])]
+            A_cat_t = np.concatenate([A.T for A in A_list], axis=1)                             # [d_right+N_in_right, N*N_r]
+            Y_cat_t = np.concatenate([Y_samples[i].T for i in range(Y_samples.shape[0])], axis=1)  # [N_t, N*N_r]
+            W_right = self._ridge_left_solve(Y_cat_t, A_cat_t).T.astype(self.dtype)
+
+            # Convergence check
+            Y_hat = np.array([W_left @ X_samples[i] @ W_right for i in range(X_samples.shape[0])], dtype=self.dtype)
+            err = np.linalg.norm((Y_samples - Y_hat).reshape(-1))
+            denom = np.linalg.norm(Y_samples.reshape(-1)) + 1e-12
+            rel_err = float(err / denom)
+            if abs(prev_rel_err - rel_err) < tol:
+                break
+            prev_rel_err = rel_err
+
+        return W_left, W_right
     
     def form_window_input_signal(self, Y_3D_complex, curr_window_weights):
         Y_4D, _ = self._ensure_batch_axis(Y_3D_complex)
@@ -369,9 +432,19 @@ class twomode_wesn_pred:
         Y_4D_org, _ = self._ensure_batch_axis(channel_train_input_batch)
         Y_4D = self._prepare_inputs(Y_4D_org, curr_window_weights)
         S_4D = self._state_transit_core(Y_4D * self.input_scale, reset_state=True)
-        S = self._flatten_features(S_4D, Y_4D)
 
         T, B = Y_4D.shape[0], Y_4D.shape[1]
+        if self.readout_solve_method == "ALS":
+            X_samples = np.concatenate([S_4D, Y_4D], axis=-1).reshape(T * B, self.d_left, self.d_right + self.N_in_right)
+            Y_hat = np.array(
+                [self.W_out_left @ X_samples[i] @ self.W_out_right for i in range(T * B)],
+                dtype=self.dtype,
+            )
+            curr_channel_pred = Y_hat.reshape(T, B, self.N_r, self.N_t)
+            return np.transpose(curr_channel_pred, (1, 2, 3, 0))
+
+        S = self._flatten_features(S_4D, Y_4D)
+
         curr_channel_pred = self.W_out @ S
         curr_channel_pred = curr_channel_pred.reshape([self.N_r, self.N_t, T, B])
         return np.transpose(curr_channel_pred, (3, 0, 1, 2))
