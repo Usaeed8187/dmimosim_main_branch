@@ -196,44 +196,19 @@ class twomode_wesn_pred:
         Y = self._flatten_targets(Y_target_4D)
         return S, Y
 
-
-    def calculate_window_weights(self, h_freq_csi_history):
-
-        if self.window_weighting_method == 'autocorrelation':
-            def autocorrelation(x):
-                """Compute the autocorrelation of a 1D signal."""
-                n = len(x)
-                x_mean = np.mean(x)
-                x_var = np.var(x)
-                acf = np.correlate(x - x_mean, x - x_mean, mode='full') / (n * x_var)
-                return acf[n-1:]  # Keep only non-negative lags
-
-            h_reshaped = np.moveaxis(h_freq_csi_history, -1, 0)
-            acf_result = np.apply_along_axis(autocorrelation, 0, h_reshaped)
-            acf_result = np.squeeze(np.mean(acf_result, axis=-1))
-
-            window_weights = np.abs(acf_result)
-        elif self.window_weighting_method == 'same_weights':
-            window_weights = 1
-        elif self.window_weighting_method == 'exponential_decay':
-            # x = np.linspace(0, self.window_length-1, self.history_len*self.num_ofdm_sym)
-            x = np.linspace(0, self.window_length-1, h_freq_csi_history.shape[1])
-            window_weights = np.exp(-x/2)
-        elif self.window_weighting_method == 'none':
-            window_weights = np.ones(h_freq_csi_history.shape[1])
-        else:
-            raise ValueError("\n The window_weighting_method specified is not implemented")
-        
-        return window_weights
-
     def sparse_mat(self, m):
         
-        W = 2*(self.RS.rand(m, m) - 0.5) + 2j*(self.RS.rand(m, m) - 0.5)
-        W[self.RS.rand(*W.shape) < self.sparsity] = 0+1j*0
-        radius = np.max(np.abs(np.linalg.eigvals(W)))
-        W = W * (self.spectral_radius / radius)
-        
-        return W
+        max_retries = 5
+        for _ in range(max_retries):
+            W = 2 * (self.RS.rand(m, m) - 0.5) + 2j * (self.RS.rand(m, m) - 0.5)
+            W[self.RS.rand(*W.shape) < self.sparsity] = 0.0 + 0.0j
+
+            radius = float(np.max(np.abs(np.linalg.eigvals(W))))
+            if np.isfinite(radius) and radius > 1e-12:
+                W = W * (self.spectral_radius / radius)
+                return W.astype(self.dtype)
+
+        raise ValueError("\nSpectral radius = 0")
 
     def complex_to_real_target(self, Y_target_2D):
         Y_target_2D_real_list = []
