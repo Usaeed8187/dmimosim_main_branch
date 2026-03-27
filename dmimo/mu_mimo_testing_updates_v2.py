@@ -753,7 +753,8 @@ def sim_mu_mimo_all(
     per_step_throughput = np.array(per_step_throughput)
     chan_pred_nmse = np.array(chan_pred_nmse)
 
-    print("Drop {} Average throughput: {:.2f} Mbps\n".format(cfg.drop_idx, throughput))
+    print("Drop {}, {} Average Prediction NMSE: {}".format(cfg.drop_idx, cfg.channel_prediction_method, np.mean(chan_pred_nmse)))
+    print("Drop {}, Average throughput: {:.2f} Mbps\n".format(cfg.drop_idx, throughput))
 
     return [
         uncoded_ber / total_cycles,

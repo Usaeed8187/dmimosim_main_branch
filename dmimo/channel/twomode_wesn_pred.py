@@ -10,7 +10,7 @@ from dmimo.channel.kalman_filter_pred import kalman_filter_pred
 
 class twomode_wesn_pred:
 
-    def __init__(self, rc_config, num_freq_re, num_rx_ant, num_tx_ant, type=np.complex64):
+    def __init__(self, rc_config, num_freq_re, num_rx_ant, num_tx_ant, readout_solve_method="vectorization_trick" , type=np.complex64):
         
         self.rc_config = rc_config
         self.dtype = type
@@ -30,6 +30,7 @@ class twomode_wesn_pred:
         self.kalman_weight_ar_order = int(getattr(rc_config, "kalman_weight_ar_order", 4))
         self.kalman_gain_iters = int(getattr(rc_config, "kalman_gain_iters", 100))
         self.kalman_eps = float(getattr(rc_config, "kalman_eps", 1e-8))
+        self.readout_solve_method = readout_solve_method # "vectorization_trick", "ALS"
 
         seed = 10
         self.RS = np.random.RandomState(seed)
