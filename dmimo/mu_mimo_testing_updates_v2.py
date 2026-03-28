@@ -604,7 +604,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    print("Uncoded BER: ", uncoded_ber_phase_2)
+    # print("Uncoded BER: ", uncoded_ber_phase_2)
     # print("Coded BER: ", coded_ber)
     # print("BLER: ", coded_bler)
 

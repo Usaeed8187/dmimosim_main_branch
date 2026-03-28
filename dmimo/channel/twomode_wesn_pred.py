@@ -10,7 +10,7 @@ from dmimo.channel.kalman_filter_pred import kalman_filter_pred
 
 class twomode_wesn_pred:
 
-    def __init__(self, rc_config, num_freq_re, num_rx_ant, num_tx_ant, readout_solve_method="vectorization_trick" , type=np.complex64):
+    def __init__(self, rc_config, num_freq_re, num_rx_ant, num_tx_ant, readout_solve_method="ALS" , type=np.complex64):
         
         self.rc_config = rc_config
         self.dtype = type
@@ -31,6 +31,9 @@ class twomode_wesn_pred:
         self.kalman_gain_iters = int(getattr(rc_config, "kalman_gain_iters", 100))
         self.kalman_eps = float(getattr(rc_config, "kalman_eps", 1e-8))
         self.readout_solve_method = readout_solve_method # "vectorization_trick", "ALS"
+        self.kalman_project_to_bilinear = bool(
+            getattr(rc_config, "kalman_project_to_bilinear", self.readout_solve_method == "ALS")
+        )
 
         seed = 10
         self.RS = np.random.RandomState(seed)
@@ -69,6 +72,7 @@ class twomode_wesn_pred:
         self.S_0 = np.zeros([self.d_left, self.d_right], dtype=self.dtype)
         self.W_res_kron = None
         self.W_in_kron = None
+        self.use_kalman_bilinear = False
 
     
     def predict(self, h_freq_csi_history, err_var_history=None):
@@ -327,7 +331,12 @@ class twomode_wesn_pred:
 
         S_4D = []
         for t in range(T):
-            if self.enable_kalman_weight_config and self.W_res_kron is not None and self.W_in_kron is not None:
+            if (
+                self.enable_kalman_weight_config
+                and (not self.use_kalman_bilinear)
+                and self.W_res_kron is not None
+                and self.W_in_kron is not None
+            ):
                 S_vec = S_3D.reshape(B, -1)
                 U_vec = Y_4D[t].reshape(B, -1)
                 next_vec = (S_vec @ self.W_res_kron.T) + (U_vec @ self.W_in_kron.T)
@@ -473,6 +482,65 @@ class twomode_wesn_pred:
 
         self.W_res_kron = (a1 @ (np.eye(a1.shape[0], dtype=np.complex128) - K @ H)).astype(self.dtype)
         self.W_in_kron = (a1 @ K).astype(self.dtype)
+
+        self.use_kalman_bilinear = False
+        if self.kalman_project_to_bilinear:
+            res_left, res_right_t = self._nearest_kronecker_factors(
+                self.W_res_kron.astype(np.complex128),
+                left_shape=(self.d_left, self.d_left),
+                right_shape=(self.d_right, self.d_right),
+            )
+            in_left, in_right_t = self._nearest_kronecker_factors(
+                self.W_in_kron.astype(np.complex128),
+                left_shape=(self.d_left, self.N_in_left),
+                right_shape=(self.d_right, self.N_in_right),
+            )
+
+            self.W_res_left, self.W_res_right = self._normalize_bilinear_recurrent_radius(
+                res_left.astype(self.dtype),
+                res_right_t.T.astype(self.dtype),
+            )
+            self.W_in_left = in_left.astype(self.dtype)
+            self.W_in_right = in_right_t.T.astype(self.dtype)
+            self.use_kalman_bilinear = True
+
+    def _nearest_kronecker_factors(self, M, left_shape, right_shape):
+        # Finds A, B such that M ≈ kron(B, A) in Frobenius norm.
+        m, n = left_shape
+        p, q = right_shape
+        expected_shape = (m * p, n * q)
+        if M.shape != expected_shape:
+            raise ValueError(
+                f"Kronecker projection shape mismatch: got {M.shape}, expected {expected_shape}"
+            )
+
+        # Rearrangement for rank-1 SVD: R ≈ vec(A) vec(B)^H when M ≈ kron(B, A)
+        R = M.reshape(p, m, q, n).transpose(1, 3, 0, 2).reshape(m * n, p * q)
+        U, s, Vh = np.linalg.svd(R, full_matrices=False)
+        s0 = float(np.real(s[0])) if s.size > 0 else 0.0
+        if not np.isfinite(s0) or s0 <= self.kalman_eps:
+            return (
+                np.zeros((m, n), dtype=np.complex128),
+                np.zeros((p, q), dtype=np.complex128),
+            )
+
+        root = np.sqrt(s0)
+        vec_a = root * U[:, 0]
+        vec_b = root * np.conj(Vh[0, :])
+        A = vec_a.reshape(m, n)
+        B = vec_b.reshape(p, q)
+        return A, B
+
+    def _normalize_bilinear_recurrent_radius(self, W_left, W_right):
+        # Keep product spectral radius near configured target for stable recurrent dynamics.
+        left_eigs = np.linalg.eigvals(W_left.astype(np.complex128))
+        right_eigs = np.linalg.eigvals(W_right.astype(np.complex128))
+        rho = float(np.max(np.abs(left_eigs)) * np.max(np.abs(right_eigs)))
+        if np.isfinite(rho) and rho > self.kalman_eps:
+            scale = np.sqrt(self.spectral_radius / rho)
+            W_left = W_left * scale
+            W_right = W_right * scale
+        return W_left, W_right
 
     def _compute_steady_kalman_gain(self, F, Q, R, H):
         P = np.eye(F.shape[0], dtype=np.complex128)
