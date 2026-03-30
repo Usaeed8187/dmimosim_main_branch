@@ -65,9 +65,13 @@ class P1DemoPrecoder(Layer):
         x_precoded = tf.cast(x_precoded, self._dtype)
     
         # Transpose h:
-        # [num_rx, num_streams_per_tx, num_tx_ant]
-        h = np.squeeze(h, axis=(1, 2))
-        h_pc_desired = tf.transpose(h, [0, 2, 1])
+        # [num_rx, num_streams_per_tx, num_tx_ant] or [num_rx, num_streams_per_tx, num_sc, num_tx_ant]
+        if h.shape[2] == 1:
+            h = np.squeeze(h, axis=(1, 2))
+            h_pc_desired = tf.transpose(h, [0, 2, 1])
+        else:
+            h = np.squeeze(h, axis=1)
+            h_pc_desired = tf.transpose(h, [0, 1, 3, 2])
 
         if precoding_method == 'weighted_mean':
             x_precoded, g, starting_SINR, best_SINR = weighted_mean_precoder(x_precoded,
@@ -106,6 +110,6 @@ class P1DemoPrecoder(Layer):
 
         if self._return_effective_channel:
             h_eff = self._compute_effective_channel(h, g)
-            return x_precoded, h_eff, starting_SINR, best_SINR
+            return x_precoded, h_eff, g, starting_SINR, best_SINR
         else:
-            return x_precoded, None, starting_SINR, best_SINR
+            return x_precoded, None, g, starting_SINR, best_SINR

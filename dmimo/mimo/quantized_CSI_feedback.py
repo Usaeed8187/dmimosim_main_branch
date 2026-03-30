@@ -695,7 +695,7 @@ class quantized_CSI_feedback(Layer):
                     avg_sinr = self.eesm_average(per_stream_sinr, 0.25, 4)
 
                     curr_codebook_rate = A_info * np.log2(1 + B_info * avg_sinr)
-                    per_precoder_rate[:, codebook_idx] = np.sum(curr_codebook_rate, axis=-1)
+                    per_precoder_rate[:, codebook_idx] = curr_codebook_rate
 
                 if self.wideband:
                     precoding_matrices = np.zeros((1, codebook.shape[1], codebook.shape[2]), dtype=complex)

@@ -170,7 +170,10 @@ def grad_ascent_precoder(x, h, rx_snr_db, num_iterations=3, eps=1e-6, alpha=0.2,
     h = np.asarray(h)
     rx_snr_db = np.asarray(rx_snr_db)
 
-    K, Ns, Nt = h.shape
+    if len(h.shape) == 3:
+        K, Ns, Nt = h.shape
+    else:
+        K, N_sc, Ns, Nt = h.shape
     assert x.shape[-1] == Ns, f"x last dim (streams)={x.shape[-1]} must match h streams={Ns}"
     assert rx_snr_db.shape[0] == K, "rx_snr_db must have length N_users"
 
@@ -185,13 +188,18 @@ def grad_ascent_precoder(x, h, rx_snr_db, num_iterations=3, eps=1e-6, alpha=0.2,
     # ---- 3) Initialize P (simple robust choice): weighted average of directions ----
     # P0 for each stream s: sum_k sqrt(snr_k) * v_{k,s}^H? (we need Nt x Ns)
     # v_{k,s} is length-Nt direction; take conjugate so beam points along v
-    P = np.zeros((Nt, Ns), dtype=np.complex64)
-    for s in range(Ns):
-        P[:, s] = np.sum((np.sqrt(snr_lin)[:, None] * np.conj(v[:, s, :])), axis=0)
+    if len(h.shape) == 3:
+        P = np.zeros((Nt, Ns), dtype=np.complex64)
+        for s in range(Ns):
+            P[:, s] = np.sum((np.sqrt(snr_lin)[:, None] * np.conj(v[..., s, :])), axis=0)
+    else:
+        P = np.zeros((N_sc, Nt, Ns), dtype=np.complex64)
+        for s in range(Ns):
+            P[:, :, s] = np.sum((np.sqrt(snr_lin)[:, None, None] * np.conj(v[..., s, :])), axis=0)
 
     # Normalize to power constraint
-    fro = np.linalg.norm(P, "fro") + 1e-12
-    P = np.sqrt(ptx) * P / fro
+    norm = np.linalg.norm(P) + 1e-12
+    P = np.sqrt(ptx) * P / norm
 
     # ---- Helper: compute gamma_k(P) = ||h_k P||^2 / sigma^2
     # With our surrogate R_k = snr_lin[k] * v_k v_k^H, gamma_k(P) = P^H R_k P (per stream aggregate)

@@ -84,8 +84,8 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'high_mobility'
-drop_idx = '3'
+mobility = 'higher_mobility'
+drop_idx = '1'
 rx_ues_arr = [4]
 num_txue_sel = 4
 
@@ -94,9 +94,9 @@ code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "kalman_filter" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
+channel_prediction_setting = "two_mode_kalman_config" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
 csi_prediction = True
-channel_prediction_method = "kalman_filter" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
+channel_prediction_method = "two_mode_kalman_config" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
 csi_quantization_on = True
 rl_train_end_drop = 45
 rl_checkpoint = None
@@ -197,8 +197,8 @@ def run_simulation():
     # Simulation settings
     cfg = SimConfig()
     cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
-    cfg.total_slots = 99       # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 66     # starting slots (must be greater than csi_delay + 5)
+    cfg.total_slots = 56       # total number of slots in ns-3 channels
+    cfg.start_slot_idx = 33     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = perfect_csi
     cfg.rank_adapt = False      # enable/disable rank adaptation

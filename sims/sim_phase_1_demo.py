@@ -93,7 +93,7 @@ if __name__ == "__main__":
 
     # Simulation settings
     cfg = SimConfig()
-    cfg.total_slots = 99                                            # total number of slots in ns-3 channels
+    cfg.total_slots = 45                                            # total number of slots in ns-3 channels
     cfg.start_slot_idx = 15                                         # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = cfg.num_slots_p1 + cfg.num_slots_p2             # feedback delay in number of subframe
     cfg.perfect_csi = False
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     cfg.num_scheduled_tx_ue = rx_ues_arr[0]
     streams_per_tx = 1
     cfg.num_tx_streams = streams_per_tx
-    cfg.modulation_order = 8
+    cfg.modulation_order = 4
     cfg.precoding_method = precoding_method
     cfg.gen_sync_errors = False
     if cfg.gen_sync_errors:

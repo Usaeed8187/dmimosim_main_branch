@@ -166,11 +166,11 @@ class Phase1(Model):
 
                 # apply precoding to OFDM grids
                 if curr_method == 0:
-                    x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'weighted_mean'])
+                    x_precoded, h_eff, g, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'weighted_mean'])
                 elif curr_method == 1:
-                    x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'grad_ascent'])
+                    x_precoded, h_eff, g, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'grad_ascent'])
                 elif curr_method == 2:
-                    # x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'np_hard_sdr'])
+                    # x_precoded, h_eff, g, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'np_hard_sdr'])
                     continue
                 
                 y = self.apply_channel([x_precoded, h_freq])
@@ -178,6 +178,8 @@ class Phase1(Model):
                 # no = np.mean(np.abs(y)**2) / rx_snr_linear
                 no = np.power(10.0, -rx_snr_db / 10.0).astype(np.float32)
                 y = self.awgn([y, no])
+
+                h_perfect = tf.transpose(tf.matmul(tf.transpose(h_freq, perm=[0,1,3,5,6,2,4]), g), perm=[0,1,5,2,6,3,4])
 
                 # LS channel estimation with linear interpolation
                 # no = tf.reduce_mean(no)
@@ -191,8 +193,10 @@ class Phase1(Model):
                 for rx_node in range(self.cfg.num_scheduled_tx_ue):
                     curr_y = tf.gather(y, tf.range(rx_node*2, rx_node*2+2), axis=2)
 
-                    curr_h, err_var = self.ls_estimator([curr_y, no[rx_node]])
-
+                    # curr_h, err_var = self.ls_estimator([curr_y, no[rx_node]])
+                    curr_h = tf.gather(h_perfect, tf.range(rx_node*2, rx_node*2+2), axis=2)
+                    _, err_var = self.ls_estimator([curr_y, no[rx_node]])
+                    
                     curr_y = tf.gather(curr_y, self.rg.effective_subcarrier_ind, axis=-1)
                     
                     # curr_h = tf.gather(h_hat, tf.range(rx_node*2, rx_node*2+2), axis=2)
@@ -336,7 +340,7 @@ class Phase1v(Phase1):
         rx_snr_db = np.array(per_ue_snr, dtype=float)
 
         # Apply the selected precoding method once
-        x_precoded, h_eff, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, precoding_method])
+        x_precoded, h_eff, g, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, precoding_method])
 
         # Transmit through channel using dMIMOChannels (it handles AWGN internally)
         y, _ = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
@@ -475,7 +479,7 @@ def sim_phase_1(cfg: SimConfig, ns3cfg: Ns3Config):
 
     if cfg.CSI_feedback_method =='5G':
         generate_CSI_feedback = quantized_CSI_feedback(method='5G', codebook_selection_method='rate', num_tx_streams=cfg.num_tx_streams, architecture='dMIMO_phase1', 
-                                                        snrdb=rx_snr_db, N_1=4, wideband=True)
+                                                        snrdb=rx_snr_db, N_1=4, wideband=False)
         [PMI, rate_for_selected_precoder, quantized_channels] = generate_CSI_feedback(h_freq_csi_dl)
     else:
         quantized_channels = None
@@ -537,7 +541,7 @@ def sim_phase_1_all(cfg: SimConfig, ns3cfg: Ns3Config):
     plt.grid()
     plt.xlabel('SNR (dB)')
     plt.ylabel('BER')
-    plt.title('Wideband Precoding')
-    plt.savefig('Wideband Precoding Drop {}'.format(cfg.drop_idx))
+    plt.title('Subband Precoding')
+    plt.savefig('Subband Precoding Drop {}'.format(cfg.drop_idx))
 
     return uncoded_bers
