@@ -27,17 +27,33 @@ class P1DemoPrecoder(Layer):
     def _compute_effective_channel(self, h, g):
         """Compute effective channel after precoding"""
 
-        # Transpose h to shape:
-        # [num_rx, num_rx_ant, num_tx_ant]
-        h = tf.transpose(h, [0, 2, 1])
-        h = tf.cast(h, g.dtype)
+        if len(h.shape) == 3:
+            # Wideband h shape:
+            # [num_rx, num_tx_ant, num_rx_ant]
+            # -> [num_rx, num_rx_ant, num_tx_ant]
+            h = tf.transpose(h, [0, 2, 1])
+            h = tf.cast(h, g.dtype)
 
-        # Compute post precoding channel:
-        # [num_rx, num_rx_ant, num_streams_per_tx]
-        if len(g.shape) == 1:
-            h_eff = tf.matmul(h, g[:, tf.newaxis])
+            # Compute post-precoding channel:
+            # [num_rx, num_rx_ant, num_streams_per_tx]
+            if len(g.shape) == 1:
+                h_eff = tf.matmul(h, g[:, tf.newaxis])
+            else:
+                h_eff = tf.matmul(h, g)
         else:
-            h_eff = tf.matmul(h, g)
+            # Subband h shape:
+            # [num_rx, num_sc, num_tx_ant, num_rx_ant]
+            # -> [num_rx, num_sc, num_rx_ant, num_tx_ant]
+            h = tf.transpose(h, [0, 1, 3, 2])
+            h = tf.cast(h, g.dtype)
+
+            # Compute post-precoding channel per subcarrier
+            # g can be:
+            # - [num_sc, num_tx_ant, num_streams_per_tx] (subband precoder)
+            if len(g.shape) == 3:
+                h_eff = tf.matmul(h, g[None, ...])
+            else:
+                raise ValueError("Invalid precoding matrix shape for computing effective channel")
 
         return h_eff
 

@@ -166,7 +166,8 @@ class Phase1(Model):
 
                 # apply precoding to OFDM grids
                 if curr_method == 0:
-                    x_precoded, h_eff, g, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'weighted_mean'])
+                    # x_precoded, h_eff, g, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'weighted_mean'])
+                    continue
                 elif curr_method == 1:
                     x_precoded, h_eff, g, _, _ = self.p1_demo_precoder([x_rg, h_freq_csi, rx_snr_db, 'grad_ascent'])
                 elif curr_method == 2:
@@ -215,7 +216,7 @@ class Phase1(Model):
         plt.figure()
         worst_users = np.argmax(uncoded_bers, axis=-1)
         worst_users  = mode(worst_users, axis=1, keepdims=False).mode
-        plt.semilogy(SNR_range, uncoded_bers[0,:,worst_users[0]], label='BER for worst user (user {}) after Weighted Mean precoding'.format(worst_users[0]))
+        # plt.semilogy(SNR_range, uncoded_bers[0,:,worst_users[0]], label='BER for worst user (user {}) after Weighted Mean precoding'.format(worst_users[0]))
         plt.semilogy(SNR_range, uncoded_bers[1,:,worst_users[1]], label='BER for worst user (user {}) after grad ascent precoding'.format(worst_users[1]))
         # plt.semilogy(SNR_range, uncoded_bers[2,:,worst_users[2]], label='BER for worst user (user {}) after Numerical Optimizer precoding'.format(worst_users[2]))
         plt.legend()
@@ -479,7 +480,7 @@ def sim_phase_1(cfg: SimConfig, ns3cfg: Ns3Config):
 
     if cfg.CSI_feedback_method =='5G':
         generate_CSI_feedback = quantized_CSI_feedback(method='5G', codebook_selection_method='rate', num_tx_streams=cfg.num_tx_streams, architecture='dMIMO_phase1', 
-                                                        snrdb=rx_snr_db, N_1=4, wideband=False)
+                                                        snrdb=rx_snr_db, N_1=4, wideband=True)
         [PMI, rate_for_selected_precoder, quantized_channels] = generate_CSI_feedback(h_freq_csi_dl)
     else:
         quantized_channels = None
@@ -534,14 +535,14 @@ def sim_phase_1_all(cfg: SimConfig, ns3cfg: Ns3Config):
     worst_users = np.argmax(uncoded_bers_arr_avg, axis=-1)
     worst_users  = mode(worst_users, axis=1, keepdims=False).mode
     plt.figure()
-    plt.semilogy(cfg.SNR_range, uncoded_bers_arr_avg[0,:,worst_users[0]], label='BER for worst user (user {}) after Weighted Mean precoding'.format(worst_users[0]))
+    # plt.semilogy(cfg.SNR_range, uncoded_bers_arr_avg[0,:,worst_users[0]], label='BER for worst user (user {}) after Weighted Mean precoding'.format(worst_users[0]))
     plt.semilogy(cfg.SNR_range, uncoded_bers_arr_avg[1,:,worst_users[1]], label='BER for worst user (user {}) after grad ascent precoding'.format(worst_users[1]))
     # plt.semilogy(cfg.SNR_range, uncoded_bers_arr_avg[2,:,worst_users[2]], label='BER for worst user (user {}) after Numerical Optimizer precoding'.format(worst_users[2]))
     plt.legend()
     plt.grid()
     plt.xlabel('SNR (dB)')
     plt.ylabel('BER')
-    plt.title('Subband Precoding')
-    plt.savefig('Subband Precoding Drop {}'.format(cfg.drop_idx))
+    plt.title('Wideband Precoding')
+    plt.savefig('Wideband Precoding Drop {}'.format(cfg.drop_idx))
 
     return uncoded_bers

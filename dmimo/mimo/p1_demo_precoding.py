@@ -144,7 +144,9 @@ def grad_ascent_precoder(x, h, rx_snr_db, num_iterations=3, eps=1e-6, alpha=0.2,
     x : np.ndarray
         Data symbols, shape [1, 1, N_ofdm_symbols, N_subcarriers, N_streams]
     h : np.ndarray
-        Type-I PMI feedback directions, shape [N_users, N_streams, N_tx]
+        Type-I PMI feedback directions. Supports:
+          - wideband CSI: [N_users, N_streams, N_tx]
+          - subband CSI: [N_users, N_subcarriers, N_streams, N_tx]
         (for multicast, you typically have N_streams=1)
     rx_snr_db : np.ndarray
         Per-user SNR in dB, shape [N_users]
@@ -162,7 +164,9 @@ def grad_ascent_precoder(x, h, rx_snr_db, num_iterations=3, eps=1e-6, alpha=0.2,
     x_precoded : np.ndarray
         Precoded samples, shape [1, 1, N_ofdm_symbols, N_subcarriers, N_tx]
     P : np.ndarray
-        Precoder matrix, shape [N_tx, N_streams]
+        Precoder matrix:
+          - wideband CSI: [N_tx, N_streams]
+          - subband CSI: [N_subcarriers, N_tx, N_streams]
     """
 
     # ---- Shapes ----
@@ -170,7 +174,8 @@ def grad_ascent_precoder(x, h, rx_snr_db, num_iterations=3, eps=1e-6, alpha=0.2,
     h = np.asarray(h)
     rx_snr_db = np.asarray(rx_snr_db)
 
-    if len(h.shape) == 3:
+    is_wideband = len(h.shape) == 3
+    if is_wideband:
         K, Ns, Nt = h.shape
     else:
         K, N_sc, Ns, Nt = h.shape
@@ -183,23 +188,28 @@ def grad_ascent_precoder(x, h, rx_snr_db, num_iterations=3, eps=1e-6, alpha=0.2,
     # ---- 2) Normalize PMI directions per user/stream ----
     v = h.astype(np.complex64)
     v_norm = np.linalg.norm(v, axis=-1, keepdims=True) + 1e-12
-    v = v / v_norm  # [K, Ns, Nt]
+    v = v / v_norm
 
     # ---- 3) Initialize P (simple robust choice): weighted average of directions ----
     # P0 for each stream s: sum_k sqrt(snr_k) * v_{k,s}^H? (we need Nt x Ns)
     # v_{k,s} is length-Nt direction; take conjugate so beam points along v
-    if len(h.shape) == 3:
+    if is_wideband:
         P = np.zeros((Nt, Ns), dtype=np.complex64)
         for s in range(Ns):
             P[:, s] = np.sum((np.sqrt(snr_lin)[:, None] * np.conj(v[..., s, :])), axis=0)
     else:
         P = np.zeros((N_sc, Nt, Ns), dtype=np.complex64)
         for s in range(Ns):
-            P[:, :, s] = np.sum((np.sqrt(snr_lin)[:, None, None] * np.conj(v[..., s, :])), axis=0)
+            P[:, :, s] = np.sum((np.sqrt(snr_lin)[:, None, None] * np.conj(v[:, :, s, :])), axis=0)
 
     # Normalize to power constraint
-    norm = np.linalg.norm(P) + 1e-12
-    P = np.sqrt(ptx) * P / norm
+    if is_wideband:
+        norm = np.linalg.norm(P) + 1e-12
+        P = np.sqrt(ptx) * P / norm
+    else:
+        for sc in range(N_sc):
+            norm = np.linalg.norm(P[sc], "fro") + 1e-12
+            P[sc] = np.sqrt(ptx) * P[sc] / norm
 
     # ---- Helper: compute gamma_k(P) = ||h_k P||^2 / sigma^2
     # With our surrogate R_k = snr_lin[k] * v_k v_k^H, gamma_k(P) = P^H R_k P (per stream aggregate)
@@ -217,30 +227,68 @@ def grad_ascent_precoder(x, h, rx_snr_db, num_iterations=3, eps=1e-6, alpha=0.2,
             gam[k] = (snr_lin[k] * acc).astype(np.float32)
         return gam  # [K]
 
-    # ---- 4) Gradient ascent on f(P) = sum_k log(gamma_k(P)+eps) ----
-    for _ in range(num_iterations):
-        gam = gamma_all(P)  # [K]
+    def gamma_all_subband(Pmat_sc, sc_idx):
+        # Pmat_sc: [Nt, Ns]
+        gam = np.zeros((K,), dtype=np.float32)
 
-        # grad = sum_k (R_k / (gamma_k+eps)) P
-        # with R_k = snr_k * sum_s v_{k,s} v_{k,s}^H (block-diagonal by stream in our implementation)
-        grad = np.zeros_like(P)
         for k in range(K):
-            denom = float(gam[k] + eps)
-            w = snr_lin[k] / denom  # scalar weight
+            acc = 0.0
             for s in range(Ns):
-                vk = v[k, s, :]  # [Nt]
-                # (v v^H) p_s = v * (v^H p_s)
-                proj = np.vdot(vk, P[:, s])  # v^H p
-                grad[:, s] += (w * vk * proj).astype(np.complex64)
+                vk = v[k, sc_idx, s, :]  # [Nt]
+                ps = Pmat_sc[:, s]       # [Nt]
+                inner = np.vdot(vk, ps)  # v^H p
+                acc += (np.abs(inner) ** 2)
+            gam[k] = (snr_lin[k] * acc).astype(np.float32)
+        return gam  # [K]
 
-        # ascent step + projection to power constraint
-        P_tilde = P + alpha * grad
-        fro = np.linalg.norm(P_tilde, "fro") + 1e-12
-        P = np.sqrt(ptx) * P_tilde / fro
+    # ---- 4) Gradient ascent on f(P) = sum_k log(gamma_k(P)+eps) ----
+    if is_wideband:
+        for _ in range(num_iterations):
+            gam = gamma_all(P)  # [K]
+
+            # grad = sum_k (R_k / (gamma_k+eps)) P
+            # with R_k = snr_k * sum_s v_{k,s} v_{k,s}^H (block-diagonal by stream in our implementation)
+            grad = np.zeros_like(P)
+            for k in range(K):
+                denom = float(gam[k] + eps)
+                w = snr_lin[k] / denom  # scalar weight
+                for s in range(Ns):
+                    vk = v[k, s, :]  # [Nt]
+                    # (v v^H) p_s = v * (v^H p_s)
+                    proj = np.vdot(vk, P[:, s])  # v^H p
+                    grad[:, s] += (w * vk * proj).astype(np.complex64)
+
+            # ascent step + projection to power constraint
+            P_tilde = P + alpha * grad
+            fro = np.linalg.norm(P_tilde, "fro") + 1e-12
+            P = np.sqrt(ptx) * P_tilde / fro
+    else:
+        for _ in range(num_iterations):
+            for sc in range(N_sc):
+                P_sc = P[sc]  # [Nt, Ns]
+                gam = gamma_all_subband(P_sc, sc)  # [K]
+
+                grad = np.zeros_like(P_sc)
+                for k in range(K):
+                    denom = float(gam[k] + eps)
+                    w = snr_lin[k] / denom  # scalar weight
+                    for s in range(Ns):
+                        vk = v[k, sc, s, :]  # [Nt]
+                        proj = np.vdot(vk, P_sc[:, s])  # v^H p
+                        grad[:, s] += (w * vk * proj).astype(np.complex64)
+
+                # ascent step + projection to per-subcarrier power constraint
+                P_tilde = P_sc + alpha * grad
+                fro = np.linalg.norm(P_tilde, "fro") + 1e-12
+                P[sc] = np.sqrt(ptx) * P_tilde / fro
 
     # ---- 5) Apply precoder: [.., Ns] x [Ns, Nt] -> [.., Nt]
-    # x: [1,1,Nos,Nsc,Ns]
-    x_precoded = np.matmul(x, P.T)  # P.T: [Ns, Nt]
+    if is_wideband:
+        # x: [1,1,Nos,Nsc,Ns]
+        x_precoded = np.matmul(x, P.T)  # P.T: [Ns, Nt]
+    else:
+        # x: [1,1,Nos,Nsc,Ns], P: [Nsc,Nt,Ns] -> [1,1,Nos,Nsc,Nt]
+        x_precoded = np.matmul(x[..., :, None, :], np.transpose(P, (0, 2, 1))).squeeze(-2)
 
     return x_precoded, P
 
