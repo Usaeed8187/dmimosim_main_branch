@@ -27,7 +27,7 @@ class twomode_wesn_pred:
         self.enable_window = rc_config.enable_window
         self.history_len = rc_config.history_len
         self.enable_kalman_weight_config = bool(getattr(rc_config, "enable_kalman_weight_config", False))
-        self.kalman_weight_ar_order = int(getattr(rc_config, "kalman_weight_ar_order", 4))
+        self.kalman_weight_ar_order = rc_config.window_length
         self.kalman_gain_iters = int(getattr(rc_config, "kalman_gain_iters", 100))
         self.kalman_eps = float(getattr(rc_config, "kalman_eps", 1e-8))
         self.readout_solve_method = readout_solve_method # "vectorization_trick", "ALS"

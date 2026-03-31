@@ -84,7 +84,7 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'higher_mobility'
+mobility = 'high_mobility'
 drop_idx = '1'
 rx_ues_arr = [4]
 num_txue_sel = 4
@@ -94,9 +94,9 @@ code_rate = 1 / 2
 link_adapt = True
 
 perfect_csi = False
-channel_prediction_setting = "two_mode_kalman_config" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
+channel_prediction_setting = "two_mode" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
 csi_prediction = True
-channel_prediction_method = "two_mode_kalman_config" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
+channel_prediction_method = "two_mode" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
 csi_quantization_on = True
 rl_train_end_drop = 45
 rl_checkpoint = None
@@ -235,7 +235,7 @@ def run_simulation():
 
     rc_config = RCConfig()
     rc_config.enable_window = True
-    rc_config.window_length = 3
+    rc_config.window_length = 4
     rc_config.num_neurons = 16
     rc_config.history_len = 8
     if channel_prediction_setting == "two_mode_kalman_config":

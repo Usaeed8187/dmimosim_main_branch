@@ -480,7 +480,7 @@ def sim_phase_1(cfg: SimConfig, ns3cfg: Ns3Config):
 
     if cfg.CSI_feedback_method =='5G':
         generate_CSI_feedback = quantized_CSI_feedback(method='5G', codebook_selection_method='rate', num_tx_streams=cfg.num_tx_streams, architecture='dMIMO_phase1', 
-                                                        snrdb=rx_snr_db, N_1=4, wideband=True)
+                                                        snrdb=rx_snr_db, N_1=4, wideband=False)
         [PMI, rate_for_selected_precoder, quantized_channels] = generate_CSI_feedback(h_freq_csi_dl)
     else:
         quantized_channels = None
