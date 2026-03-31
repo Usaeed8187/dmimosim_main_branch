@@ -135,23 +135,23 @@ class twomode_wesn_pred:
                 T_train = Y_in_all.shape[0]
                 B_fo = num_freq_res * num_ofdm_syms
 
-                Y_in_seq = np.transpose(Y_in_all, (3, 4, 0, 1, 2)).reshape(
-                    B_fo * T_train, self.N_r, self.N_t
+                Y_in_batch = np.transpose(Y_in_all, (0, 3, 4, 1, 2)).reshape(
+                    T_train, B_fo, self.N_r, self.N_t
                 )
-                Y_out_seq = np.transpose(Y_out_all, (3, 4, 0, 1, 2)).reshape(
-                    B_fo * T_train, self.N_r, self.N_t
+                Y_out_batch = np.transpose(Y_out_all, (0, 3, 4, 1, 2)).reshape(
+                    T_train, B_fo, self.N_r, self.N_t
                 )
 
                 if self.enable_kalman_weight_config:
                     E_in_seq = None
                     if err_var_train_input is not None:
                         E_in_all = err_var_train_input[:, 0, tx_node, :, rx_node, :, :, :]
-                        E_in_seq = np.transpose(E_in_all, (3, 4, 0, 1, 2)).reshape(
-                            B_fo * T_train, self.N_r, self.N_t
+                        E_in_seq = np.transpose(E_in_all, (0, 3, 4, 1, 2)).reshape(
+                            T_train, B_fo, self.N_r, self.N_t
                         )
-                    self.configure_weights_from_kalman(Y_in_seq, curr_window_weights=None, err_var_input=E_in_seq)
+                    self.configure_weights_from_kalman(Y_in_batch, curr_window_weights=None, err_var_input=E_in_seq)
 
-                S_all, Y_all = self.build_S_Y(Y_in_seq, Y_out_seq, curr_window_weights=None)
+                S_all, Y_all = self.build_S_Y(Y_in_batch, Y_out_batch, curr_window_weights=None)
 
                 # --------- (B) SINGLE READOUT SOLVE (shared across RBs) ----------
                 if self.readout_solve_method == "ALS":
