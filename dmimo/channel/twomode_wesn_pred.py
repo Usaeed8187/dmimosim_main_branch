@@ -10,7 +10,14 @@ from dmimo.channel.kalman_filter_pred import kalman_filter_pred
 
 class twomode_wesn_pred:
 
-    def __init__(self, rc_config, num_freq_re, num_rx_ant, num_tx_ant, readout_solve_method="vectorization_trick" , type=np.complex64):
+    def __init__(self,
+                rc_config, 
+                num_freq_re,
+                num_rx_ant,
+                num_tx_ant, 
+                readout_solve_method="vectorization_trick",
+                windowing_mode='col_concat',
+                type=np.complex64):
         
         self.rc_config = rc_config
         self.dtype = type
@@ -30,18 +37,29 @@ class twomode_wesn_pred:
         self.kalman_weight_ar_order = rc_config.window_length
         self.kalman_gain_iters = int(getattr(rc_config, "kalman_gain_iters", 100))
         self.kalman_eps = float(getattr(rc_config, "kalman_eps", 1e-8))
+        self.windowing_mode = windowing_mode # "col_concat", "block_diag"
         self.readout_solve_method = readout_solve_method # "vectorization_trick", "ALS"
         self.kalman_project_to_bilinear = bool(
             getattr(rc_config, "kalman_project_to_bilinear", self.readout_solve_method == "ALS")
         )
+        if self.windowing_mode not in ("col_concat", "block_diag"):
+            raise ValueError(
+                f"Unsupported windowing_mode='{self.windowing_mode}'. "
+                "Use 'col_concat' or 'block_diag'."
+            )
 
         seed = 10
         self.RS = np.random.RandomState(seed)
 
-        self.N_in_left = self.N_r
         if self.enable_window:
-            self.N_in_right = self.N_t * self.window_length # TODO: only windowing on the transmit antenna axis for now. evaluate windowing on the receive antenna axis later
+            if self.windowing_mode == "block_diag":
+                self.N_in_left = self.N_r * self.window_length
+                self.N_in_right = self.N_t * self.window_length
+            else:
+                self.N_in_left = self.N_r
+                self.N_in_right = self.N_t * self.window_length
         else:
+            self.N_in_left = self.N_r
             self.N_in_right = self.N_t
 
         self.d_left = self.N_in_left # TODO: currently just basing on the size of the input. try other configurations
@@ -292,7 +310,15 @@ class twomode_wesn_pred:
         T, B, N_r, N_t = Y_4D_complex.shape
         L = int(self.window_length)
 
-        Y_4D_window = np.zeros((T, B, N_r, L * N_t), dtype=self.dtype)
+        if self.windowing_mode == "col_concat":
+            Y_4D_window = np.zeros((T, B, N_r, L * N_t), dtype=self.dtype)
+        elif self.windowing_mode == "block_diag":
+            Y_4D_window = np.zeros((T, B, L * N_r, L * N_t), dtype=self.dtype)
+        else:
+            raise ValueError(
+                f"Unsupported windowing_mode='{self.windowing_mode}'. "
+                "Use 'col_concat' or 'block_diag'."
+            )
 
         for k in range(T):
             blocks = []
@@ -302,7 +328,13 @@ class twomode_wesn_pred:
                     blocks.append(Y_4D_complex[t])       # [B, N_r, N_t]
                 else:
                     blocks.append(np.zeros((B, N_r, N_t), dtype=self.dtype))
-            Y_4D_window[k] = np.concatenate(blocks, axis=-1)
+            if self.windowing_mode == "col_concat":
+                Y_4D_window[k] = np.concatenate(blocks, axis=-1)
+            else:
+                for ell, blk in enumerate(blocks):
+                    r0 = ell * N_r
+                    c0 = ell * N_t
+                    Y_4D_window[k, :, r0:r0 + N_r, c0:c0 + N_t] = blk
 
         return Y_4D_window
 
