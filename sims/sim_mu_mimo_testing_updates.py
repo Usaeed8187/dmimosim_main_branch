@@ -95,8 +95,8 @@ link_adapt = True
 
 perfect_csi = False
 csi_prediction = True
-channel_prediction_setting = "two_mode" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
-channel_prediction_method = "two_mode" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
+channel_prediction_setting = "two_mode_kalman_config" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
+channel_prediction_method = "two_mode_kalman_config" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
 history_len = 8
 window_length = 5
 num_neurons = 16

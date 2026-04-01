@@ -17,7 +17,7 @@ class twomode_wesn_pred:
                 num_tx_ant, 
                 readout_solve_method="vectorization_trick",
                 windowing_mode='col_concat',
-                state_dim_setting='from_config',
+                state_dim_setting='from_data',
                 type=np.complex64):
         
         self.rc_config = rc_config
@@ -146,6 +146,15 @@ class twomode_wesn_pred:
             num_tx_antennas = h_freq_csi_history.shape[5]
             num_freq_res = h_freq_csi_history.shape[6]
             num_ofdm_syms = h_freq_csi_history.shape[7]
+
+            if err_var_hist_aligned.shape[-2] != num_freq_res:
+                pad_top = (num_freq_res - err_var_hist_aligned.shape[-2]) // 2
+                pad_bottom = (num_freq_res - err_var_hist_aligned.shape[-2]) - pad_top
+
+                top_rep = np.repeat(err_var_hist_aligned[..., 0:1, :], pad_top, axis=6)
+                bottom_rep  = np.repeat(err_var_hist_aligned[..., -1:, :],  pad_bottom, axis=6)
+
+                err_var_hist_aligned = np.concatenate([top_rep, err_var_hist_aligned, bottom_rep], axis=6)
         else:
             raise ValueError("\n The dimensions of h_freq_csi_history are not correct")
 
@@ -753,7 +762,7 @@ def predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg, num_bs_ant=4
             if err_var_csi_history is not None:
                 curr_err_var_csi_history = err_var_csi_history[:, :, :, rx_ant_idx, :, ...]
                 curr_err_var_csi_history = curr_err_var_csi_history[:, :, :, :, :, tx_ant_idx, ...]
-            tmp = np.asarray(twomode_predictor.predict(curr_h_freq_csi_history, err_var_csi_history))
+            tmp = np.asarray(twomode_predictor.predict(curr_h_freq_csi_history, curr_err_var_csi_history))
             h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
 
     return h_freq_csi
