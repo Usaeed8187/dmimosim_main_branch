@@ -84,7 +84,7 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'high_mobility'
+mobility = 'higher_mobility'
 drop_idx = '1'
 rx_ues_arr = [4]
 num_txue_sel = 4
@@ -98,14 +98,14 @@ csi_prediction = True
 channel_prediction_setting = "two_mode" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
 channel_prediction_method = "two_mode" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
 history_len = 8
-window_length = 2
+window_length = 5
 num_neurons = 16
 csi_quantization_on = True
 rl_train_end_drop = 45
 rl_checkpoint = None
 rl_evaluation_only = True
-state_dim_left = 8
-state_dim_right = 8
+state_dim_left = 2
+state_dim_right = 2
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)

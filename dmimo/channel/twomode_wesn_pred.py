@@ -16,7 +16,7 @@ class twomode_wesn_pred:
                 num_rx_ant,
                 num_tx_ant, 
                 readout_solve_method="vectorization_trick",
-                windowing_mode='block_diag',
+                windowing_mode='col_concat',
                 state_dim_setting='from_config',
                 type=np.complex64):
         
@@ -98,12 +98,17 @@ class twomode_wesn_pred:
         self.W_in_left = 2 * (self.RS.rand(self.d_left, self.N_in_left) - 0.5) # TODO: check if I should make this complex later
         self.W_in_right = 2 * (self.RS.rand(self.N_in_right, self.d_right) - 0.5) # TODO: check if I should make this complex later
 
-        self.feature_dim = int(self.d_left * self.d_right * (self.window_length + 1))
+        self.state_feature_dim = int(self.d_left * self.d_right)
+        self.input_feature_dim = int(self.N_in_left * self.N_in_right)
+        self.feature_dim = int(self.state_feature_dim + self.input_feature_dim)
+        self.feature_left_dim = int(self.d_left + self.N_in_left)
+        self.feature_right_dim = int(self.d_right + self.N_in_right)
+
         # vectorization readout (legacy/default path)
         self.W_out = self.RS.randn(self.N_r * self.N_t, self.feature_dim).astype(self.dtype)
         # bilinear readout (ALS path)
-        self.W_out_left = self.RS.randn(self.N_r, self.d_left).astype(self.dtype)
-        self.W_out_right = self.RS.randn(self.d_right + self.N_in_right, self.N_t).astype(self.dtype)
+        self.W_out_left = self.RS.randn(self.N_r, self.feature_left_dim).astype(self.dtype)
+        self.W_out_right = self.RS.randn(self.feature_right_dim, self.N_t).astype(self.dtype)
 
         self.S_0 = np.zeros([self.d_left, self.d_right], dtype=self.dtype)
         self.W_res_kron = None
@@ -275,11 +280,9 @@ class twomode_wesn_pred:
         S_3D = np.concatenate([S_3D_transit, Y_3D_new], axis=-1)
 
         # vectorization trick. equivalent to having two W_out matrices on either side of the feature matrix being fed to the output
-        T = S_3D.shape[0]
-        S = np.column_stack([
-            S_3D[t].reshape(-1, order='C') for t in range(T)
-        ])  # (feature_dim, T)
-
+        S = self._flatten_features(S_3D_transit[:, None, :, :], Y_3D_new[:, None, :, :])
+        T = Y_target_3D.shape[0]
+        
         Y = np.column_stack([
             Y_target_3D[t].reshape(-1, order='C') for t in range(T)
         ])
@@ -405,18 +408,38 @@ class twomode_wesn_pred:
         return S_4D
 
     def _flatten_features(self, S_4D, Y_4D):
-        S_aug_4D = np.concatenate([S_4D, Y_4D], axis=-1)
-        T, B = S_aug_4D.shape[:2]
-        return S_aug_4D.reshape(T * B, -1).T
+        T, B = S_4D.shape[:2]
+        S_flat = S_4D.reshape(T * B, self.state_feature_dim)
+        Y_flat = Y_4D.reshape(T * B, self.input_feature_dim)
+        return np.concatenate([S_flat, Y_flat], axis=1).T
     
     def _flatten_targets(self, Y_4D):
         T, B = Y_4D.shape[:2]
         return Y_4D.reshape(T * B, -1).T
 
     def _feature_matrices_from_flat(self, S_flat):
-        # S_flat: [feature_dim, N_samples] -> X: [N_samples, d_left, d_right + N_in_right]
+        # S_flat: [feature_dim, N_samples] -> X: [N_samples, d_left+N_in_left, d_right+N_in_right]
         S_samples = np.asarray(S_flat).T
-        return S_samples.reshape(-1, self.d_left, self.d_right + self.N_in_right)
+        state_samples = S_samples[:, :self.state_feature_dim].reshape(-1, self.d_left, self.d_right)
+        input_samples = S_samples[:, self.state_feature_dim:].reshape(-1, self.N_in_left, self.N_in_right)
+        return self._compose_feature_matrices(state_samples, input_samples)
+
+    def _compose_feature_matrices(self, state_samples, input_samples):
+        n_samples = state_samples.shape[0]
+        X = np.zeros(
+            (n_samples, self.feature_left_dim, self.feature_right_dim),
+            dtype=self.dtype,
+        )
+        X[:, :self.d_left, :self.d_right] = state_samples
+        X[:, self.d_left:, self.d_right:] = input_samples
+        return X
+
+    def _feature_matrices_from_state_input(self, S_4D, Y_4D):
+        T, B = S_4D.shape[:2]
+        state_samples = S_4D.reshape(T * B, self.d_left, self.d_right)
+        input_samples = Y_4D.reshape(T * B, self.N_in_left, self.N_in_right)
+        return self._compose_feature_matrices(state_samples, input_samples)
+
 
     def _target_matrices_from_flat(self, Y_flat):
         # Y_flat: [N_r*N_t, N_samples] -> Y: [N_samples, N_r, N_t]
@@ -429,7 +452,7 @@ class twomode_wesn_pred:
         return (Y_cat @ X_cat.conj().T) @ np.linalg.pinv(XXH)
 
     def solve_readout_als(self, X_samples, Y_samples, max_iters=25, tol=1e-5):
-        # X_samples: [N, d_left, d_right + N_in_right], Y_samples: [N, N_r, N_t]
+        # X_samples: [N, feature_left_dim, feature_right_dim], Y_samples: [N, N_r, N_t]
         W_left = self.W_out_left.copy()
         W_right = self.W_out_right.copy()
 
@@ -469,7 +492,7 @@ class twomode_wesn_pred:
 
         T, B = Y_4D.shape[0], Y_4D.shape[1]
         if self.readout_solve_method == "ALS":
-            X_samples = np.concatenate([S_4D, Y_4D], axis=-1).reshape(T * B, self.d_left, self.d_right + self.N_in_right)
+            X_samples = self._feature_matrices_from_state_input(S_4D, Y_4D)
             Y_hat = np.array(
                 [self.W_out_left @ X_samples[i] @ self.W_out_right for i in range(T * B)],
                 dtype=self.dtype,
