@@ -16,7 +16,8 @@ class twomode_wesn_pred:
                 num_rx_ant,
                 num_tx_ant, 
                 readout_solve_method="vectorization_trick",
-                windowing_mode='col_concat',
+                windowing_mode='block_diag',
+                state_dim_setting='from_config',
                 type=np.complex64):
         
         self.rc_config = rc_config
@@ -37,15 +38,22 @@ class twomode_wesn_pred:
         self.kalman_weight_ar_order = rc_config.window_length
         self.kalman_gain_iters = int(getattr(rc_config, "kalman_gain_iters", 100))
         self.kalman_eps = float(getattr(rc_config, "kalman_eps", 1e-8))
-        self.windowing_mode = windowing_mode # "col_concat", "block_diag"
         self.readout_solve_method = readout_solve_method # "vectorization_trick", "ALS"
         self.kalman_project_to_bilinear = bool(
             getattr(rc_config, "kalman_project_to_bilinear", self.readout_solve_method == "ALS")
         )
+
+        self.windowing_mode = windowing_mode # "col_concat", "block_diag"
         if self.windowing_mode not in ("col_concat", "block_diag"):
             raise ValueError(
                 f"Unsupported windowing_mode='{self.windowing_mode}'. "
                 "Use 'col_concat' or 'block_diag'."
+            )
+        self.state_dim_setting = state_dim_setting
+        if self.state_dim_setting not in ("from_data", "from_config"):
+            raise ValueError(
+                f"Unsupported state_dim_setting='{self.state_dim_setting}'. "
+                "Use 'from_data' or 'from_config'."
             )
 
         seed = 10
@@ -62,13 +70,23 @@ class twomode_wesn_pred:
             self.N_in_left = self.N_r
             self.N_in_right = self.N_t
 
-        self.d_left = self.N_in_left # TODO: currently just basing on the size of the input. try other configurations
-        self.d_right = self.N_in_right
-
-        if self.d_left is None:
-            self.d_left = self.N_r
-        if self.d_right is None:
-            self.d_right = self.N_t        
+        if self.state_dim_setting == "from_data":
+            self.d_left = self.N_in_left
+            self.d_right = self.N_in_right
+        else:
+            self.d_left = getattr(rc_config, "state_dim_left", None)
+            self.d_right = getattr(rc_config, "state_dim_right", None)
+            if self.d_left is None or self.d_right is None:
+                raise ValueError(
+                    "state_dim_setting='from_config' requires both "
+                    "rc_config.state_dim_left and rc_config.state_dim_right."
+                )
+            self.d_left = int(self.d_left)
+            self.d_right = int(self.d_right)
+            if self.d_left <= 0 or self.d_right <= 0:
+                raise ValueError(
+                    "state_dim_left and state_dim_right must be positive integers."
+                )
 
         self.init_weights()
 

@@ -26,6 +26,8 @@ class RCConfig(Config):
         self._enable_kalman_weight_config = False
         self._kalman_gain_iters = 100
         self._kalman_eps = 1e-8
+        self._state_dim_left = None
+        self._state_dim_right = None
 
         super().__init__(**kwargs)
 
@@ -180,3 +182,27 @@ class RCConfig(Config):
     @kalman_eps.setter
     def kalman_eps(self, val):
         self._kalman_eps = val
+
+    @property
+    def state_dim_setting(self):
+        return self._state_dim_setting
+
+    @state_dim_setting.setter
+    def state_dim_setting(self, val):
+        self._state_dim_setting = val
+
+    @property
+    def state_dim_left(self):
+        return self._state_dim_left
+
+    @state_dim_left.setter
+    def state_dim_left(self, val):
+        self._state_dim_left = val
+
+    @property
+    def state_dim_right(self):
+        return self._state_dim_right
+
+    @state_dim_right.setter
+    def state_dim_right(self, val):
+        self._state_dim_right = val

@@ -104,6 +104,8 @@ csi_quantization_on = True
 rl_train_end_drop = 45
 rl_checkpoint = None
 rl_evaluation_only = True
+state_dim_left = 8
+state_dim_right = 8
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -241,6 +243,8 @@ def run_simulation():
     rc_config.window_length = window_length
     rc_config.num_neurons = num_neurons
     rc_config.history_len = history_len
+    rc_config.state_dim_left = state_dim_left
+    rc_config.state_dim_right = state_dim_right
     if channel_prediction_setting == "two_mode_kalman_config":
         rc_config.enable_kalman_weight_config = True
     else:
