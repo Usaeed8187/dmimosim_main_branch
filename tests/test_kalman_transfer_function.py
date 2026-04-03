@@ -225,17 +225,17 @@ def main():
     # 3) Generate data
     # ------------------------------------------------------------------
     T = 300
-    x, y, w, n = generate_state_space_data(T=T+1, F=F, Q=Q, R=R, seed=123)
+    x, y, w, n = generate_state_space_data(T=T, F=F, Q=Q, R=R, seed=123)
 
     # ------------------------------------------------------------------
     # 4) Run the steady-state predictor recursion
     # ------------------------------------------------------------------
-    xhat_pred = run_steady_state_predictor(y[:-1,:], F, K)
+    xhat_pred = run_steady_state_predictor(y, F, K)
 
-    xhat_pred_T_plus_1 = xhat_pred[-1, :]
-    x_T_plus_1 = x[-1, :]
+    xhat_pred_T = xhat_pred[-1, :]   # predicts x[-2]
+    x_T = x[-2, :]
 
-    pred_nmse = np.mean(np.abs(xhat_pred_T_plus_1 - x_T_plus_1)**2) / np.mean(np.abs(x_T_plus_1)**2)
+    pred_nmse = np.mean(np.abs(xhat_pred_T - x_T)**2) / np.mean(np.abs(x_T)**2)
     print("Prediction NMSE Using Steady State Predictor: ", pred_nmse)
 
     # ------------------------------------------------------------------
