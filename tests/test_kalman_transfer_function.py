@@ -233,7 +233,10 @@ def main():
     xhat_pred = run_steady_state_predictor(y[:-1,:], F, K)
 
     xhat_pred_T_plus_1 = xhat_pred[-1, :]
-    x_T_plus_1 = xhat_pred[-1, :]
+    x_T_plus_1 = x[-1, :]
+
+    pred_nmse = np.mean(np.abs(xhat_pred_T_plus_1 - x_T_plus_1)**2) / np.mean(np.abs(x_T_plus_1)**2)
+    print("Prediction NMSE Using Steady State Predictor: ", pred_nmse)
 
     # ------------------------------------------------------------------
     # 5) Analytical transfer response
