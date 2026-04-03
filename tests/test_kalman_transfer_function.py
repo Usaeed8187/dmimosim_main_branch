@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 
-def solve_discrete_riccati_steady_state(F, Q, R, max_iter=10000, tol=1e-12):
+def solve_discrete_riccati_steady_state(F, Q, R, max_iter=100, tol=1e-12):
     """
     Solve for the steady-state predicted error covariance P_minus
     for the model
@@ -35,6 +35,7 @@ def solve_discrete_riccati_steady_state(F, Q, R, max_iter=10000, tol=1e-12):
 
         err = np.linalg.norm(P_minus_next - P_minus, ord='fro')
         P_minus = P_minus_next
+        # print("err = ", err)
         if err < tol:
             break
 
@@ -210,26 +211,29 @@ def main():
     # ------------------------------------------------------------------
     P_minus, K = solve_discrete_riccati_steady_state(F, Q, R)
 
-    print("\nSteady-state predicted covariance P_minus:\n", P_minus)
-    print("\nSteady-state Kalman gain K:\n", K)
+    # print("\nSteady-state predicted covariance P_minus:\n", P_minus)
+    # print("\nSteady-state Kalman gain K:\n", K)
 
     # Predictor matrices
     A_p = F - F @ K
     B_p = F @ K
 
-    print("\nA_p = F - F K:\n", A_p)
-    print("\nB_p = F K:\n", B_p)
+    # print("\nA_p = F - F K:\n", A_p)
+    # print("\nB_p = F K:\n", B_p)
 
     # ------------------------------------------------------------------
     # 3) Generate data
     # ------------------------------------------------------------------
     T = 300
-    x, y, w, n = generate_state_space_data(T=T, F=F, Q=Q, R=R, seed=123)
+    x, y, w, n = generate_state_space_data(T=T+1, F=F, Q=Q, R=R, seed=123)
 
     # ------------------------------------------------------------------
     # 4) Run the steady-state predictor recursion
     # ------------------------------------------------------------------
-    xhat_pred = run_steady_state_predictor(y, F, K)
+    xhat_pred = run_steady_state_predictor(y[:-1,:], F, K)
+
+    xhat_pred_T_plus_1 = xhat_pred[-1, :]
+    x_T_plus_1 = xhat_pred[-1, :]
 
     # ------------------------------------------------------------------
     # 5) Analytical transfer response
