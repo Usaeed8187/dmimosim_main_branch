@@ -59,7 +59,7 @@ def run_steady_state_predictor(y_hist, F, K):
     return xhat_pred
 
 
-def one_step_last_sample_mc_nmse(F, Q, R, T=40, num_mc=5000, seed=0):
+def one_step_last_sample_mc_nmse(F, Q, R, T=10, num_mc=2000, seed=0):
     _, K = solve_discrete_riccati_steady_state(F, Q, R)
 
     rng = np.random.default_rng(seed)
@@ -90,7 +90,8 @@ def one_step_last_sample_mc_nmse(F, Q, R, T=40, num_mc=5000, seed=0):
 
     return nmse_stable, mean_mse_per_run, mean_target_power_per_run
 
-def sweep_fixed_Q_vary_R(F, Q_fixed, R_vars, T=40, num_mc=5000, seed=100):
+
+def sweep_fixed_Q_vary_R(F, Q_fixed, R_vars, T=10, num_mc=2000, seed=100):
     nmse_vals = []
     mse_vals = []
     xpow_vals = []
@@ -111,7 +112,7 @@ def sweep_fixed_Q_vary_R(F, Q_fixed, R_vars, T=40, num_mc=5000, seed=100):
     return np.array(nmse_vals), np.array(mse_vals), np.array(xpow_vals)
 
 
-def sweep_fixed_R_vary_Q(F, R_fixed, Q_vars, T=40, num_mc=5000, seed=200):
+def sweep_fixed_R_vary_Q(F, R_fixed, Q_vars, T=10, num_mc=2000, seed=200):
     nmse_vals = []
     mse_vals = []
     xpow_vals = []
@@ -131,6 +132,7 @@ def sweep_fixed_R_vary_Q(F, R_fixed, Q_vars, T=40, num_mc=5000, seed=200):
 
     return np.array(nmse_vals), np.array(mse_vals), np.array(xpow_vals)
 
+
 def main():
     F = np.array([
         [0.8, 0.6],
@@ -144,35 +146,56 @@ def main():
     if np.max(np.abs(eigvals)) >= 1.0:
         raise ValueError('F must be stable.')
 
-    Q_fixed = np.array([
-        [0.03, 0.01],
-        [0.01, 0.02],
+    # Balanced fixed values:
+    # - for the R sweep, use a low diagonal Q
+    # - for the Q sweep, use a low diagonal R
+    # This avoids one covariance being much larger than the other across most
+    # of the sweep range.
+    Q_fixed_for_R_sweep = np.array([
+        [0.0001, 0.0],
+        [0.0, 0.0001],
     ], dtype=float)
 
-    R_fixed = np.array([
-        [0.08, 0.02],
-        [0.02, 0.07],
+    R_fixed_for_Q_sweep = np.array([
+        [0.0001, 0.0],
+        [0.0, 0.0001],
     ], dtype=float)
 
-    T = 10
+    T = 8
     num_mc = 2000
 
     R_vars = np.logspace(-4, -0.5, 10)
     Q_vars = np.logspace(-4, -0.5, 10)
 
+    print('\nUsing fixed Q for R sweep:')
+    print(Q_fixed_for_R_sweep)
+
+    print('\nUsing fixed R for Q sweep:')
+    print(R_fixed_for_Q_sweep)
+
     nmse_vs_R, mse_vs_R, xpow_vs_R = sweep_fixed_Q_vary_R(
-        F=F, Q_fixed=Q_fixed, R_vars=R_vars, T=T, num_mc=num_mc, seed=100
+        F=F,
+        Q_fixed=Q_fixed_for_R_sweep,
+        R_vars=R_vars,
+        T=T,
+        num_mc=num_mc,
+        seed=100
     )
 
     nmse_vs_Q, mse_vs_Q, xpow_vs_Q = sweep_fixed_R_vary_Q(
-        F=F, R_fixed=R_fixed, Q_vars=Q_vars, T=T, num_mc=num_mc, seed=200
+        F=F,
+        R_fixed=R_fixed_for_Q_sweep,
+        Q_vars=Q_vars,
+        T=T,
+        num_mc=num_mc,
+        seed=200
     )
 
     np.savez(
-        'kalman_nmse_sweep_stable_metric_results.npz',
+        'kalman_nmse_balanced_sweeps_results.npz',
         F=F,
-        Q_fixed=Q_fixed,
-        R_fixed=R_fixed,
+        Q_fixed_for_R_sweep=Q_fixed_for_R_sweep,
+        R_fixed_for_Q_sweep=R_fixed_for_Q_sweep,
         T=T,
         num_mc=num_mc,
         R_vars=R_vars,
@@ -182,7 +205,7 @@ def main():
         xpow_vs_R=xpow_vs_R,
         nmse_vs_Q=nmse_vs_Q,
         mse_vs_Q=mse_vs_Q,
-        xpow_vs_Q=xpow_vs_Q,
+        xpow_vs_Q=xpow_vs_Q
     )
 
     plt.figure(figsize=(7, 5))
@@ -192,7 +215,7 @@ def main():
     plt.title('Fixed Q, vary R')
     plt.grid(True, which='both', alpha=0.3)
     plt.tight_layout()
-    plt.savefig('nmse_vs_R_stable_metric.png', dpi=200)
+    plt.savefig('nmse_vs_R.png', dpi=200)
 
     plt.figure(figsize=(7, 5))
     plt.semilogx(Q_vars, nmse_vs_Q, marker='o')
@@ -201,8 +224,7 @@ def main():
     plt.title('Fixed R, vary Q')
     plt.grid(True, which='both', alpha=0.3)
     plt.tight_layout()
-    plt.savefig('nmse_vs_Q_stable_metric.png', dpi=200)
-
+    plt.savefig('nmse_vs_Q.png', dpi=200)
 
     plt.show()
 
