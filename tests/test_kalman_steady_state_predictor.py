@@ -90,20 +90,6 @@ def one_step_last_sample_mc_nmse(F, Q, R, T=40, num_mc=5000, seed=0):
 
     return nmse_stable, mean_mse_per_run, mean_target_power_per_run
 
-
-def make_corr_cov(var, rho):
-    C = np.array([[1.0, rho],
-                  [rho, 1.0]], dtype=float)
-    return var * C
-
-
-def random_spd_with_trace(trace_target, rng, eps=1e-6):
-    A = rng.standard_normal((2, 2))
-    M = A @ A.T + eps * np.eye(2)
-    M *= trace_target / np.trace(M)
-    return M
-
-
 def sweep_fixed_Q_vary_R(F, Q_fixed, R_vars, T=40, num_mc=5000, seed=100):
     nmse_vals = []
     mse_vals = []
@@ -173,7 +159,6 @@ def main():
 
     R_vars = np.logspace(-4, -0.5, 10)
     Q_vars = np.logspace(-4, -0.5, 10)
-    rho_grid = np.linspace(-0.9, 0.9, 13)
 
     nmse_vs_R, mse_vs_R, xpow_vs_R = sweep_fixed_Q_vary_R(
         F=F, Q_fixed=Q_fixed, R_vars=R_vars, T=T, num_mc=num_mc, seed=100
@@ -192,7 +177,6 @@ def main():
         num_mc=num_mc,
         R_vars=R_vars,
         Q_vars=Q_vars,
-        rho_grid=rho_grid,
         nmse_vs_R=nmse_vs_R,
         mse_vs_R=mse_vs_R,
         xpow_vs_R=xpow_vs_R,
