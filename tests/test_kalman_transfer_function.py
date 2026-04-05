@@ -102,12 +102,7 @@ def run_steady_state_predictor(y, F, K):
     s_prev = np.zeros(d)  # this is xhat_{t-1|t-2}
 
     for t in range(T):
-        if t == 0:
-            # no y_{-1}; keep zero initialization
-            s_t = A_p @ s_prev
-        else:
-            s_t = A_p @ s_prev + B_p @ y[t]
-
+        s_t = A_p @ s_prev + B_p @ y[t]
         xhat_pred[t] = s_t
         s_prev = s_t
 
@@ -224,7 +219,7 @@ def main():
     # ------------------------------------------------------------------
     # 3) Generate data
     # ------------------------------------------------------------------
-    T = 300
+    T = 10
     x, y, w, n = generate_state_space_data(T=T+1, F=F, Q=Q, R=R, seed=123)
 
     # ------------------------------------------------------------------
@@ -237,6 +232,9 @@ def main():
 
     pred_nmse = np.mean(np.abs(xhat_pred_T_plus_1 - x_T_plus_1)**2) / np.mean(np.abs(x_T_plus_1)**2)
     print("Prediction NMSE Using Steady State Predictor: ", pred_nmse)
+
+    pred_nmse_avg = np.mean(np.abs(x[1:] - xhat_pred)**2) / np.mean(np.abs(x[1:])**2)
+    print("Average Prediction NMSE Using Steady State Predictor: ", pred_nmse_avg)
 
     # ------------------------------------------------------------------
     # 5) Analytical transfer response
