@@ -285,8 +285,8 @@ def main():
         [0.0, 0.0001],
     ], dtype=float)
 
-    T = 8
-    num_mc = 2000
+    T = 20
+    num_mc = 100
 
     R_vars = np.logspace(-4, -0.5, 10)
     Q_vars = np.logspace(-4, -0.5, 10)
@@ -368,6 +368,7 @@ def main():
     plt.grid(True, which='both', alpha=0.3)
     plt.legend()
     plt.tight_layout()
+    plt.ylim(0.0, 1.0)
     plt.savefig('nmse_vs_R.png', dpi=200)
 
     plt.figure(figsize=(7, 5))
@@ -380,6 +381,7 @@ def main():
     plt.grid(True, which='both', alpha=0.3)
     plt.legend()
     plt.tight_layout()
+    plt.ylim(0.0, 1.0)
     plt.savefig('nmse_vs_Q.png', dpi=200)
 
     plt.show()
