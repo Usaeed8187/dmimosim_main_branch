@@ -388,6 +388,7 @@ def sweep_fixed_Q_vary_R(F_true, Q_fixed, R_vars, T=10, num_mc=2000, seed=100,
     mse_full_kf_est_vals = []
 
     xpow_vals = []
+    snr_db_vals = []
     F_est_list = []
 
     for i, rvar in enumerate(R_vars):
@@ -415,8 +416,17 @@ def sweep_fixed_Q_vary_R(F_true, Q_fixed, R_vars, T=10, num_mc=2000, seed=100,
             F_true=F_true, Q=Q_fixed, R=R, T=T, num_mc=num_mc, seed=seed + i, F_model=F_hat
         )
 
+        # SNR = E[||x_t||^2] / E[||n_t||^2]
+        # Here E[||x_t||^2] is estimated by mean_target_power_per_run,
+        # and E[||n_t||^2] = trace(R) since y_t = x_t + n_t.
+        signal_power = results_perfect['mean_target_power_per_run']
+        noise_power = np.trace(R)
+        snr_linear = signal_power / max(noise_power, 1e-15)
+        snr_db = 10.0 * np.log10(max(snr_linear, 1e-15))
+
         print(
-            f'[fixed Q, vary R] R_var={rvar:.4e} '
+            f'[fixed Q, vary R] R_var={rvar:.4e}, '
+            f'SNR={snr_db:.2f} dB '
             f'-> perfect ss={results_perfect["nmse_ss"]:.6f}, '
             f'est ss={results_est["nmse_ss"]:.6f}, '
             f'prev-obs={results_perfect["nmse_prev_obs"]:.6f}, '
@@ -436,7 +446,8 @@ def sweep_fixed_Q_vary_R(F_true, Q_fixed, R_vars, T=10, num_mc=2000, seed=100,
         mse_full_kf_perfect_vals.append(results_perfect['mean_mse_per_run_full_kf'])
         mse_full_kf_est_vals.append(results_est['mean_mse_per_run_full_kf'])
 
-        xpow_vals.append(results_perfect['mean_target_power_per_run'])
+        xpow_vals.append(signal_power)
+        snr_db_vals.append(snr_db)
 
     return (
         np.array(nmse_ss_perfect_vals),
@@ -450,6 +461,7 @@ def sweep_fixed_Q_vary_R(F_true, Q_fixed, R_vars, T=10, num_mc=2000, seed=100,
         np.array(mse_full_kf_perfect_vals),
         np.array(mse_full_kf_est_vals),
         np.array(xpow_vals),
+        np.array(snr_db_vals),
         np.array(F_est_list),
     )
 
@@ -588,6 +600,7 @@ def main():
         mse_full_kf_vs_R_perfect,
         mse_full_kf_vs_R_est,
         xpow_vs_R,
+        snr_db_vs_R,
         F_est_vs_R,
     ) = sweep_fixed_Q_vary_R(
         F_true=F,
@@ -650,6 +663,7 @@ def main():
         mse_full_kf_vs_R_perfect=mse_full_kf_vs_R_perfect,
         mse_full_kf_vs_R_est=mse_full_kf_vs_R_est,
         xpow_vs_R=xpow_vs_R,
+        snr_db_vs_R=snr_db_vs_R,
         F_est_vs_R=F_est_vs_R,
 
         nmse_ss_vs_Q_perfect=nmse_ss_vs_Q_perfect,
