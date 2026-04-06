@@ -269,9 +269,6 @@ def estimate_F_from_y_em(y, Q, R, F_init=None, max_em_iters=50, tol=1e-6, verbos
         F = project_to_stable_matrix(F, max_radius=0.99)
 
         delta = np.linalg.norm(F - F_old, ord='fro')
-        if verbose:
-            eigvals = np.linalg.eigvals(F)
-            print(f'  EM iter {it + 1:02d}: ||ΔF||_F = {delta:.6e}, max|eig(F)| = {np.max(np.abs(eigvals)):.6f}')
 
         if delta < tol:
             break
@@ -426,9 +423,6 @@ def sweep_fixed_Q_vary_R(F_true, Q_fixed, R_vars, T=10, num_mc=2000, seed=100,
             f'perfect full-KF={results_perfect["nmse_full_kf"]:.6f}, '
             f'est full-KF={results_est["nmse_full_kf"]:.6f}'
         )
-        print('Estimated F for this R:')
-        print(F_hat)
-        print('Max |eig(F_hat)| =', np.max(np.abs(np.linalg.eigvals(F_hat))))
 
         nmse_ss_perfect_vals.append(results_perfect['nmse_ss'])
         nmse_ss_est_vals.append(results_est['nmse_ss'])
@@ -510,9 +504,6 @@ def sweep_fixed_R_vary_Q(F_true, R_fixed, Q_vars, T=10, num_mc=2000, seed=200,
             f'perfect full-KF={results_perfect["nmse_full_kf"]:.6f}, '
             f'est full-KF={results_est["nmse_full_kf"]:.6f}'
         )
-        print('Estimated F for this Q:')
-        print(F_hat)
-        print('Max |eig(F_hat)| =', np.max(np.abs(np.linalg.eigvals(F_hat))))
 
         nmse_ss_perfect_vals.append(results_perfect['nmse_ss'])
         nmse_ss_est_vals.append(results_est['nmse_ss'])
@@ -551,10 +542,6 @@ def main():
     ], dtype=float)
 
     eigvals = np.linalg.eigvals(F)
-    print('True F:')
-    print(F)
-    print('Eigenvalues of true F:', eigvals)
-    print('Max |eig(true F)|:', np.max(np.abs(eigvals)))
 
     if np.max(np.abs(eigvals)) >= 1.0:
         raise ValueError('F must be stable.')
@@ -576,7 +563,7 @@ def main():
     num_mc = 100
 
     # Separate training-sequence length used to estimate F via EM
-    T_train = 1500
+    T_train = 20
     em_max_iters = 50
     em_tol = 1e-6
 
