@@ -54,7 +54,7 @@ class RLConfig:
     lr_sigma: float = 2e-4
     lr_alpha: float = 5e-3
     leakage_penalty_weight: float = 0.10
-    batch_size: int = 100
+    batch_size: int = 50
     reward_ema_beta: float = 0.98
     advantage_clip: float = 5.0
     advantage_eps: float = 1e-6
@@ -229,7 +229,7 @@ def run_hybrid_rl(
     # Trainable readout parameters.
     w_mu = 0.05 * complex_gaussian((action_dim, nz), rng)
     u_sigma = 0.01 * rng.standard_normal((action_dim, 2 * nz))
-    alpha = 0.5  # starts with moderate DK reuse and can adapt
+    alpha = 1  # starts with moderate DK reuse and can adapt
 
     z_state = np.zeros(nz, dtype=np.complex128)
 
