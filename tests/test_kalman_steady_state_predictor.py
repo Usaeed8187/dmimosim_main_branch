@@ -680,14 +680,20 @@ def main():
         F_est_vs_Q=F_est_vs_Q
     )
 
-    # Plot: fixed Q, vary R
+    # Plot: fixed Q, vary R (shown versus SNR in ascending order)
+    snr_sort_idx = np.argsort(snr_db_vs_R)
+    snr_db_vs_R_sorted = snr_db_vs_R[snr_sort_idx]
+    nmse_ss_vs_R_perfect_sorted = nmse_ss_vs_R_perfect[snr_sort_idx]
+    nmse_prev_obs_vs_R_sorted = nmse_prev_obs_vs_R[snr_sort_idx]
+    nmse_full_kf_vs_R_perfect_sorted = nmse_full_kf_vs_R_perfect[snr_sort_idx]
+
     plt.figure(figsize=(8, 5.5))
-    plt.semilogx(R_vars, nmse_ss_vs_R_perfect, marker='o', label='Steady-state KF (perfect F)')
-    # plt.semilogx(R_vars, nmse_ss_vs_R_est, marker='o', linestyle='--', label='Steady-state KF (estimated F)')
-    plt.semilogx(R_vars, nmse_prev_obs_vs_R, marker='s', label='Previous observation baseline')
-    plt.semilogx(R_vars, nmse_full_kf_vs_R_perfect, marker='^', label='Full KF (perfect F)')
-    # plt.semilogx(R_vars, nmse_full_kf_vs_R_est, marker='^', linestyle='--', label='Full KF (estimated F)')
-    plt.xlabel('Observation-noise variance scale')
+    plt.plot(snr_db_vs_R_sorted, nmse_ss_vs_R_perfect_sorted, marker='o', label='Steady-state KF (perfect F)')
+    # plt.plot(snr_db_vs_R_sorted, nmse_ss_vs_R_est[snr_sort_idx], marker='o', linestyle='--', label='Steady-state KF (estimated F)')
+    plt.plot(snr_db_vs_R_sorted, nmse_prev_obs_vs_R_sorted, marker='s', label='Previous observation baseline')
+    plt.plot(snr_db_vs_R_sorted, nmse_full_kf_vs_R_perfect_sorted, marker='^', label='Full KF (perfect F)')
+    # plt.plot(snr_db_vs_R_sorted, nmse_full_kf_vs_R_est[snr_sort_idx], marker='^', linestyle='--', label='Full KF (estimated F)')
+    plt.xlabel('SNR (dB)')
     plt.ylabel('One-step last-sample NMSE')
     plt.title(f'Fixed Q, vary R   (EM-based F estimation, T_train={T_train})')
     plt.grid(True, which='both', alpha=0.3)

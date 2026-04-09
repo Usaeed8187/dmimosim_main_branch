@@ -256,7 +256,7 @@ def run_hybrid_rl(
     zf_baseline: dict[str, np.ndarray],
     rng: np.random.Generator,
 ) -> dict[str, np.ndarray]:
-    """Online hybrid policy-gradient training with DK Gaussian branch."""
+    """No-learning policy: sample from DK-derived Gaussian statistics only."""
     if cfg.streams_per_user != 1:
         raise ValueError("This simple RL example supports streams_per_user=1 only.")
 
@@ -264,66 +264,37 @@ def run_hybrid_rl(
     num_streams = cfg.num_users * cfg.streams_per_user
 
     # State/action dimensions.
-    pmi_dim = zf_baseline["pmi_features"].shape[1]
     action_dim = cfg.num_tx_antennas * num_streams
-    nz = rl_cfg.reservoir_size
-
-    # Fixed ESN reservoir.
-    win = rl_cfg.input_scale * complex_gaussian((nz, pmi_dim), rng)
-    wres = complex_gaussian((nz, nz), rng)
-    eigvals = np.linalg.eigvals(wres)
-    wres = (rl_cfg.spectral_radius / max(np.max(np.abs(eigvals)), 1e-12)) * wres
-
-    # Trainable readout parameters.
-    w_mu = 0.05 * complex_gaussian((action_dim, nz), rng)
-    alpha = 1  # starts with moderate DK reuse and can adapt
-
-    z_state = np.zeros(nz, dtype=np.complex128)
 
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     reward_trace = np.zeros(cfg.num_slots, dtype=np.float64)
-    p_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    p_trace = np.ones(cfg.num_slots, dtype=np.float64)
     leak_trace = np.zeros(cfg.num_slots, dtype=np.float64)
 
-    dk_var = rl_cfg.sigma_dk2 * np.ones(action_dim, dtype=np.float64)
     zf_buffer = deque(maxlen=max(int(rl_cfg.zf_cov_buffer_size), 2))
-    batch_size = max(int(rl_cfg.batch_size), 1)
-
-    batch_grad_w_mu = np.zeros_like(w_mu)
-    batch_grad_alpha = 0.0
-    batch_count = 0
 
     for t in range(cfg.num_slots):
 
         print("RL Slot {} / {}".format(t + 1, cfg.num_slots), end="\r")
 
-        # ----- State = PMI feedback -----
-        y = zf_baseline["pmi_features"][t]
-        z_state = split_tanh(win @ y + wres @ z_state)
-
-        # DK branch centered at ZF precoder of this slot.
+        # Domain-knowledge statistics from the running ZF buffer.
         dk_mu = zf_baseline["precoders"][t].reshape(-1)
         zf_buffer.append(dk_mu.copy())
-        zf_cov = estimate_empirical_complex_cov(
+        dk_cov = estimate_empirical_complex_cov(
             np.asarray(zf_buffer),
             shrinkage=rl_cfg.zf_cov_shrinkage,
             jitter=rl_cfg.cov_jitter,
         )
 
-        # Learned Gaussian policy parameters.
-        mu = w_mu @ z_state
-        learned_cov = zf_cov + rl_cfg.sigma_eps * np.eye(action_dim, dtype=np.complex128)
+        # "Learned" policy is set directly from DK statistics (no learning).
+        # Mean comes from DK policy; covariance also comes from DK policy.
+        mu = dk_mu
+        learned_cov = dk_cov + rl_cfg.sigma_eps * np.eye(action_dim, dtype=np.complex128)
         learned_cov_chol = robust_cholesky(learned_cov, base_jitter=rl_cfg.cov_jitter)
+        p = 1.0
 
-        # Mixture policy parameter p.
-        p = float(sigmoid(alpha))
-        p = np.clip(p, 1e-6, 1 - 1e-6)
-
-        # Sample action from mixture of two complex Gaussians.
-        if rng.random() < p:
-            action_vec_raw = sample_complex_full_gaussian(mu, learned_cov_chol, rng)
-        else:
-            action_vec_raw = sample_complex_gaussian(dk_mu, dk_var, rng)
+        # Sample action from DK-statistics Gaussian only.
+        action_vec_raw = sample_complex_full_gaussian(mu, learned_cov_chol, rng)
 
         # Hard constraint: total transmit power normalization.
         action_precoder = action_vec_raw.reshape(cfg.num_tx_antennas, num_streams)
@@ -334,61 +305,10 @@ def run_hybrid_rl(
         leakage = compute_leakage(channels[t], action_precoder)
         reward = (rate_rl - zf_baseline["throughput"][t]) - rl_cfg.leakage_penalty_weight * leakage
 
-        # Use the normalized action for policy-gradient likelihood as well.
-        action_vec = action_precoder.reshape(-1)
-
-        # Mixture log-density terms.
-        log_pi_phi = complex_full_logpdf(action_vec, mu, learned_cov, cov_chol=learned_cov_chol)
-        log_pi_dk = complex_diag_logpdf(action_vec, dk_mu, dk_var)
-
-        log_num_phi = np.log(p) + log_pi_phi
-        log_num_dk = np.log(1 - p) + log_pi_dk
-        m = max(log_num_phi, log_num_dk)
-        log_pi_theta = m + np.log(np.exp(log_num_phi - m) + np.exp(log_num_dk - m))
-
-        # Responsibility weight w_t = p*pi_phi / pi_theta.
-        w_t = np.exp(log_num_phi - log_pi_theta)
-
-        # ----- Policy gradients from the LaTeX derivation -----
-        err = action_vec - mu
-        inv_cov_err = np.linalg.solve(learned_cov, err)
-
-        # d/dW_mu* log pi_theta = w_t * Sigma^-1 (a-mu) z^H
-        grad_w_mu_log = w_t * np.outer(inv_cov_err, np.conj(z_state))
-
-        # d/dalpha log pi_theta = p(1-p) * (pi_phi - pi_dk)/pi_theta
-        # Numerically stable equivalent:
-        # (pi_phi/pi_theta) = w_t/p, (pi_dk/pi_theta) = (1-w_t)/(1-p)
-        dlog_dp = (w_t / p) - ((1 - w_t) / (1 - p))
-        grad_alpha_log = p * (1 - p) * dlog_dp
-
-        # Reward-weighted policy-gradient contributions (advantage = reward).
-        grad_w_mu_contrib = reward * grad_w_mu_log
-        grad_alpha_contrib = reward * grad_alpha_log
-
-        batch_grad_w_mu += grad_w_mu_contrib
-        batch_grad_alpha += grad_alpha_contrib
-        batch_count += 1
-
-        # Apply averaged batch update every B slots.
-        if batch_count == batch_size:
-            scale = 1.0 / batch_count
-            w_mu += rl_cfg.lr_mu * scale * batch_grad_w_mu
-            alpha += rl_cfg.lr_alpha * scale * batch_grad_alpha
-
-            batch_grad_w_mu.fill(0.0)
-            batch_grad_alpha = 0.0
-            batch_count = 0
         throughput[t] = rate_rl
         reward_trace[t] = reward
         p_trace[t] = p
         leak_trace[t] = leakage
-
-    # Flush last partial batch.
-    if batch_count > 0:
-        scale = 1.0 / batch_count
-        w_mu += rl_cfg.lr_mu * scale * batch_grad_w_mu
-        alpha += rl_cfg.lr_alpha * scale * batch_grad_alpha
 
     return {
         "throughput": throughput,
@@ -406,10 +326,10 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
 
     # Save traces
     zf_trace = output_dir / "zf_throughput_trace.npy"
-    rl_trace = output_dir / "hybrid_rl_throughput_trace.npy"
-    reward_trace = output_dir / "hybrid_rl_reward_trace.npy"
-    learned_policy_prob_trace = output_dir / "hybrid_rl_learned_policy_probability_trace.npy"
-    domain_knowledge_prob_trace = output_dir / "hybrid_rl_domain_knowledge_probability_trace.npy"
+    rl_trace = output_dir / "dk_stats_only_throughput_trace.npy"
+    reward_trace = output_dir / "dk_stats_only_reward_trace.npy"
+    learned_policy_prob_trace = output_dir / "dk_stats_only_learned_policy_probability_trace.npy"
+    domain_knowledge_prob_trace = output_dir / "dk_stats_only_domain_knowledge_probability_trace.npy"
 
 
     np.save(zf_trace, zf_tput)
@@ -429,7 +349,7 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
     # Throughput plot
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
     ax1.plot(np.arange(1, len(zf_tput_avg) + 1), zf_tput_avg, lw=1.6, label="ZF baseline")
-    ax1.plot(np.arange(1, len(rl_tput_avg) + 1), rl_tput_avg, lw=1.6, label="Hybrid RL")
+    ax1.plot(np.arange(1, len(rl_tput_avg) + 1), rl_tput_avg, lw=1.6, label="DK-stats-only policy")
     ax1.set_title("Throughput Across Time")
     ax1.set_xlabel("Slot index")
     ax1.set_ylabel("Sum-rate [bits/s/Hz]")
@@ -437,14 +357,14 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
     ax1.legend(loc="best")
     fig1.tight_layout()
 
-    tput_plot = output_dir / "throughput_across_time_zf_vs_hybrid_rl.png"
+    tput_plot = output_dir / "throughput_across_time_zf_vs_dk_stats_only.png"
     fig1.savefig(tput_plot, dpi=150)
     plt.close(fig1)
 
     # Reward plot
     fig2, ax2 = plt.subplots(figsize=(8, 4.5))
     ax2.plot(np.arange(1, len(reward_avg) + 1), reward_avg, lw=1.6)
-    ax2.set_title("Hybrid RL Reward Across Time\n(reward = throughput gain over ZF - leakage penalty)")
+    ax2.set_title("DK-Stats-Only Reward Across Time\n(reward = throughput gain over ZF - leakage penalty)")
     ax2.set_xlabel("Slot index")
     ax2.set_ylabel("Reward")
     ax2.grid(True, alpha=0.35)
@@ -468,7 +388,7 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
         lw=1.6,
         label="Domain knowledge probability",
     )
-    ax3.set_title("Hybrid RL Branch Probabilities Across Time")
+    ax3.set_title("DK-Stats-Only Branch Probabilities Across Time")
     ax3.set_xlabel("Slot index")
     ax3.set_ylabel("Probability")
     ax3.set_ylim(0.0, 1.0)
@@ -476,7 +396,7 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
     ax3.legend(loc="best")
     fig3.tight_layout()
 
-    probability_plot = output_dir / "hybrid_rl_branch_probabilities_across_time.png"
+    probability_plot = output_dir / "dk_stats_only_branch_probabilities_across_time.png"
     fig3.savefig(probability_plot, dpi=150)
     plt.close(fig3)
 
@@ -533,8 +453,8 @@ def main() -> None:
 
     print("Simple ZF + Hybrid RL testbench finished.")
     print(f"ZF average throughput       : {zf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"Hybrid RL average throughput: {rl_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"Hybrid RL average reward    : {rl_results['reward'].mean():.4f}")
+    print(f"DK Stats Only average throughput: {rl_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"DK Stats Only average reward    : {rl_results['reward'].mean():.4f}")
     print("Saved artifacts:")
     for name, path in out.items():
         print(f"  - {name}: {path}")
