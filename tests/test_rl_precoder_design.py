@@ -54,7 +54,10 @@ class RLConfig:
     lr_sigma: float = 2e-4
     lr_alpha: float = 5e-3
     leakage_penalty_weight: float = 0.10
-
+    batch_size: int = 100
+    reward_ema_beta: float = 0.98
+    advantage_clip: float = 5.0
+    advantage_eps: float = 1e-6
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
     return (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)) / np.sqrt(2.0)
@@ -236,6 +239,12 @@ def run_hybrid_rl(
     leak_trace = np.zeros(cfg.num_slots, dtype=np.float64)
 
     dk_var = rl_cfg.sigma_dk2 * np.ones(action_dim, dtype=np.float64)
+    batch_size = max(int(rl_cfg.batch_size), 1)
+
+    batch_grad_w_mu = np.zeros_like(w_mu)
+    batch_grad_u_sigma = np.zeros_like(u_sigma)
+    batch_grad_alpha = 0.0
+    batch_count = 0
 
     for t in range(cfg.num_slots):
 
@@ -306,16 +315,38 @@ def run_hybrid_rl(
         dlog_dp = (w_t / p) - ((1 - w_t) / (1 - p))
         grad_alpha_log = p * (1 - p) * dlog_dp
 
-        # Loss L = - r * log pi_theta  => descent step on L
-        # Equivalent online ascent on r * log pi_theta:
-        w_mu += rl_cfg.lr_mu * reward * grad_w_mu_log
-        u_sigma += rl_cfg.lr_sigma * reward * grad_u_sigma_log
-        alpha += rl_cfg.lr_alpha * reward * grad_alpha_log
+        # Reward-weighted policy-gradient contributions (advantage = reward).
+        grad_w_mu_contrib = reward * grad_w_mu_log
+        grad_u_sigma_contrib = reward * grad_u_sigma_log
+        grad_alpha_contrib = reward * grad_alpha_log
 
+        batch_grad_w_mu += grad_w_mu_contrib
+        batch_grad_u_sigma += grad_u_sigma_contrib
+        batch_grad_alpha += grad_alpha_contrib
+        batch_count += 1
+
+        # Apply averaged batch update every B slots.
+        if batch_count == batch_size:
+            scale = 1.0 / batch_count
+            w_mu += rl_cfg.lr_mu * scale * batch_grad_w_mu
+            u_sigma += rl_cfg.lr_sigma * scale * batch_grad_u_sigma
+            alpha += rl_cfg.lr_alpha * scale * batch_grad_alpha
+
+            batch_grad_w_mu.fill(0.0)
+            batch_grad_u_sigma.fill(0.0)
+            batch_grad_alpha = 0.0
+            batch_count = 0
         throughput[t] = rate_rl
         reward_trace[t] = reward
         p_trace[t] = p
         leak_trace[t] = leakage
+
+    # Flush last partial batch.
+    if batch_count > 0:
+        scale = 1.0 / batch_count
+        w_mu += rl_cfg.lr_mu * scale * batch_grad_w_mu
+        u_sigma += rl_cfg.lr_sigma * scale * batch_grad_u_sigma
+        alpha += rl_cfg.lr_alpha * scale * batch_grad_alpha
 
     return {
         "throughput": throughput,
@@ -340,7 +371,7 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
     np.save(rl_trace, rl_tput)
     np.save(reward_trace, rl_results["reward"])
 
-    w_len = 100
+    w_len = 1000
     zf_tput_avg = np.convolve(zf_tput, np.ones(w_len) / w_len, mode='valid')
     rl_tput_avg = np.convolve(rl_tput, np.ones(w_len) / w_len, mode='valid')
     reward_avg = np.convolve(rl_results["reward"], np.ones(w_len) / w_len, mode='valid')
@@ -384,7 +415,7 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF + hybrid RL precoder testbench")
-    parser.add_argument("--num-slots", type=int, default=10000, help="Number of simulated time slots")
+    parser.add_argument("--num-slots", type=int, default=100000, help="Number of simulated time slots")
     parser.add_argument("--snr-db", type=float, default=15.0, help="SNR in dB")
     parser.add_argument("--rho", type=float, default=0.95, help="Temporal channel correlation coefficient")
     parser.add_argument("--seed", type=int, default=7, help="Random seed")
