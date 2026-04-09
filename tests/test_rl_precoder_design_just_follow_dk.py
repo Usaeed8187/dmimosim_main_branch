@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-from collections import deque
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -55,12 +54,10 @@ class RLConfig:
     lr_alpha: float = 5e-3
     leakage_penalty_weight: float = 0.10
     batch_size: int = 50
-    zf_cov_buffer_size: int = 256
     reward_ema_beta: float = 0.98
     advantage_clip: float = 5.0
     advantage_eps: float = 1e-6
-    zf_cov_shrinkage: float = 0.05
-    cov_jitter: float = 1e-6
+    cov_jitter: float = 1e-9
 
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
@@ -186,21 +183,6 @@ def run_zf_baseline(cfg: SimConfig, channels: np.ndarray) -> dict[str, np.ndarra
         "pmi_features": np.stack(pmi_features, axis=0),
     }
 
-def estimate_empirical_complex_cov(samples: np.ndarray, shrinkage: float, jitter: float) -> np.ndarray:
-    """Empirical covariance with Ledoit-style shrinkage and diagonal jitter."""
-    num_samples, dim = samples.shape
-    if num_samples < 2:
-        return np.eye(dim, dtype=np.complex128) * (1e-3 + jitter)
-
-    centered = samples - np.mean(samples, axis=0, keepdims=True)
-    cov = (centered.conj().T @ centered) / max(num_samples - 1, 1)
-    tr = float(np.real(np.trace(cov)))
-    target = (tr / max(dim, 1)) * np.eye(dim, dtype=np.complex128)
-    cov = (1.0 - shrinkage) * cov + shrinkage * target
-    cov = 0.5 * (cov + cov.conj().T)
-    cov += jitter * np.eye(dim, dtype=np.complex128)
-    return cov
-
 
 def robust_cholesky(cov: np.ndarray, base_jitter: float) -> np.ndarray:
     """Cholesky with adaptive jitter for numerical stability."""
@@ -271,21 +253,14 @@ def run_hybrid_rl(
     p_trace = np.ones(cfg.num_slots, dtype=np.float64)
     leak_trace = np.zeros(cfg.num_slots, dtype=np.float64)
 
-    zf_buffer = deque(maxlen=max(int(rl_cfg.zf_cov_buffer_size), 2))
-
     for t in range(cfg.num_slots):
 
         print("RL Slot {} / {}".format(t + 1, cfg.num_slots), end="\r")
 
-        # Domain-knowledge statistics from the running ZF buffer.
+        # Domain-knowledge statistics from current-slot ZF precoder.
         dk_mu = zf_baseline["precoders"][t].reshape(-1)
-        zf_buffer.append(dk_mu.copy())
-        dk_cov = estimate_empirical_complex_cov(
-            np.asarray(zf_buffer),
-            shrinkage=rl_cfg.zf_cov_shrinkage,
-            jitter=rl_cfg.cov_jitter,
-        )
-
+        dk_cov = (rl_cfg.sigma_dk2 + rl_cfg.cov_jitter) * np.eye(action_dim, dtype=np.complex128)
+        
         # "Learned" policy is set directly from DK statistics (no learning).
         # Mean comes from DK policy; covariance also comes from DK policy.
         mu = dk_mu
