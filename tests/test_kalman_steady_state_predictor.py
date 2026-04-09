@@ -572,15 +572,15 @@ def main():
     ], dtype=float)
 
     T = 20
-    num_mc = 100
+    num_mc = 1000
 
     # Separate training-sequence length used to estimate F via EM
     T_train = 20
     em_max_iters = 50
     em_tol = 1e-6
 
-    R_vars = np.logspace(-4, -0.5, 10)
-    Q_vars = np.logspace(-4, -0.5, 10)
+    R_vars = np.logspace(-4, -2, 10)
+    Q_vars = np.logspace(-4, -2, 10)
 
     print('\nUsing fixed Q for R sweep:')
     print(Q_fixed_for_R_sweep)
@@ -683,10 +683,10 @@ def main():
     # Plot: fixed Q, vary R
     plt.figure(figsize=(8, 5.5))
     plt.semilogx(R_vars, nmse_ss_vs_R_perfect, marker='o', label='Steady-state KF (perfect F)')
-    plt.semilogx(R_vars, nmse_ss_vs_R_est, marker='o', linestyle='--', label='Steady-state KF (estimated F)')
+    # plt.semilogx(R_vars, nmse_ss_vs_R_est, marker='o', linestyle='--', label='Steady-state KF (estimated F)')
     plt.semilogx(R_vars, nmse_prev_obs_vs_R, marker='s', label='Previous observation baseline')
     plt.semilogx(R_vars, nmse_full_kf_vs_R_perfect, marker='^', label='Full KF (perfect F)')
-    plt.semilogx(R_vars, nmse_full_kf_vs_R_est, marker='^', linestyle='--', label='Full KF (estimated F)')
+    # plt.semilogx(R_vars, nmse_full_kf_vs_R_est, marker='^', linestyle='--', label='Full KF (estimated F)')
     plt.xlabel('Observation-noise variance scale')
     plt.ylabel('One-step last-sample NMSE')
     plt.title(f'Fixed Q, vary R   (EM-based F estimation, T_train={T_train})')
@@ -699,10 +699,10 @@ def main():
     # Plot: fixed R, vary Q
     plt.figure(figsize=(8, 5.5))
     plt.semilogx(Q_vars, nmse_ss_vs_Q_perfect, marker='o', label='Steady-state KF (perfect F)')
-    plt.semilogx(Q_vars, nmse_ss_vs_Q_est, marker='o', linestyle='--', label='Steady-state KF (estimated F)')
+    # plt.semilogx(Q_vars, nmse_ss_vs_Q_est, marker='o', linestyle='--', label='Steady-state KF (estimated F)')
     plt.semilogx(Q_vars, nmse_prev_obs_vs_Q, marker='s', label='Previous observation baseline')
     plt.semilogx(Q_vars, nmse_full_kf_vs_Q_perfect, marker='^', label='Full KF (perfect F)')
-    plt.semilogx(Q_vars, nmse_full_kf_vs_Q_est, marker='^', linestyle='--', label='Full KF (estimated F)')
+    # plt.semilogx(Q_vars, nmse_full_kf_vs_Q_est, marker='^', linestyle='--', label='Full KF (estimated F)')
     plt.xlabel('Process-noise variance scale')
     plt.ylabel('One-step last-sample NMSE')
     plt.title(f'Fixed R, vary Q   (EM-based F estimation, T_train={T_train})')
