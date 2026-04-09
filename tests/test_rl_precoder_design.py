@@ -229,7 +229,7 @@ def run_hybrid_rl(
     # Trainable readout parameters.
     w_mu = 0.05 * complex_gaussian((action_dim, nz), rng)
     u_sigma = 0.01 * rng.standard_normal((action_dim, 2 * nz))
-    alpha = 1.2  # starts with moderate DK reuse and can adapt
+    alpha = 0.5  # starts with moderate DK reuse and can adapt
 
     z_state = np.zeros(nz, dtype=np.complex128)
 
@@ -366,15 +366,23 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
     zf_trace = output_dir / "zf_throughput_trace.npy"
     rl_trace = output_dir / "hybrid_rl_throughput_trace.npy"
     reward_trace = output_dir / "hybrid_rl_reward_trace.npy"
+    learned_policy_prob_trace = output_dir / "hybrid_rl_learned_policy_probability_trace.npy"
+    domain_knowledge_prob_trace = output_dir / "hybrid_rl_domain_knowledge_probability_trace.npy"
+
 
     np.save(zf_trace, zf_tput)
     np.save(rl_trace, rl_tput)
     np.save(reward_trace, rl_results["reward"])
+    np.save(learned_policy_prob_trace, rl_results["p_trace"])
+    np.save(domain_knowledge_prob_trace, 1.0 - rl_results["p_trace"])
+
 
     w_len = 1000
     zf_tput_avg = np.convolve(zf_tput, np.ones(w_len) / w_len, mode='valid')
     rl_tput_avg = np.convolve(rl_tput, np.ones(w_len) / w_len, mode='valid')
     reward_avg = np.convolve(rl_results["reward"], np.ones(w_len) / w_len, mode='valid')
+    learned_policy_prob_avg = np.convolve(rl_results["p_trace"], np.ones(w_len) / w_len, mode='valid')
+    domain_knowledge_prob_avg = np.convolve(1.0 - rl_results["p_trace"], np.ones(w_len) / w_len, mode='valid')
 
     # Throughput plot
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
@@ -404,12 +412,41 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
     fig2.savefig(reward_plot, dpi=150)
     plt.close(fig2)
 
+    # Branch probability plot
+    fig3, ax3 = plt.subplots(figsize=(8, 4.5))
+    ax3.plot(
+        np.arange(1, len(learned_policy_prob_avg) + 1),
+        learned_policy_prob_avg,
+        lw=1.6,
+        label="Learned policy probability",
+    )
+    ax3.plot(
+        np.arange(1, len(domain_knowledge_prob_avg) + 1),
+        domain_knowledge_prob_avg,
+        lw=1.6,
+        label="Domain knowledge probability",
+    )
+    ax3.set_title("Hybrid RL Branch Probabilities Across Time")
+    ax3.set_xlabel("Slot index")
+    ax3.set_ylabel("Probability")
+    ax3.set_ylim(0.0, 1.0)
+    ax3.grid(True, alpha=0.35)
+    ax3.legend(loc="best")
+    fig3.tight_layout()
+
+    probability_plot = output_dir / "hybrid_rl_branch_probabilities_across_time.png"
+    fig3.savefig(probability_plot, dpi=150)
+    plt.close(fig3)
+
     return {
         "zf_trace": zf_trace,
         "rl_trace": rl_trace,
         "reward_trace": reward_trace,
+        "learned_policy_prob_trace": learned_policy_prob_trace,
+        "domain_knowledge_prob_trace": domain_knowledge_prob_trace,
         "throughput_plot": tput_plot,
         "reward_plot": reward_plot,
+        "probability_plot": probability_plot,
     }
 
 
