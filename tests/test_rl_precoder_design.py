@@ -1,18 +1,23 @@
-"""Simple MU-MIMO ZF testbench using ideal PMI from full right singular vectors.
+"""Simple MU-MIMO ZF + hybrid RL precoder testbench (no dMIMO pipeline dependencies).
 
-This script intentionally avoids dMIMO pipeline features and reinforcement learning.
-It simulates a single-cell setup with:
-  - N_t = 4 transmit antennas
-  - K = 2 users
-  - N_r = 2 receive antennas per user
-  - 1 stream per user
+Scenario:
+- N_t = 4 BS antennas
+- K = 2 users
+- N_r = 2 antennas per user
+- 1 stream per user
 
-At each slot, channels evolve with a Gauss-Markov process. For each user, we compute
-an SVD of H_k and use the full right singular-vector matrix V_k as PMI feedback
-(with no quantization/noise). The dominant right singular vector of each user is
-stacked to build the ZF precoder.
-
-The script tracks and plots throughput over time.
+What this script does:
+1) Simulate temporally correlated channels.
+2) Run a pure ZF policy using ideal PMI (full V_k from SVD) and record throughput.
+3) Run a hybrid contextual-bandit RL policy inspired by the provided LaTeX derivation:
+   - State: PMI feedback features
+   - Action: precoder sampled from a complex Gaussian learned policy
+   - DK branch: ZF-centered narrow Gaussian
+   - Mixture policy weight p = sigmoid(alpha)
+   - Hard constraint: total transmit-power (Frobenius) normalization for precoders
+   - Soft constraint: leakage penalty (no other penalties)
+   - Reward: throughput gain above ZF baseline (minus leakage penalty)
+4) Save plots/traces to disk.
 """
 
 from __future__ import annotations
@@ -38,13 +43,36 @@ class SimConfig:
     total_tx_power: float = 1.0
 
 
+@dataclass
+class RLConfig:
+    reservoir_size: int = 64
+    spectral_radius: float = 0.8
+    input_scale: float = 0.15
+    sigma_eps: float = 1e-4
+    sigma_dk2: float = 1e-3
+    lr_mu: float = 8e-4
+    lr_sigma: float = 2e-4
+    lr_alpha: float = 5e-3
+    leakage_penalty_weight: float = 0.10
+
+
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
-    """Generate circularly-symmetric complex Gaussian samples with unit variance."""
     return (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)) / np.sqrt(2.0)
 
 
+def split_tanh(x: np.ndarray) -> np.ndarray:
+    return np.tanh(np.real(x)) + 1j * np.tanh(np.imag(x))
+
+
+def sigmoid(x: np.ndarray | float) -> np.ndarray | float:
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def softplus(x: np.ndarray) -> np.ndarray:
+    return np.log1p(np.exp(-np.abs(x))) + np.maximum(x, 0)
+
+
 def normalize_precoder_frobenius(precoder: np.ndarray, total_tx_power: float) -> np.ndarray:
-    """Scale precoder to satisfy total transmit power."""
     fro_norm = np.linalg.norm(precoder, ord="fro")
     if fro_norm < 1e-12:
         return precoder
@@ -52,159 +80,321 @@ def normalize_precoder_frobenius(precoder: np.ndarray, total_tx_power: float) ->
 
 
 def build_zf_precoder_from_pmi(full_vk_list: list[np.ndarray], streams_per_user: int, total_tx_power: float) -> np.ndarray:
-    """Build ZF precoder from user PMI matrices V_k.
-
-    Args:
-        full_vk_list: List of full right singular-vector matrices V_k (N_t x N_t).
-        streams_per_user: Number of streams per user.
-        total_tx_power: Total transmit power for Frobenius normalization.
-
-    Returns:
-        Precodermatrix P of shape (N_t, K*streams_per_user).
-    """
+    """Build ZF precoder from user PMI matrices V_k."""
     selected_rows = []
     for vk in full_vk_list:
-        # Use first "streams_per_user" dominant right singular vectors.
-        vk_dom = vk[:, :streams_per_user]  # (N_t, d_k)
-        selected_rows.append(vk_dom.conj().T)  # (d_k, N_t)
+        vk_dom = vk[:, :streams_per_user]
+        selected_rows.append(vk_dom.conj().T)
 
-    z_matrix = np.vstack(selected_rows)  # (N_s, N_t), N_s = K*streams_per_user
-    # Moore-Penrose pseudoinverse for ZF.
-    precoder = np.linalg.pinv(z_matrix)  # (N_t, N_s)
+    z_matrix = np.vstack(selected_rows)
+    precoder = np.linalg.pinv(z_matrix)
     return normalize_precoder_frobenius(precoder, total_tx_power=total_tx_power)
 
 
-def compute_slot_sum_rate(
-    user_channels: np.ndarray,
-    precoder: np.ndarray,
-    noise_power: float,
-) -> tuple[float, np.ndarray]:
-    """Compute sum-rate and per-user SINR for one slot.
-
-    For user k (one stream), we use a matched receive combiner based on the
-    intended effective spatial signature g_{k,k} = H_k p_k.
-    """
+def compute_slot_sum_rate(user_channels: np.ndarray, precoder: np.ndarray, noise_power: float) -> tuple[float, np.ndarray]:
+    """Compute per-user SINR and slot sum-rate with one stream/user."""
     num_users = user_channels.shape[0]
     sinr = np.zeros(num_users, dtype=np.float64)
 
     for k in range(num_users):
-        hk = user_channels[k]  # (N_r, N_t)
-
+        hk = user_channels[k]
         signal_vec = hk @ precoder[:, k]
         signal_norm = np.linalg.norm(signal_vec)
-        if signal_norm < 1e-12:
-            uk = np.zeros_like(signal_vec)
-            uk[0] = 1.0 + 0j
-        else:
-            uk = signal_vec / signal_norm
+        uk = signal_vec / max(signal_norm, 1e-12)
 
         desired = np.abs(np.vdot(uk, hk @ precoder[:, k])) ** 2
-
         interference = 0.0
         for j in range(num_users):
-            if j == k:
-                continue
-            interference += np.abs(np.vdot(uk, hk @ precoder[:, j])) ** 2
+            if j != k:
+                interference += np.abs(np.vdot(uk, hk @ precoder[:, j])) ** 2
 
         sinr[k] = desired / (interference + noise_power)
 
-    sum_rate = float(np.sum(np.log2(1.0 + sinr)))
-    return sum_rate, sinr
+    return float(np.sum(np.log2(1.0 + sinr))), sinr
 
 
-def run_simulation(cfg: SimConfig) -> dict[str, np.ndarray]:
-    rng = np.random.default_rng(cfg.seed)
+def compute_leakage(user_channels: np.ndarray, precoder: np.ndarray) -> float:
+    """Inter-user leakage penalty: sum_k sum_{j!=k} ||H_k p_j||^2."""
+    num_users = user_channels.shape[0]
+    leakage = 0.0
+    for k in range(num_users):
+        hk = user_channels[k]
+        for j in range(num_users):
+            if j != k:
+                leakage += np.linalg.norm(hk @ precoder[:, j]) ** 2
+    return float(leakage)
 
-    if cfg.streams_per_user != 1:
-        raise ValueError("This simple testbench currently supports streams_per_user = 1.")
 
-    num_streams = cfg.num_users * cfg.streams_per_user
-    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+def pmi_features_from_channels(user_channels: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
+    """Return PMI feature vector and full V_k list."""
+    vk_list: list[np.ndarray] = []
+    feature_parts = []
+    for k in range(user_channels.shape[0]):
+        _, _, vh = np.linalg.svd(user_channels[k], full_matrices=True)
+        vk = vh.conj().T
+        vk_list.append(vk)
+        feature_parts.append(np.real(vk).reshape(-1))
+        feature_parts.append(np.imag(vk).reshape(-1))
 
-    # Initial channels: shape (K, N_r, N_t)
-    channels = complex_gaussian(
-        (cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas),
-        rng,
+    feat = np.concatenate(feature_parts, axis=0).astype(np.float64)
+    return feat, vk_list
+
+
+def simulate_channels(cfg: SimConfig, rng: np.random.Generator) -> np.ndarray:
+    """Generate channels for all slots: [T, K, N_r, N_t]."""
+    channels = np.zeros(
+        (cfg.num_slots, cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas),
+        dtype=np.complex128,
     )
+
+    h_prev = complex_gaussian((cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas), rng)
+    for t in range(cfg.num_slots):
+
+        innovation = complex_gaussian(h_prev.shape, rng)
+        h_curr = cfg.temporal_correlation * h_prev + np.sqrt(1 - cfg.temporal_correlation**2) * innovation
+        channels[t] = h_curr
+        h_prev = h_curr
+
+    return channels
+
+
+def run_zf_baseline(cfg: SimConfig, channels: np.ndarray) -> dict[str, np.ndarray]:
+    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
 
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     sinr_traces = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
+    precoders = np.zeros((cfg.num_slots, cfg.num_tx_antennas, cfg.num_users), dtype=np.complex128)
+    pmi_features = []
 
     for t in range(cfg.num_slots):
-        # Temporal evolution with Gauss-Markov fading.
-        innovation = complex_gaussian(channels.shape, rng)
-        channels = cfg.temporal_correlation * channels + np.sqrt(1 - cfg.temporal_correlation**2) * innovation
+        feat, vk_list = pmi_features_from_channels(channels[t])
+        pmi_features.append(feat)
 
-        # PMI feedback: full right singular vectors V_k from SVD(H_k).
-        full_vk_list = []
-        for k in range(cfg.num_users):
-            _, _, vh = np.linalg.svd(channels[k], full_matrices=True)
-            full_vk_list.append(vh.conj().T)
+        p_zf = build_zf_precoder_from_pmi(vk_list, cfg.streams_per_user, cfg.total_tx_power)
+        rate, sinr = compute_slot_sum_rate(channels[t], p_zf, noise_power)
 
-        # ZF precoder from PMI.
-        precoder = build_zf_precoder_from_pmi(
-            full_vk_list=full_vk_list,
-            streams_per_user=cfg.streams_per_user,
-            total_tx_power=cfg.total_tx_power,
-        )
-
-        if precoder.shape != (cfg.num_tx_antennas, num_streams):
-            raise RuntimeError(
-                f"Unexpected precoder shape {precoder.shape}, expected {(cfg.num_tx_antennas, num_streams)}"
-            )
-
-        slot_sum_rate, slot_sinr = compute_slot_sum_rate(
-            user_channels=channels,
-            precoder=precoder,
-            noise_power=noise_power,
-        )
-
-        throughput[t] = slot_sum_rate
-        sinr_traces[t] = slot_sinr
+        throughput[t] = rate
+        sinr_traces[t] = sinr
+        precoders[t] = p_zf
 
     return {
         "throughput": throughput,
         "sinr": sinr_traces,
+        "precoders": precoders,
+        "pmi_features": np.stack(pmi_features, axis=0),
     }
 
 
-def save_results(results: dict[str, np.ndarray], output_dir: Path) -> tuple[Path, Path]:
+def complex_diag_logpdf(x: np.ndarray, mu: np.ndarray, var: np.ndarray) -> float:
+    """Log-pdf of proper complex diagonal Gaussian CN(mu, diag(var))."""
+    quad = np.sum((np.abs(x - mu) ** 2) / var)
+    logdet = np.sum(np.log(var))
+    n = x.size
+    return float(-n * np.log(np.pi) - logdet - quad)
+
+
+def sample_complex_gaussian(mu: np.ndarray, var: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    noise = complex_gaussian(mu.shape, rng)
+    return mu + np.sqrt(var) * noise
+
+
+def run_hybrid_rl(
+    cfg: SimConfig,
+    rl_cfg: RLConfig,
+    channels: np.ndarray,
+    zf_baseline: dict[str, np.ndarray],
+    rng: np.random.Generator,
+) -> dict[str, np.ndarray]:
+    """Online hybrid policy-gradient training with DK Gaussian branch."""
+    if cfg.streams_per_user != 1:
+        raise ValueError("This simple RL example supports streams_per_user=1 only.")
+
+    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    num_streams = cfg.num_users * cfg.streams_per_user
+
+    # State/action dimensions.
+    pmi_dim = zf_baseline["pmi_features"].shape[1]
+    action_dim = cfg.num_tx_antennas * num_streams
+    nz = rl_cfg.reservoir_size
+
+    # Fixed ESN reservoir.
+    win = rl_cfg.input_scale * complex_gaussian((nz, pmi_dim), rng)
+    wres = complex_gaussian((nz, nz), rng)
+    eigvals = np.linalg.eigvals(wres)
+    wres = (rl_cfg.spectral_radius / max(np.max(np.abs(eigvals)), 1e-12)) * wres
+
+    # Trainable readout parameters.
+    w_mu = 0.05 * complex_gaussian((action_dim, nz), rng)
+    u_sigma = 0.01 * rng.standard_normal((action_dim, 2 * nz))
+    alpha = 1.2  # starts with moderate DK reuse and can adapt
+
+    z_state = np.zeros(nz, dtype=np.complex128)
+
+    throughput = np.zeros(cfg.num_slots, dtype=np.float64)
+    reward_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    p_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    leak_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+
+    dk_var = rl_cfg.sigma_dk2 * np.ones(action_dim, dtype=np.float64)
+
+    for t in range(cfg.num_slots):
+
+        print("RL Slot {} / {}".format(t + 1, cfg.num_slots), end="\r")
+
+        # ----- State = PMI feedback -----
+        y = zf_baseline["pmi_features"][t]
+        z_state = split_tanh(win @ y + wres @ z_state)
+
+        # Learned Gaussian policy parameters.
+        mu = w_mu @ z_state
+        z_aug = np.concatenate([np.real(z_state), np.imag(z_state)], axis=0)
+        ell = u_sigma @ z_aug
+        sigma2 = softplus(ell) + rl_cfg.sigma_eps
+
+        # DK branch centered at ZF precoder of this slot.
+        dk_mu = zf_baseline["precoders"][t].reshape(-1)
+
+        # Mixture policy parameter p.
+        p = float(sigmoid(alpha))
+        p = np.clip(p, 1e-6, 1 - 1e-6)
+
+        # Sample action from mixture of two complex Gaussians.
+        if rng.random() < p:
+            action_vec_raw = sample_complex_gaussian(mu, sigma2, rng)
+        else:
+            action_vec_raw = sample_complex_gaussian(dk_mu, dk_var, rng)
+
+        # Hard constraint: total transmit power normalization.
+        action_precoder = action_vec_raw.reshape(cfg.num_tx_antennas, num_streams)
+        action_precoder = normalize_precoder_frobenius(action_precoder, cfg.total_tx_power)
+
+        # Environment throughput and leakage.
+        rate_rl, _ = compute_slot_sum_rate(channels[t], action_precoder, noise_power)
+        leakage = compute_leakage(channels[t], action_precoder)
+        reward = (rate_rl - zf_baseline["throughput"][t]) - rl_cfg.leakage_penalty_weight * leakage
+
+        # Use the normalized action for policy-gradient likelihood as well.
+        action_vec = action_precoder.reshape(-1)
+
+        # Mixture log-density terms.
+        log_pi_phi = complex_diag_logpdf(action_vec, mu, sigma2)
+        log_pi_dk = complex_diag_logpdf(action_vec, dk_mu, dk_var)
+
+        log_num_phi = np.log(p) + log_pi_phi
+        log_num_dk = np.log(1 - p) + log_pi_dk
+        m = max(log_num_phi, log_num_dk)
+        log_pi_theta = m + np.log(np.exp(log_num_phi - m) + np.exp(log_num_dk - m))
+
+        # Responsibility weight w_t = p*pi_phi / pi_theta.
+        w_t = np.exp(log_num_phi - log_pi_theta)
+
+        # ----- Policy gradients from the LaTeX derivation -----
+        err = action_vec - mu
+        inv_sigma2 = 1.0 / sigma2
+
+        # d/dW_mu* log pi_theta = w_t * Sigma^-1 (a-mu) z^H
+        grad_w_mu_log = w_t * np.outer(inv_sigma2 * err, np.conj(z_state))
+
+        # d/dU_sigma log pi_theta = w_t * delta * z_aug^T
+        abs_err2 = np.abs(err) ** 2
+        delta = ((-inv_sigma2) + (abs_err2 * (inv_sigma2**2))) * sigmoid(ell)
+        grad_u_sigma_log = w_t * np.outer(delta, z_aug)
+
+        # d/dalpha log pi_theta = p(1-p) * (pi_phi - pi_dk)/pi_theta
+        # Numerically stable equivalent:
+        # (pi_phi/pi_theta) = w_t/p, (pi_dk/pi_theta) = (1-w_t)/(1-p)
+        dlog_dp = (w_t / p) - ((1 - w_t) / (1 - p))
+        grad_alpha_log = p * (1 - p) * dlog_dp
+
+        # Loss L = - r * log pi_theta  => descent step on L
+        # Equivalent online ascent on r * log pi_theta:
+        w_mu += rl_cfg.lr_mu * reward * grad_w_mu_log
+        u_sigma += rl_cfg.lr_sigma * reward * grad_u_sigma_log
+        alpha += rl_cfg.lr_alpha * reward * grad_alpha_log
+
+        throughput[t] = rate_rl
+        reward_trace[t] = reward
+        p_trace[t] = p
+        leak_trace[t] = leakage
+
+    return {
+        "throughput": throughput,
+        "reward": reward_trace,
+        "p_trace": p_trace,
+        "leakage": leak_trace,
+    }
+
+
+def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.ndarray], output_dir: Path) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    throughput = results["throughput"]
+    zf_tput = zf_results["throughput"]
+    rl_tput = rl_results["throughput"]
 
-    # Save numeric trace.
-    trace_path = output_dir / "zf_throughput_trace.npy"
-    np.save(trace_path, throughput)
+    # Save traces
+    zf_trace = output_dir / "zf_throughput_trace.npy"
+    rl_trace = output_dir / "hybrid_rl_throughput_trace.npy"
+    reward_trace = output_dir / "hybrid_rl_reward_trace.npy"
 
-    # Save plot.
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(np.arange(1, len(throughput) + 1), throughput, lw=1.8, label="ZF sum-rate")
-    ax.set_title("Throughput Across Time (Simple ZF + Full PMI)")
-    ax.set_xlabel("Slot index")
-    ax.set_ylabel("Sum-rate [bits/s/Hz]")
-    ax.grid(True, alpha=0.35)
-    ax.legend(loc="best")
-    fig.tight_layout()
+    np.save(zf_trace, zf_tput)
+    np.save(rl_trace, rl_tput)
+    np.save(reward_trace, rl_results["reward"])
 
-    plot_path = output_dir / "zf_throughput_across_time.png"
-    fig.savefig(plot_path, dpi=150)
-    plt.close(fig)
+    w_len = 100
+    zf_tput_avg = np.convolve(zf_tput, np.ones(w_len) / w_len, mode='valid')
+    rl_tput_avg = np.convolve(rl_tput, np.ones(w_len) / w_len, mode='valid')
+    reward_avg = np.convolve(rl_results["reward"], np.ones(w_len) / w_len, mode='valid')
 
-    return trace_path, plot_path
+    # Throughput plot
+    fig1, ax1 = plt.subplots(figsize=(8, 4.5))
+    ax1.plot(np.arange(1, len(zf_tput_avg) + 1), zf_tput_avg, lw=1.6, label="ZF baseline")
+    ax1.plot(np.arange(1, len(rl_tput_avg) + 1), rl_tput_avg, lw=1.6, label="Hybrid RL")
+    ax1.set_title("Throughput Across Time")
+    ax1.set_xlabel("Slot index")
+    ax1.set_ylabel("Sum-rate [bits/s/Hz]")
+    ax1.grid(True, alpha=0.35)
+    ax1.legend(loc="best")
+    fig1.tight_layout()
+
+    tput_plot = output_dir / "throughput_across_time_zf_vs_hybrid_rl.png"
+    fig1.savefig(tput_plot, dpi=150)
+    plt.close(fig1)
+
+    # Reward plot
+    fig2, ax2 = plt.subplots(figsize=(8, 4.5))
+    ax2.plot(np.arange(1, len(reward_avg) + 1), reward_avg, lw=1.6)
+    ax2.set_title("Hybrid RL Reward Across Time\n(reward = throughput gain over ZF - leakage penalty)")
+    ax2.set_xlabel("Slot index")
+    ax2.set_ylabel("Reward")
+    ax2.grid(True, alpha=0.35)
+    fig2.tight_layout()
+
+    reward_plot = output_dir / "hybrid_rl_reward_across_time.png"
+    fig2.savefig(reward_plot, dpi=150)
+    plt.close(fig2)
+
+    return {
+        "zf_trace": zf_trace,
+        "rl_trace": rl_trace,
+        "reward_trace": reward_trace,
+        "throughput_plot": tput_plot,
+        "reward_plot": reward_plot,
+    }
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF testbench with full PMI feedback")
-    parser.add_argument("--num-slots", type=int, default=300, help="Number of simulated time slots")
+    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF + hybrid RL precoder testbench")
+    parser.add_argument("--num-slots", type=int, default=10000, help="Number of simulated time slots")
     parser.add_argument("--snr-db", type=float, default=15.0, help="SNR in dB")
     parser.add_argument("--rho", type=float, default=0.95, help="Temporal channel correlation coefficient")
     parser.add_argument("--seed", type=int, default=7, help="Random seed")
+    parser.add_argument("--reservoir-size", type=int, default=64, help="Fixed ESN reservoir size")
+    parser.add_argument("--leakage-weight", type=float, default=0.00, help="Leakage penalty weight in RL reward")
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("simple_zf_testbench"),
-        help="Directory for saved traces and plot",
+        default=Path("results/simple_zf_hybrid_rl_testbench"),
+        help="Directory to save traces and plots",
     )
     return parser.parse_args()
 
@@ -218,14 +408,26 @@ def main() -> None:
         temporal_correlation=args.rho,
         seed=args.seed,
     )
+    rl_cfg = RLConfig(reservoir_size=args.reservoir_size, leakage_penalty_weight=args.leakage_weight)
 
-    results = run_simulation(cfg)
-    trace_path, plot_path = save_results(results, args.output_dir)
+    rng = np.random.default_rng(cfg.seed)
+    channels = simulate_channels(cfg, rng)
 
-    print("Simple ZF testbench finished.")
-    print(f"Average throughput: {results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"Saved throughput trace: {trace_path}")
-    print(f"Saved throughput plot : {plot_path}")
+    # 1) Run ZF first to define baseline throughput used in reward.
+    zf_results = run_zf_baseline(cfg, channels)
+
+    # 2) Run hybrid RL policy using reward gain above ZF baseline.
+    rl_results = run_hybrid_rl(cfg, rl_cfg, channels, zf_results, rng)
+
+    out = save_results(zf_results, rl_results, args.output_dir)
+
+    print("Simple ZF + Hybrid RL testbench finished.")
+    print(f"ZF average throughput       : {zf_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"Hybrid RL average throughput: {rl_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"Hybrid RL average reward    : {rl_results['reward'].mean():.4f}")
+    print("Saved artifacts:")
+    for name, path in out.items():
+        print(f"  - {name}: {path}")
 
 
 if __name__ == "__main__":
