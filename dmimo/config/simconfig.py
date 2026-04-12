@@ -37,7 +37,9 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._scheduling = False                                    # Turn scheduling on or off for phase 2 of MU-MIMO architecture
         self._scheduled_rx_ue_indices = None                        # Scheduled UE antennas indices for MU-MIMO precoding
         self._ncjt_ldpc_decode_and_forward = True                   # Enable LDPC decode-and-forward at the Rx UEs for NCJT simulations
-        self._channel_prediction_method = "two_mode_wesn"           # Channel prediction method: "old", "two_mode", "two_mode_tf"
+        self._channel_prediction_method = "two_mode_wesn"           # Channel prediction method: "old", "two_mode", "two_mode_tf", "pilot_obs_two_mode"
+        self._predict_on_pilot_observations = False                 # Predict y_p on pilot REs, then recover channel via LS + LMMSE interpolation
+        self._pilot_observation_cache_dir = None                    # Optional override for pilot-observation history cache
         self._rl_user_count = 2                                     # Number of worst users for transmitter-side DEQN
         self._tx_ue_selection_method = "rx_power"                   # Tx UE selection method: "rx_power", "proxy_mi"
         super().__init__(**kwargs)
@@ -286,6 +288,22 @@ class SimConfig(CarrierConfig, MCSConfig):
     @channel_prediction_method.setter
     def channel_prediction_method(self, val):
         self._channel_prediction_method = val
+
+    @property
+    def predict_on_pilot_observations(self):
+        return self._predict_on_pilot_observations
+
+    @predict_on_pilot_observations.setter
+    def predict_on_pilot_observations(self, val):
+        self._predict_on_pilot_observations = bool(val)
+
+    @property
+    def pilot_observation_cache_dir(self):
+        return self._pilot_observation_cache_dir
+
+    @pilot_observation_cache_dir.setter
+    def pilot_observation_cache_dir(self, val):
+        self._pilot_observation_cache_dir = val
 
     @property 
     def csi_quantization_on(self):

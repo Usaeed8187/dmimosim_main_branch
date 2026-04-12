@@ -18,11 +18,19 @@ from sionna.utils import BinarySource, flatten_dims, matrix_inv, matrix_pinv
 from sionna.utils.metrics import compute_ber, compute_bler
 
 from dmimo.config import Ns3Config, SimConfig, RCConfig
-from dmimo.channel import dMIMOChannels, lmmse_channel_estimation, estimate_freq_cov, LMMSELinearInterp
+from dmimo.channel import (
+    dMIMOChannels,
+    lmmse_channel_estimation,
+    estimate_freq_cov,
+    LMMSELinearInterp,
+    estimate_channel_from_pilot_rx_symbols,
+)
+from dmimo.channel.wesn_rx_sig_pred import wesn_rx_sig_pred
 from dmimo.channel import standard_rc_pred_freq_mimo, default_ddpg_predictor
 from dmimo.channel.ddpg_predictor import DDPGChannelPredictor
 from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred, kalman_filter_pred
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
+from dmimo.channel.wesn_rx_sig_pred import rx_sig_predict_all_links_simple
 from dmimo.channel.rl_beam_selector_v2 import RLBeamSelector
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
@@ -411,7 +419,18 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                           dmimo_chans)
         else:
         
-            if "kalman" in cfg.channel_prediction_method:
+            if "pilot_obs" in cfg.channel_prediction_method:
+                rx_sig_freq_history, pilot_symbols = rc_predictor.get_pilot_history_with_metadata(
+                    cfg.first_slot_idx,
+                    cfg.csi_delay,
+                    rg_csi,
+                    dmimo_chans,
+                    cfo_vals=cfg.random_cfo_vals,
+                    sto_vals=cfg.random_sto_vals,
+                    estimated_channels_dir=cfg.estimated_channels_dir,
+                )
+                err_var_csi_history = None
+            elif "kalman" in cfg.channel_prediction_method:
                 h_freq_csi_history, err_var_csi_history = rc_predictor.get_csi_history_with_err_var(
                     cfg.first_slot_idx,
                     cfg.csi_delay,
@@ -443,7 +462,24 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
                                                 batch_size=cfg.num_slots_p2)
         
-        if "two_mode" in cfg.channel_prediction_method:
+        if "pilot_obs" in cfg.channel_prediction_method:
+            _, _, _, num_rx_ant, num_pilot_syms, num_freq = rx_sig_freq_history.shape
+            rx_sig_predictor = wesn_rx_sig_pred(
+                rc_config=rc_config,
+                num_rx_ant=num_rx_ant,
+                num_pilot_ofdm_symbols=num_pilot_syms,
+                num_freq_re=num_freq,
+            )
+            # rx_sig_pred = rx_sig_predictor.predict(rx_sig_freq_history)
+            rx_sig_pred = rx_sig_predict_all_links_simple(rx_sig_freq_history, rc_config, ns3cfg, err_var_csi_history=None)
+            h_freq_csi, err_var_csi = estimate_channel_from_pilot_rx_symbols(
+                rx_sig_pred,
+                rg_csi,
+                pilot_symbols,
+                freq_cov_mat=freq_cov_mat,
+                lmmse_interpolator=lmmse_interpolator,
+            )
+        elif "two_mode" in cfg.channel_prediction_method:
 
             if "two_mode_tf" in cfg.channel_prediction_method:
 

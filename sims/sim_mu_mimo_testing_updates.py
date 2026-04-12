@@ -86,7 +86,7 @@ arguments = sys.argv[1:]
 
 mobility = 'higher_mobility'
 drop_idx = '1'
-rx_ues_arr = [4]
+rx_ues_arr = [3]
 num_txue_sel = 4
 
 modulation_order = 4
@@ -95,8 +95,8 @@ link_adapt = True
 
 perfect_csi = False
 csi_prediction = True
-channel_prediction_setting = "two_mode_kalman_config" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
-channel_prediction_method = "two_mode_kalman_config" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config"
+channel_prediction_setting = "pilot_obs" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "pilot_obs"
+channel_prediction_method = "pilot_obs" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "pilot_obs"
 history_len = 8
 window_length = 5
 num_neurons = 16
@@ -211,6 +211,7 @@ def run_simulation():
     cfg.csi_prediction = csi_prediction
     cfg.use_perfect_csi_history_for_prediction = False
     cfg.channel_prediction_method = channel_prediction_method # "old", "two_mode", "two_mode_tf", "weiner_filter", "kalman_filter"
+    cfg.predict_on_pilot_observations = "pilot_obs" in str(channel_prediction_method)
     cfg.enable_ue_selection = False
     cfg.scheduling = False
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'

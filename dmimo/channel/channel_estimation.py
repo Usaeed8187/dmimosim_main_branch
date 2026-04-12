@@ -155,6 +155,117 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
 
     return h_all, evar_all
 
+def _trim_to_effective_subcarriers(ry, rg: ResourceGrid):
+    """Keep only effective subcarriers from a received OFDM grid."""
+
+    if rg.num_effective_subcarriers == rg.fft_size:
+        return ry
+    return tf.gather(ry, rg.effective_subcarrier_ind, axis=-1)
+
+
+def get_received_pilot_symbols(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_idx,
+                               cfo_vals=[0], sto_vals=[0], num_bits_per_symbol=2):
+    """
+    Simulate one slot and return received samples on pilot OFDM symbols.
+
+    Returns
+    -------
+    ry_pilot_eff : tf.Tensor
+        Shape [batch, num_rx, num_rx_ant, num_pilot_ofdm_symbols, num_effective_subcarriers]
+    pilot_symbols : tf.Tensor
+        Shape [num_tx=1, num_streams_per_tx, num_pilot_symbols]
+    """
+
+    binary_source = BinarySource()
+    mapper = Mapper("qam", num_bits_per_symbol)
+    rg_mapper = ResourceGridMapper(rg)
+
+    bs = binary_source([1, 1, rg.num_streams_per_tx, rg.num_data_symbols * num_bits_per_symbol])
+    dx = mapper(bs)
+    dx_rg = rg_mapper(dx)
+
+    if np.any(np.not_equal(sto_vals, 0)):
+        dx_rg = add_timing_offset(dx_rg, sto_vals, channel_type=dmimo_chans.channel_type)
+    if np.any(np.not_equal(cfo_vals, 0)):
+        dx_rg = add_frequency_offset(dx_rg, cfo_vals, channel_type=dmimo_chans.channel_type)
+
+    ry, _ = dmimo_chans([dx_rg, slot_idx])
+    ry_eff = _trim_to_effective_subcarriers(ry, rg)
+    ry_pilot_eff = tf.gather(ry_eff, rg._pilot_ofdm_symbol_indices, axis=-2)
+    pilot_symbols = tf.convert_to_tensor(np.asarray(rg.pilot_pattern.pilots))
+
+    return ry_pilot_eff, pilot_symbols
+
+
+def _extract_pilot_values_from_rx_symbols(ry_pilot_eff, rg: ResourceGrid):
+    """
+    Convert received pilot-OFDM-symbol grids to per-stream pilot vectors.
+
+    Parameters
+    ----------
+    ry_pilot_eff : tf.Tensor
+        Shape [batch, num_rx, num_rx_ant, num_pilot_ofdm_symbols, num_effective_subcarriers]
+
+    Returns
+    -------
+    y_p : tf.Tensor
+        Shape [batch, num_rx, num_rx_ant, num_tx=1, num_streams_per_tx, num_pilot_symbols]
+    """
+
+    y_np = np.asarray(ry_pilot_eff)
+    pilot_mask = np.asarray(rg.pilot_pattern.mask)[0]  # [num_streams, num_ofdm_symbols, num_eff_sc]
+    pilot_mask = pilot_mask[:, rg._pilot_ofdm_symbol_indices, :]
+    num_streams = pilot_mask.shape[0]
+
+    y_list = []
+    for stream_idx in range(num_streams):
+        stream_mask = pilot_mask[stream_idx]  # [num_pilot_syms, num_eff_sc]
+        y_stream = y_np[:, :, :, stream_mask]
+        y_list.append(y_stream[:, :, :, np.newaxis, np.newaxis, :])
+
+    y_p = np.concatenate(y_list, axis=4)
+    return tf.convert_to_tensor(y_p)
+
+
+def estimate_channel_from_pilot_rx_symbols(ry_pilot_eff, rg: ResourceGrid, pilot_symbols,
+                                           ebno_db=12.0, freq_cov_mat=None, lmmse_interpolator=None):
+    """
+    Estimate full-grid channel from predicted/observed pilot-domain received signal.
+
+    Steps:
+      1) LS on pilot REs: h_ls_p = y_p / x_p
+      2) LMMSE interpolation to full grid
+    """
+
+    if lmmse_interpolator is None:
+        if freq_cov_mat is None:
+            raise ValueError("freq_cov_mat is required when lmmse_interpolator is not provided.")
+        lmmse_int = LMMSELinearInterp(rg.pilot_pattern, freq_cov_mat)
+    else:
+        lmmse_int = lmmse_interpolator
+
+    y_p = _extract_pilot_values_from_rx_symbols(ry_pilot_eff, rg)
+    x_p = tf.convert_to_tensor(pilot_symbols, dtype=y_p.dtype)  # [num_tx=1, num_streams, num_pilots]
+    x_p = x_p[tf.newaxis, tf.newaxis, tf.newaxis, ...]  # broadcast dims
+
+    h_ls_p = tf.math.divide_no_nan(y_p, x_p)
+
+    nvar = ebnodb2no(ebno_db, 2, 0.5)
+    err_var_p = tf.ones(tf.shape(h_ls_p), dtype=tf.float32) * tf.cast(nvar, tf.float32)
+
+    h_eff, err_eff = lmmse_int(h_ls_p, err_var_p)
+
+    if np.sum(rg.num_guard_carriers) > 0:
+        h_freq_guard1 = tf.gather(h_eff, np.repeat(0, rg.num_guard_carriers[0]), axis=-1)
+        h_freq_guard2 = tf.gather(h_eff, np.repeat(rg.num_effective_subcarriers - 1, rg.num_guard_carriers[1]), axis=-1)
+        h_eff = tf.concat((h_freq_guard1, h_eff, h_freq_guard2), axis=-1)
+
+        err_guard1 = tf.gather(err_eff, np.repeat(0, rg.num_guard_carriers[0]), axis=-1)
+        err_guard2 = tf.gather(err_eff, np.repeat(rg.num_effective_subcarriers - 1, rg.num_guard_carriers[1]), axis=-1)
+        err_eff = tf.concat((err_guard1, err_eff, err_guard2), axis=-1)
+
+    return h_eff, err_eff
+
 def lmmse_channel_estimation_demo(ry, rg: ResourceGrid, slot_idx, cache_slots=5, ebno_db=12.0,
                              cfo_vals=[0], sto_vals=[0]):
 

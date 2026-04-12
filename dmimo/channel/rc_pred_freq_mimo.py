@@ -4,7 +4,7 @@ import tensorflow as tf
 import os
 
 from dmimo.config import Ns3Config, RCConfig
-from dmimo.channel import lmmse_channel_estimation
+from dmimo.channel.channel_estimation import lmmse_channel_estimation, get_received_pilot_symbols
 
 class standard_rc_pred_freq_mimo:
 
@@ -101,6 +101,10 @@ class standard_rc_pred_freq_mimo:
         self.csi_history_buffer = None
         self.csi_err_var_history_buffer = None
         self.csi_history_slots = None
+        self.pilot_obs_history_buffer = None
+        self.pilot_obs_history_slots = None
+        self.pilot_symbols = None
+
 
     def reset_csi_history(self):
         """Reset cached CSI history."""
@@ -108,6 +112,9 @@ class standard_rc_pred_freq_mimo:
         self.csi_history_buffer = None
         self.csi_err_var_history_buffer = None
         self.csi_history_slots = None
+        self.pilot_obs_history_buffer = None
+        self.pilot_obs_history_slots = None
+        self.pilot_symbols = None
 
     def _load_or_estimate_channel(self, slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator):
         """Load a single channel estimate from disk or run LMMSE estimation."""
@@ -207,6 +214,77 @@ class standard_rc_pred_freq_mimo:
         self.csi_history_slots = channel_history_slots
         
         return self.csi_history_buffer, self.csi_err_var_history_buffer
+    
+    def _load_or_get_pilot_obs(self, slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir):
+        folder_path = estimated_channels_dir + "_pilot_obs_rx_{}_tx_{}".format(
+            self.ns3_config.num_bs_ant + self.ns3_config.num_ue_ant * self.ns3_config.num_rxue_sel,
+            self.ns3_config.num_bs_ant + self.ns3_config.num_ue_ant * self.ns3_config.num_txue_sel,
+        )
+        file_path = "{}/pilot_obs_{}".format(folder_path, slot_idx)
+
+        try:
+            data = np.load("{}.npz".format(file_path))
+            rx_sig_pilot = data["rx_sig_pilot"]
+            pilot_symbols = data["pilot_symbols"]
+        except Exception:
+            rx_sig_pilot, pilot_symbols = get_received_pilot_symbols(
+                dmimo_chans,
+                rg_csi,
+                slot_idx=slot_idx,
+                cfo_vals=cfo_vals,
+                sto_vals=sto_vals,
+            )
+            rx_sig_pilot = np.asarray(rx_sig_pilot)
+            pilot_symbols = np.asarray(pilot_symbols)
+            os.makedirs(folder_path, exist_ok=True)
+            np.savez(file_path, rx_sig_pilot=rx_sig_pilot, pilot_symbols=pilot_symbols)
+
+        return np.expand_dims(rx_sig_pilot, axis=0), pilot_symbols
+
+    def _get_pilot_history_internal(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans,
+                                    cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None):
+        first_csi_history_idx = first_slot_idx - (csi_delay * self.history_len)
+        history_slots = np.arange(first_csi_history_idx, first_slot_idx, csi_delay)
+
+        if (
+            self.pilot_obs_history_buffer is None
+            or self.pilot_obs_history_slots is None
+            or len(self.pilot_obs_history_slots) != len(history_slots)
+        ):
+            y_list = []
+            for slot_idx in history_slots:
+                y_entry, pilot_symbols = self._load_or_get_pilot_obs(
+                    slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir
+                )
+                y_list.append(y_entry)
+                self.pilot_symbols = pilot_symbols
+            self.pilot_obs_history_buffer = np.concatenate(y_list, axis=0)
+            self.pilot_obs_history_slots = history_slots
+            return self.pilot_obs_history_buffer, self.pilot_symbols
+
+        if np.array_equal(self.pilot_obs_history_slots, history_slots):
+            return self.pilot_obs_history_buffer, self.pilot_symbols
+
+        if np.array_equal(self.pilot_obs_history_slots[1:], history_slots[:-1]):
+            newest_slot_idx = history_slots[-1]
+            y_entry, pilot_symbols = self._load_or_get_pilot_obs(
+                newest_slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir
+            )
+            self.pilot_obs_history_buffer = np.concatenate([self.pilot_obs_history_buffer[1:], y_entry], axis=0)
+            self.pilot_obs_history_slots = history_slots
+            self.pilot_symbols = pilot_symbols
+            return self.pilot_obs_history_buffer, self.pilot_symbols
+
+        y_list = []
+        for slot_idx in history_slots:
+            y_entry, pilot_symbols = self._load_or_get_pilot_obs(
+                slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir
+            )
+            y_list.append(y_entry)
+            self.pilot_symbols = pilot_symbols
+        self.pilot_obs_history_buffer = np.concatenate(y_list, axis=0)
+        self.pilot_obs_history_slots = history_slots
+        return self.pilot_obs_history_buffer, self.pilot_symbols
 
     def get_csi_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None, freq_cov_mat=None, lmmse_interpolator=None):
         h_freq_csi_history, _ = self._get_csi_history_internal(
@@ -234,7 +312,29 @@ class standard_rc_pred_freq_mimo:
             freq_cov_mat=freq_cov_mat,
             lmmse_interpolator=lmmse_interpolator,
         )
+    
+    def get_pilot_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None):
+        pilot_hist, _ = self._get_pilot_history_internal(
+            first_slot_idx,
+            csi_delay,
+            rg_csi,
+            dmimo_chans,
+            cfo_vals=cfo_vals,
+            sto_vals=sto_vals,
+            estimated_channels_dir=estimated_channels_dir,
+        )
+        return pilot_hist
 
+    def get_pilot_history_with_metadata(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None):
+        return self._get_pilot_history_internal(
+            first_slot_idx,
+            csi_delay,
+            rg_csi,
+            dmimo_chans,
+            cfo_vals=cfo_vals,
+            sto_vals=sto_vals,
+            estimated_channels_dir=estimated_channels_dir,
+        )
     def get_ideal_csi_history(self, first_slot_idx, csi_delay, dmimo_chans, batch_size=1):
         
         # Get perfect channel estimate history starting from (csi_delay * self.history_len) slots in the past to the most up-to-date fed back estimate
