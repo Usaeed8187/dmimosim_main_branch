@@ -24,7 +24,10 @@ class wesn_rx_sig_pred:
         self.enable_window = bool(rc_config.enable_window)
         self.window_length = int(rc_config.window_length) if self.enable_window else 1
 
-        self.input_dim = num_rx_ant
+        if self.enable_window:
+            self.input_dim = self.window_length * num_rx_ant
+        else:   
+            self.input_dim = num_rx_ant
 
         self.rs = np.random.RandomState(10)
 
@@ -57,9 +60,9 @@ class wesn_rx_sig_pred:
             raise ValueError("Need at least 2 time steps for training/prediction.")
 
         if not self.enable_window or self.window_length <= 1:
-            X = seq[:-1, :, None, :]
+            X = seq[:-1, :, :]
             Y = seq[1:, :, :]
-            x_test = seq[-1, :, None, :]
+            x_test = seq[-1, :, :]
             return X, Y, x_test
 
         K = self.window_length
@@ -71,14 +74,14 @@ class wesn_rx_sig_pred:
                 pad = np.repeat(win[0:1, :, :], K - win.shape[0], axis=0)
                 win = np.concatenate([pad, win], axis=0)
             # [K, B, F] -> [B, K*F]
-            X.append(np.transpose(win, (1, 0, 2)))
+            X.append(np.transpose(win, (1, 0, 2)).reshape(B, K * F))
 
         start = max(0, T - K)
         test_win = seq[start:T, :, :]
         if test_win.shape[0] < K:
             pad = np.repeat(test_win[0:1, :, :], K - test_win.shape[0], axis=0)
             test_win = np.concatenate([pad, test_win], axis=0)
-        x_test = np.transpose(test_win, (1, 0, 2))
+        x_test = np.transpose(test_win, (1, 0, 2)).reshape(B, K * F)
         return np.asarray(X), seq[1:, :, :], x_test
 
     def _fit_predict_batched(self, seq):
@@ -87,26 +90,21 @@ class wesn_rx_sig_pred:
         """
 
         X, Y, x_test = self._make_windowed_pairs(seq)
-        _, B, K, input_dim = X.shape
+        _, B, input_dim = X.shape
         target_dim = Y.shape[-1]
-        if input_dim != self.input_dim:
-            raise ValueError(
-                f"features_per_batch ({input_dim}) must equal num_rx_ant ({self.input_dim}) by design."
-            )
 
         state = np.zeros((B, self.num_neurons), dtype=np.complex128)
         states = np.zeros((X.shape[0], B, self.num_neurons), dtype=np.complex128)
 
         for t in range(X.shape[0]):
-            u = self.input_scale * X[t, :, :, :]
-            recurrent_term = state @ self.w_res.T
-            input_term = np.sum(u @ self.w_in.T, axis=1)
-            state = self.complex_tanh(recurrent_term + input_term)
+            u = self.input_scale * X[t, :, :]
+            recurrent_term = self.w_res[np.newaxis, :, :] @ state[:,:, np.newaxis]
+            input_term = self.w_in[np.newaxis, :, :] @ u[:,:, np.newaxis]
+            state = np.squeeze(self.complex_tanh(recurrent_term + input_term))
             states[t, :, :] = state
 
         # Feature matrix Z across all batches: [num_samples_all_batches, num_neurons + input_dim]
-        X_flat = X.reshape(X.shape[0], B, K * input_dim)
-        Z = np.concatenate([states, X_flat], axis=2).reshape(-1, self.num_neurons + K * input_dim)
+        Z = np.concatenate([states, X], axis=2).reshape(-1, self.num_neurons + input_dim)
         Y_flat = Y.reshape(-1, target_dim)
 
         # Ridge regression across all batches:
@@ -116,9 +114,9 @@ class wesn_rx_sig_pred:
         w_out = np.linalg.solve(zhz + reg_eye, Z.conj().T @ Y_flat)
 
         # Advance all batch states with latest input and predict next outputs
-        u_test = self.input_scale * x_test  # [B, K, input_dim]
-        state = self.complex_tanh((state @ self.w_res.T) + np.sum(u_test @ self.w_in.T, axis=1))
-        z_test = np.concatenate([state, x_test.reshape(B, K * input_dim)], axis=1)  # [B, num_neurons + K*input_dim]
+        u_test = self.input_scale * x_test  # [B, input_dim]
+        state = self.complex_tanh((state @ self.w_res.T) + (u_test @ self.w_in.T))
+        z_test = np.concatenate([state, x_test.reshape(B, input_dim)], axis=1)  # [B, num_neurons + input_dim]
         y_pred = z_test @ w_out  # [B, target_dim]
 
         return y_pred
@@ -142,8 +140,9 @@ class wesn_rx_sig_pred:
 
         for rx_node in range(num_rx):
             seq = rx_sig_history[:, :, rx_node, :, :, :].reshape(T, num_rx_ant, -1)
+            seq = np.transpose(seq, (0, 2, 1))  # [T, num_pilot_syms * num_freq, num_rx_ant]
             y_pred = self._fit_predict_batched(seq)
-            pred[:, rx_node, :, :, :] = y_pred.reshape(batch_size, num_rx_ant, num_pilot_syms, num_freq)
+            pred[:, rx_node, :, :, :] = y_pred.reshape(batch_size, num_pilot_syms, num_freq, num_rx_ant).transpose(0, 3, 1, 2)
 
         return pred
     
@@ -169,7 +168,6 @@ def rx_sig_predict_all_links_simple(rx_sig_freq_history, rc_config, ns3cfg, num_
                 rc_config=rc_config,
                 num_rx_ant=num_rx_ant,
             )
-        tmp = np.asarray(rx_sig_predictor.predict(curr_rx_sig_freq_history))
-        rx_sig_freq[:, :, rx_node_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
+        rx_sig_freq[:, :, rx_ant_idx, :, :] = np.asarray(rx_sig_predictor.predict(curr_rx_sig_freq_history))
 
     return rx_sig_freq
