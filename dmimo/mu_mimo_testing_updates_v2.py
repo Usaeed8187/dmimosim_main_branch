@@ -464,12 +464,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         
         if "pilot_obs" in cfg.channel_prediction_method:
             _, _, _, num_rx_ant, num_pilot_syms, num_freq = rx_sig_freq_history.shape
-            rx_sig_predictor = wesn_rx_sig_pred(
-                rc_config=rc_config,
-                num_rx_ant=num_rx_ant,
-                num_pilot_ofdm_symbols=num_pilot_syms,
-                num_freq_re=num_freq,
-            )
             # rx_sig_pred = rx_sig_predictor.predict(rx_sig_freq_history)
             rx_sig_pred = rx_sig_predict_all_links_simple(rx_sig_freq_history, rc_config, ns3cfg, err_var_csi_history=None)
             h_freq_csi, err_var_csi = estimate_channel_from_pilot_rx_symbols(
