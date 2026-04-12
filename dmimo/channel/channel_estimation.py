@@ -212,20 +212,25 @@ def _extract_pilot_values_from_rx_symbols(ry_pilot_eff, rg: ResourceGrid):
         Shape [batch, num_rx, num_rx_ant, num_tx=1, num_streams_per_tx, num_pilot_symbols]
     """
 
-    y_np = np.asarray(ry_pilot_eff)
-    pilot_mask = np.asarray(rg.pilot_pattern.mask)[0]  # [num_streams, num_ofdm_symbols, num_eff_sc]
-    pilot_mask = pilot_mask[:, rg._pilot_ofdm_symbol_indices, :]
+    ry_pilot_eff = tf.convert_to_tensor(ry_pilot_eff)
+
+    # [num_streams, num_pilot_ofdm_symbols, num_effective_subcarriers]
+    pilot_mask = tf.convert_to_tensor(np.asarray(rg.pilot_pattern.mask)[0], dtype=tf.bool)
+    pilot_mask = tf.gather(pilot_mask, rg._pilot_ofdm_symbol_indices, axis=1)
     num_streams = pilot_mask.shape[0]
+
+    # Flatten OFDM-symbol and subcarrier dimensions so the pilot mask can index REs
+    # consistently across all batch/rx dimensions.
+    ry_flat = tf.reshape(ry_pilot_eff, [*ry_pilot_eff.shape[:3], -1])
+    mask_flat = tf.reshape(pilot_mask, [num_streams, -1])
 
     y_list = []
     for stream_idx in range(num_streams):
-        stream_mask = pilot_mask[stream_idx]  # [num_pilot_syms, num_eff_sc]
-        y_stream = y_np[:, :, :, stream_mask]
-        y_list.append(y_stream[:, :, :, np.newaxis, np.newaxis, :])
+        pilot_idx = tf.where(mask_flat[stream_idx])[:, 0]
+        y_stream = tf.gather(ry_flat, pilot_idx, axis=-1)
+        y_list.append(y_stream[:, :, :, tf.newaxis, tf.newaxis, :])
 
-    y_p = np.concatenate(y_list, axis=4)
-    return tf.convert_to_tensor(y_p)
-
+    return tf.concat(y_list, axis=4)
 
 def estimate_channel_from_pilot_rx_symbols(ry_pilot_eff, rg: ResourceGrid, pilot_symbols,
                                            ebno_db=12.0, freq_cov_mat=None, lmmse_interpolator=None):

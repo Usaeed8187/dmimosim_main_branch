@@ -147,7 +147,7 @@ class twomode_wesn_pred:
             num_freq_res = h_freq_csi_history.shape[6]
             num_ofdm_syms = h_freq_csi_history.shape[7]
 
-            if err_var_hist_aligned.shape[-2] != num_freq_res:
+            if err_var_hist_aligned is not None and err_var_hist_aligned.shape[-2] != num_freq_res:
                 pad_top = (num_freq_res - err_var_hist_aligned.shape[-2]) // 2
                 pad_bottom = (num_freq_res - err_var_hist_aligned.shape[-2]) - pad_top
 
