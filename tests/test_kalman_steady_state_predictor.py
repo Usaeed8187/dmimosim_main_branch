@@ -689,10 +689,10 @@ def main():
 
     plt.figure(figsize=(8, 5.5))
     plt.plot(snr_db_vs_R_sorted, nmse_ss_vs_R_perfect_sorted, marker='o', label='Steady-state KF (perfect F)')
-    # plt.plot(snr_db_vs_R_sorted, nmse_ss_vs_R_est[snr_sort_idx], marker='o', linestyle='--', label='Steady-state KF (estimated F)')
+    plt.plot(snr_db_vs_R_sorted, nmse_ss_vs_R_est[snr_sort_idx], marker='o', linestyle='--', label='Steady-state KF (estimated F)')
     plt.plot(snr_db_vs_R_sorted, nmse_prev_obs_vs_R_sorted, marker='s', label='Previous observation baseline')
     plt.plot(snr_db_vs_R_sorted, nmse_full_kf_vs_R_perfect_sorted, marker='^', label='Full KF (perfect F)')
-    # plt.plot(snr_db_vs_R_sorted, nmse_full_kf_vs_R_est[snr_sort_idx], marker='^', linestyle='--', label='Full KF (estimated F)')
+    plt.plot(snr_db_vs_R_sorted, nmse_full_kf_vs_R_est[snr_sort_idx], marker='^', linestyle='--', label='Full KF (estimated F)')
     plt.xlabel('SNR (dB)')
     plt.ylabel('One-step last-sample NMSE')
     plt.title(f'Fixed Q, vary R   (EM-based F estimation, T_train={T_train})')
