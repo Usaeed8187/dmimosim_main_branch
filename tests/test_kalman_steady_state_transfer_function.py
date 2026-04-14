@@ -1097,7 +1097,7 @@ def main():
 
     # Transfer-space basis settings
     rp_degree_for_m_curve = 4
-    max_m = 10
+    max_m = 5
     degree_vals = np.arange(1, 11)
     m_eval_for_degree_plot = max_m
 
@@ -1180,6 +1180,11 @@ def main():
     rng_test = np.random.default_rng(test_seed)
     total_test_T = num_test_chunks * (history_len + 1)
     x_test_all, y_test_all = generate_state_space_data(total_test_T, F_true, Q_process, R_obs, rng_test)
+    signal_power_test = float(np.mean(np.sum(np.abs(x_test_all) ** 2, axis=1)))
+    noise_power = float(np.trace(R_obs))
+    snr_linear = signal_power_test / max(noise_power, 1e-15)
+    snr_db = 10.0 * np.log10(max(snr_linear, 1e-15))
+    print(f"Evaluation SNR (from testing chunks): {snr_db:.2f} dB")
 
     pred_nmse_exact = np.zeros_like(m_vals, dtype=float)
     pred_nmse_rp = np.zeros_like(m_vals, dtype=float)
