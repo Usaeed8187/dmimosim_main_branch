@@ -1005,16 +1005,16 @@ def main():
     F_true = project_to_stable_matrix(F_true, max_radius=0.99)
 
     Q_process = np.array([
-        [1e-3, 0.0],
-        [0.0, 1e-3],
+        [1e-4, 0.0],
+        [0.0, 1e-4],
     ], dtype=float)
 
     R_obs = np.array([
-        [1e-3 , 0.0],
-        [0.0, 1e-3],
+        [1e-4 , 0.0],
+        [0.0, 1e-4],
     ], dtype=float)
 
-    history_len = 16
+    history_len = 20
     num_chunks = 400
     num_test_chunks = 400
     num_freqs = 64
