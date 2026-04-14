@@ -47,6 +47,69 @@ def solve_discrete_riccati_steady_state(
     K = P_minus @ np.linalg.inv(S)
     return P_minus, K
 
+def solve_stationary_state_covariance(
+    F: np.ndarray,
+    Q: np.ndarray,
+    max_iter: int = 10000,
+    tol: float = 1e-12,
+) -> np.ndarray:
+    """
+    Solve P = F P F^T + Q by fixed-point iteration (stable F assumed).
+    """
+    d = F.shape[0]
+    P = np.eye(d)
+    for _ in range(max_iter):
+        P_next = F @ P @ F.T + Q
+        P_next = symmetrize(P_next)
+        if np.linalg.norm(P_next - P, ord="fro") < tol:
+            return P_next
+        P = P_next
+    return P
+
+
+def normalize_qr_for_unit_expected_state_norm(
+    F: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+    target_power: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, float, float]:
+    """
+    Scale (Q, R) by the same factor so that the stationary state power
+    E[||x_t||^2] = trace(P) equals target_power.
+    """
+    P_stat = solve_stationary_state_covariance(F, Q)
+    state_power = float(np.real(np.trace(P_stat)))
+    scale = float(target_power / max(state_power, 1e-15))
+    Q_scaled = Q * scale
+    R_scaled = R * scale
+    return Q_scaled, R_scaled, scale, state_power
+
+
+def scale_matrix_to_spectral_radius(F: np.ndarray, target_radius: float) -> np.ndarray:
+    rho = float(np.max(np.abs(np.linalg.eigvals(F))))
+    if rho < 1e-15:
+        raise ValueError("Cannot scale a near-zero matrix to a target spectral radius.")
+    return F * (target_radius / rho)
+
+
+def enforce_psd(M: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    M = symmetrize(M)
+    evals, evecs = np.linalg.eigh(M)
+    evals = np.maximum(evals, eps)
+    return evecs @ np.diag(evals) @ evecs.T
+
+
+def build_unit_power_model_from_template(
+    F_template: np.ndarray,
+    rho_mobility: float,
+    target_power: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    d = F_template.shape[0]
+    C_target = (target_power / d) * np.eye(d)
+    F_model = scale_matrix_to_spectral_radius(F_template, rho_mobility)
+    Q_model = C_target - F_model @ C_target @ F_model.T
+    Q_model = enforce_psd(Q_model)
+    return F_model, Q_model, C_target
 
 def generate_state_space_data(
     T: int,
@@ -59,7 +122,8 @@ def generate_state_space_data(
     x = np.zeros((T, d))
     y = np.zeros((T, d))
 
-    x_prev = rng.multivariate_normal(np.zeros(d), np.eye(d))
+    P_stat = solve_stationary_state_covariance(F, Q)
+    x_prev = rng.multivariate_normal(np.zeros(d), P_stat)
 
     for t in range(T):
         w_t = rng.multivariate_normal(np.zeros(d), Q)
@@ -998,21 +1062,28 @@ def main():
     # ----------------------------
     # User-configurable parameters
     # ----------------------------
-    F_true = np.array([
+    F_template = np.array([
         [0.8, 0.6],
         [-0.4, 0.7],
     ], dtype=float)
-    F_true = project_to_stable_matrix(F_true, max_radius=0.99)
 
-    Q_process = np.array([
-        [1e-4, 0.0],
-        [0.0, 1e-4],
-    ], dtype=float)
-
+    rho_mobility = 0.95
+    target_power = 0.01
+    F_true, Q_process, C_target = build_unit_power_model_from_template(
+        F_template=F_template,
+        rho_mobility=rho_mobility,
+        target_power=target_power,
+    )
     R_obs = np.array([
         [1e-4 , 0.0],
         [0.0, 1e-4],
     ], dtype=float)
+    P_stat = solve_stationary_state_covariance(F_true, Q_process)
+    print(
+        f"Using unit-power channel model with rho={rho_mobility:.3f}. "
+        f"target_power={target_power:.4e}, "
+        f"trace(C_target)={np.real(np.trace(C_target)):.4e}, trace(P_stat)={np.real(np.trace(P_stat)):.4e}"
+    )
 
     history_len = 20
     num_chunks = 400
@@ -1026,7 +1097,7 @@ def main():
 
     # Transfer-space basis settings
     rp_degree_for_m_curve = 4
-    max_m = 5
+    max_m = 10
     degree_vals = np.arange(1, 11)
     m_eval_for_degree_plot = max_m
 
@@ -1206,6 +1277,10 @@ def main():
     # -----------------------------------
     np.savez(
         "kalman_transfer_pca_rp_fo_prediction_stats.npz",
+        F_template=F_template,
+        rho_mobility=rho_mobility,
+        target_power=target_power,
+        C_target=C_target,
         F_true=F_true,
         Q_process=Q_process,
         R_obs=R_obs,

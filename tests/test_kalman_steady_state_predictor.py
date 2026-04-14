@@ -615,10 +615,10 @@ def main():
     ], dtype=float)
 
     T = 20
-    num_mc = 10000
+    num_mc = 100
 
     # Separate training-sequence length used to estimate F via EM
-    T_train = 1000
+    T_train = 100
     em_max_iters = 50
     em_tol = 1e-6
 
