@@ -1208,8 +1208,8 @@ def main():
         [-0.4, 0.7],
     ], dtype=float)
 
-    rho_mobility = 0.95
-    target_power = 0.01
+    rho_mobility = 0.90
+    target_power = 0.0025
 
     # NEW SETTING:
     #   False -> use perfect F_true everywhere
@@ -1236,8 +1236,8 @@ def main():
     print(f"use_estimated_F = {use_estimated_F}")
 
     history_len = 50
-    num_chunks = 400
-    num_test_chunks = 400
+    num_chunks = 100
+    num_test_chunks = 200
     num_freqs = 64
 
     max_em_iters = 50
