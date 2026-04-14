@@ -36,13 +36,60 @@ def solve_discrete_riccati_steady_state(F, Q, R, max_iter=10000, tol=1e-12):
     K = P_minus @ np.linalg.inv(S)
     return P_minus, K
 
+def solve_stationary_state_covariance(F, Q, max_iter=10000, tol=1e-12):
+    """
+    Solve P = F P F^T + Q by fixed-point iteration (stable F assumed).
+    """
+    d = F.shape[0]
+    P = np.eye(d)
+    for _ in range(max_iter):
+        P_next = F @ P @ F.T + Q
+        P_next = symmetrize(P_next)
+        if np.linalg.norm(P_next - P, ord='fro') < tol:
+            return P_next
+        P = P_next
+    return P
+
+
+def normalize_qr_for_unit_expected_state_norm(F, Q, R, target_power=1.0):
+    """
+    Scale (Q, R) by the same factor so stationary E[||x_t||^2]=target_power.
+    """
+    P_stat = solve_stationary_state_covariance(F, Q)
+    state_power = float(np.real(np.trace(P_stat)))
+    scale = float(target_power / max(state_power, 1e-15))
+    return Q * scale, R * scale, scale, state_power
+
+
+def scale_matrix_to_spectral_radius(F, target_radius):
+    rho = float(np.max(np.abs(np.linalg.eigvals(F))))
+    if rho < 1e-15:
+        raise ValueError('Cannot scale a near-zero matrix to a target spectral radius.')
+    return F * (target_radius / rho)
+
+
+def enforce_psd(M, eps=1e-12):
+    M = symmetrize(M)
+    evals, evecs = np.linalg.eigh(M)
+    evals = np.maximum(evals, eps)
+    return evecs @ np.diag(evals) @ evecs.T
+
+
+def build_unit_power_model_from_template(F_template, rho_mobility, target_power=1.0):
+    d = F_template.shape[0]
+    C_target = (target_power / d) * np.eye(d)
+    F_model = scale_matrix_to_spectral_radius(F_template, rho_mobility)
+    Q_model = C_target - F_model @ C_target @ F_model.T
+    Q_model = enforce_psd(Q_model)
+    return F_model, Q_model, C_target
 
 def generate_state_space_data(T, F, Q, R, rng):
     d = F.shape[0]
     x = np.zeros((T, d))
     y = np.zeros((T, d))
 
-    x_prev = rng.multivariate_normal(np.zeros(d), np.eye(d))
+    P_stat = solve_stationary_state_covariance(F, Q)
+    x_prev = rng.multivariate_normal(np.zeros(d), P_stat)
 
     for t in range(T):
         w_t = rng.multivariate_normal(np.zeros(d), Q)
@@ -466,8 +513,8 @@ def sweep_fixed_Q_vary_R(F_true, Q_fixed, R_vars, T=10, num_mc=2000, seed=100,
     )
 
 
-def sweep_fixed_R_vary_Q(F_true, R_fixed, Q_vars, T=10, num_mc=2000, seed=200,
-                         T_train=1000, em_max_iters=50, em_tol=1e-6):
+def sweep_fixed_R_vary_mobility(F_template, R_fixed, rho_vals, T=10, num_mc=2000, seed=200,
+                                T_train=1000, em_max_iters=50, em_tol=1e-6):
     nmse_ss_perfect_vals = []
     nmse_ss_est_vals = []
     nmse_prev_obs_vals = []
@@ -483,14 +530,17 @@ def sweep_fixed_R_vary_Q(F_true, R_fixed, Q_vars, T=10, num_mc=2000, seed=200,
     xpow_vals = []
     F_est_list = []
 
-    for i, qvar in enumerate(Q_vars):
-        Q = np.array([[qvar, 0.0],
-                      [0.0, qvar]], dtype=float)
+    for i, rho in enumerate(rho_vals):
+        F_true, Q_model, _ = build_unit_power_model_from_template(
+            F_template=F_template,
+            rho_mobility=rho,
+            target_power=1.0,
+        )
 
         # Estimate F once for this (Q,R) setting using a separate training sequence
         F_hat = estimate_F_for_setting(
             F_true=F_true,
-            Q=Q,
+            Q=Q_model,
             R=R_fixed,
             T_train=T_train,
             seed=20_000 + seed + i,
@@ -501,15 +551,15 @@ def sweep_fixed_R_vary_Q(F_true, R_fixed, Q_vars, T=10, num_mc=2000, seed=200,
         F_est_list.append(F_hat)
 
         results_perfect = one_step_last_sample_mc_nmse_all(
-            F_true=F_true, Q=Q, R=R_fixed, T=T, num_mc=num_mc, seed=seed + i, F_model=F_true
+            F_true=F_true, Q=Q_model, R=R_fixed, T=T, num_mc=num_mc, seed=seed + i, F_model=F_true
         )
 
         results_est = one_step_last_sample_mc_nmse_all(
-            F_true=F_true, Q=Q, R=R_fixed, T=T, num_mc=num_mc, seed=seed + i, F_model=F_hat
+            F_true=F_true, Q=Q_model, R=R_fixed, T=T, num_mc=num_mc, seed=seed + i, F_model=F_hat
         )
 
         print(
-            f'[fixed R, vary Q] Q_var={qvar:.4e} '
+            f'[fixed R, vary mobility] rho={rho:.4f} '
             f'-> perfect ss={results_perfect["nmse_ss"]:.6f}, '
             f'est ss={results_est["nmse_ss"]:.6f}, '
             f'prev-obs={results_perfect["nmse_prev_obs"]:.6f}, '
@@ -548,45 +598,43 @@ def sweep_fixed_R_vary_Q(F_true, R_fixed, Q_vars, T=10, num_mc=2000, seed=200,
 
 
 def main():
-    F = np.array([
+    F_template = np.array([
         [0.8, 0.6],
         [-0.4, 0.7],
     ], dtype=float)
+    rho_fixed_for_R_sweep = 0.95
+    F_for_R_sweep, Q_fixed_for_R_sweep, C_target = build_unit_power_model_from_template(
+        F_template=F_template,
+        rho_mobility=rho_fixed_for_R_sweep,
+        target_power=0.01,
+    )
 
-    eigvals = np.linalg.eigvals(F)
-
-    if np.max(np.abs(eigvals)) >= 1.0:
-        raise ValueError('F must be stable.')
-
-    # Balanced fixed values:
-    # - for the R sweep, use a low diagonal Q
-    # - for the Q sweep, use a low diagonal R
-    Q_fixed_for_R_sweep = np.array([
-        [0.0001, 0.0],
-        [0.0, 0.0001],
-    ], dtype=float)
-
-    R_fixed_for_Q_sweep = np.array([
+    R_fixed_for_mobility_sweep = np.array([
         [0.0001, 0.0],
         [0.0, 0.0001],
     ], dtype=float)
 
     T = 20
-    num_mc = 1000
+    num_mc = 10000
 
     # Separate training-sequence length used to estimate F via EM
-    T_train = 20
+    T_train = 1000
     em_max_iters = 50
     em_tol = 1e-6
 
     R_vars = np.logspace(-4, -2, 10)
-    Q_vars = np.logspace(-4, -2, 10)
+    rho_vals = np.linspace(0.70, 0.99, 10)
 
-    print('\nUsing fixed Q for R sweep:')
+    print('\nUsing fixed mobility for R sweep:')
+    print(f'rho={rho_fixed_for_R_sweep:.3f}')
+    print('Resulting fixed F:')
+    print(F_for_R_sweep)
+    print('Resulting fixed Q:')
     print(Q_fixed_for_R_sweep)
+    print(f'Target stationary trace(C)={np.trace(C_target):.4f}')
 
-    print('\nUsing fixed R for Q sweep:')
-    print(R_fixed_for_Q_sweep)
+    print('\nUsing fixed R for mobility sweep:')
+    print(R_fixed_for_mobility_sweep)
 
     (
         nmse_ss_vs_R_perfect,
@@ -603,7 +651,7 @@ def main():
         snr_db_vs_R,
         F_est_vs_R,
     ) = sweep_fixed_Q_vary_R(
-        F_true=F,
+        F_true=F_for_R_sweep,
         Q_fixed=Q_fixed_for_R_sweep,
         R_vars=R_vars,
         T=T,
@@ -615,22 +663,22 @@ def main():
     )
 
     (
-        nmse_ss_vs_Q_perfect,
-        nmse_ss_vs_Q_est,
-        nmse_prev_obs_vs_Q,
-        nmse_full_kf_vs_Q_perfect,
-        nmse_full_kf_vs_Q_est,
-        mse_ss_vs_Q_perfect,
-        mse_ss_vs_Q_est,
-        mse_prev_obs_vs_Q,
-        mse_full_kf_vs_Q_perfect,
-        mse_full_kf_vs_Q_est,
-        xpow_vs_Q,
-        F_est_vs_Q,
-    ) = sweep_fixed_R_vary_Q(
-        F_true=F,
-        R_fixed=R_fixed_for_Q_sweep,
-        Q_vars=Q_vars,
+        nmse_ss_vs_rho_perfect,
+        nmse_ss_vs_rho_est,
+        nmse_prev_obs_vs_rho,
+        nmse_full_kf_vs_rho_perfect,
+        nmse_full_kf_vs_rho_est,
+        mse_ss_vs_rho_perfect,
+        mse_ss_vs_rho_est,
+        mse_prev_obs_vs_rho,
+        mse_full_kf_vs_rho_perfect,
+        mse_full_kf_vs_rho_est,
+        xpow_vs_rho,
+        F_est_vs_rho,
+    ) = sweep_fixed_R_vary_mobility(
+        F_template=F_template,
+        R_fixed=R_fixed_for_mobility_sweep,
+        rho_vals=rho_vals,
         T=T,
         num_mc=num_mc,
         seed=200,
@@ -641,16 +689,18 @@ def main():
 
     np.savez(
         'kalman_nmse_balanced_sweeps_results_with_em_F_estimation.npz',
-        F_true=F,
+        F_template=F_template,
+        rho_fixed_for_R_sweep=rho_fixed_for_R_sweep,
         Q_fixed_for_R_sweep=Q_fixed_for_R_sweep,
-        R_fixed_for_Q_sweep=R_fixed_for_Q_sweep,
+        R_fixed_for_mobility_sweep=R_fixed_for_mobility_sweep,
+        C_target=C_target,
         T=T,
         num_mc=num_mc,
         T_train=T_train,
         em_max_iters=em_max_iters,
         em_tol=em_tol,
         R_vars=R_vars,
-        Q_vars=Q_vars,
+        rho_vals=rho_vals,
 
         nmse_ss_vs_R_perfect=nmse_ss_vs_R_perfect,
         nmse_ss_vs_R_est=nmse_ss_vs_R_est,
@@ -666,18 +716,18 @@ def main():
         snr_db_vs_R=snr_db_vs_R,
         F_est_vs_R=F_est_vs_R,
 
-        nmse_ss_vs_Q_perfect=nmse_ss_vs_Q_perfect,
-        nmse_ss_vs_Q_est=nmse_ss_vs_Q_est,
-        nmse_prev_obs_vs_Q=nmse_prev_obs_vs_Q,
-        nmse_full_kf_vs_Q_perfect=nmse_full_kf_vs_Q_perfect,
-        nmse_full_kf_vs_Q_est=nmse_full_kf_vs_Q_est,
-        mse_ss_vs_Q_perfect=mse_ss_vs_Q_perfect,
-        mse_ss_vs_Q_est=mse_ss_vs_Q_est,
-        mse_prev_obs_vs_Q=mse_prev_obs_vs_Q,
-        mse_full_kf_vs_Q_perfect=mse_full_kf_vs_Q_perfect,
-        mse_full_kf_vs_Q_est=mse_full_kf_vs_Q_est,
-        xpow_vs_Q=xpow_vs_Q,
-        F_est_vs_Q=F_est_vs_Q
+        nmse_ss_vs_rho_perfect=nmse_ss_vs_rho_perfect,
+        nmse_ss_vs_rho_est=nmse_ss_vs_rho_est,
+        nmse_prev_obs_vs_rho=nmse_prev_obs_vs_rho,
+        nmse_full_kf_vs_rho_perfect=nmse_full_kf_vs_rho_perfect,
+        nmse_full_kf_vs_rho_est=nmse_full_kf_vs_rho_est,
+        mse_ss_vs_rho_perfect=mse_ss_vs_rho_perfect,
+        mse_ss_vs_rho_est=mse_ss_vs_rho_est,
+        mse_prev_obs_vs_rho=mse_prev_obs_vs_rho,
+        mse_full_kf_vs_rho_perfect=mse_full_kf_vs_rho_perfect,
+        mse_full_kf_vs_rho_est=mse_full_kf_vs_rho_est,
+        xpow_vs_rho=xpow_vs_rho,
+        F_est_vs_rho=F_est_vs_rho
     )
 
     # Plot: fixed Q, vary R (shown versus SNR in ascending order)
@@ -702,21 +752,21 @@ def main():
     plt.ylim(0.0, 1.0)
     plt.savefig('nmse_vs_R_with_em_estimated_F.png', dpi=200)
 
-    # Plot: fixed R, vary Q
+    # Plot: fixed R, vary mobility
     plt.figure(figsize=(8, 5.5))
-    plt.semilogx(Q_vars, nmse_ss_vs_Q_perfect, marker='o', label='Steady-state KF (perfect F)')
-    # plt.semilogx(Q_vars, nmse_ss_vs_Q_est, marker='o', linestyle='--', label='Steady-state KF (estimated F)')
-    plt.semilogx(Q_vars, nmse_prev_obs_vs_Q, marker='s', label='Previous observation baseline')
-    plt.semilogx(Q_vars, nmse_full_kf_vs_Q_perfect, marker='^', label='Full KF (perfect F)')
-    # plt.semilogx(Q_vars, nmse_full_kf_vs_Q_est, marker='^', linestyle='--', label='Full KF (estimated F)')
-    plt.xlabel('Process-noise variance scale')
+    plt.plot(rho_vals, nmse_ss_vs_rho_perfect, marker='o', label='Steady-state KF (perfect F)')
+    # plt.plot(rho_vals, nmse_ss_vs_rho_est, marker='o', linestyle='--', label='Steady-state KF (estimated F)')
+    plt.plot(rho_vals, nmse_prev_obs_vs_rho, marker='s', label='Previous observation baseline')
+    plt.plot(rho_vals, nmse_full_kf_vs_rho_perfect, marker='^', label='Full KF (perfect F)')
+    # plt.plot(rho_vals, nmse_full_kf_vs_rho_est, marker='^', linestyle='--', label='Full KF (estimated F)')
+    plt.xlabel('Mobility coefficient rho')
     plt.ylabel('One-step last-sample NMSE')
-    plt.title(f'Fixed R, vary Q   (EM-based F estimation, T_train={T_train})')
+    plt.title(f'Fixed R, vary mobility   (EM-based F estimation, T_train={T_train})')
     plt.grid(True, which='both', alpha=0.3)
     plt.legend()
     plt.tight_layout()
     plt.ylim(0.0, 1.0)
-    plt.savefig('nmse_vs_Q_with_em_estimated_F.png', dpi=200)
+    plt.savefig('nmse_vs_rho_with_em_estimated_F.png', dpi=200)
 
     plt.show()
 
