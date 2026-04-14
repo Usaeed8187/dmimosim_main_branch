@@ -948,6 +948,48 @@ class FirstOrderBasisBank:
         return outputs
 
 
+class RandomFirstOrderBasisBank:
+    def __init__(
+        self,
+        num_basis: int,
+        num_terms: int,
+        d_out: int,
+        d_in: int,
+        rng: np.random.Generator,
+        max_radius: float = 0.98,
+        input_scale: float = 0.25,
+    ):
+        self.num_basis = num_basis
+        self.num_terms = num_terms
+        self.d_out = d_out
+        self.d_in = d_in
+        self.max_radius = max_radius
+
+        pole_mags = rng.uniform(0.0, max_radius, size=(num_basis, num_terms))
+        pole_phases = rng.uniform(-np.pi, np.pi, size=(num_basis, num_terms))
+        self.poles = pole_mags * np.exp(1j * pole_phases)
+
+        # Random input maps analogous to configured residues C_{k,j}.
+        self.input_maps = input_scale * (
+            rng.standard_normal((num_basis, num_terms, d_out, d_in))
+            + 1j * rng.standard_normal((num_basis, num_terms, d_out, d_in))
+        ) / np.sqrt(2.0 * max(d_in, 1))
+
+        self.state = np.zeros((num_basis, num_terms, d_out), dtype=np.complex128)
+
+    def reset(self):
+        self.state.fill(0.0)
+
+    def step(self, u_t: np.ndarray) -> np.ndarray:
+        outputs = np.zeros((self.num_basis, self.d_out), dtype=np.complex128)
+        for j in range(self.num_basis):
+            for k in range(self.num_terms):
+                Cjk = self.input_maps[j, k]
+                self.state[j, k] = self.poles[j, k] * self.state[j, k] + Cjk @ u_t
+            outputs[j] = np.sum(self.state[j], axis=0)
+        return outputs
+
+
 # ============================================================
 # Prediction helpers
 # ============================================================
@@ -988,6 +1030,19 @@ def build_fo_bank_from_fit_info(fit_info: list, num_freqs: int, d: int):
     poles = np.stack([fo["poles"] for fo in fo_info], axis=0)
     residues = np.stack([fo["residues"] for fo in fo_info], axis=0)
     return FirstOrderBasisBank(poles=poles, residues=residues, d_out=d, d_in=d), fo_info
+
+
+def build_random_fo_bank(num_basis: int, num_terms: int, d: int, seed: int):
+    rng = np.random.default_rng(seed)
+    return RandomFirstOrderBasisBank(
+        num_basis=num_basis,
+        num_terms=num_terms,
+        d_out=d,
+        d_in=d,
+        rng=rng,
+        max_radius=0.98,
+        input_scale=0.25,
+    )
 
 
 def run_bank_and_collect_features(bank, y_seq: np.ndarray) -> np.ndarray:
@@ -1181,7 +1236,7 @@ def main():
     test_seed = 67890
 
     # Transfer-space basis settings
-    rp_degree_for_m_curve = 4
+    rp_degree_for_m_curve = 5
     max_m = 10
     degree_vals = np.arange(1, 11)
     m_eval_for_degree_plot = max_m
@@ -1267,6 +1322,7 @@ def main():
     x_test_all, y_test_all = generate_state_space_data(total_test_T, F_true, Q_process, R_obs, rng_test)
 
     pred_nmse_fo = np.zeros_like(m_vals, dtype=float)
+    pred_nmse_random = np.zeros_like(m_vals, dtype=float)
 
     ss_kalman_baseline_nmse = evaluate_steady_state_kalman_baseline_nmse_over_chunks(
         x_all=x_test_all,
@@ -1293,15 +1349,10 @@ def main():
     for i, m in enumerate(m_vals):
         if m == 0:
             pred_nmse_fo[i] = np.nan
+            pred_nmse_random[i] = np.nan
             continue
 
-        # Paper-faithful high-level flow:
-        #   1) keep the first m PCA basis vectors,
-        #   2) fit each retained basis vector with its own reduced-order RP model,
-        #   3) decompose each RP model into first-order terms,
-        #   4) keep the resulting FO bank fixed,
-        #   5) for each subframe (chunk), train a fresh linear readout on that
-        #      subframe and test on the held-out final time step.
+        # Configured FO bank from the PCA -> RP -> first-order pipeline.
         _, _, fit_info_m = fit_first_m_q_columns_with_rational_models(
             Q_eig=Q_eig,
             num_freqs=num_freqs,
@@ -1328,10 +1379,31 @@ def main():
             reg=readout_reg,
         )
 
+        # Random-weight analogue: same number of basis outputs and same number
+        # of first-order terms per basis as the configured FO bank, but poles
+        # and input maps are drawn at random once and then kept fixed.
+        random_seed_m = 1000 + int(m)
+        def random_builder_local(m_local=m, seed_local=random_seed_m):
+            return build_random_fo_bank(
+                num_basis=m_local,
+                num_terms=rp_degree_for_m_curve,
+                d=d,
+                seed=seed_local,
+            )
+
+        pred_nmse_random[i] = evaluate_prediction_nmse_over_chunks(
+            x_all=x_test_all,
+            y_all=y_test_all,
+            history_len=history_len,
+            bank_builder=random_builder_local,
+            target_kind=target_kind,
+            reg=readout_reg,
+        )
+
         print(
             f"m={m:2d} | transfer NMSE exact={nmse_exact_q[i]:.4e}, "
             f"RP={nmse_rp_q[i]:.4e}, FO={nmse_fo_q[i]:.4e} | "
-            f"prediction NMSE FO={pred_nmse_fo[i]:.4e}"
+            f"prediction NMSE FO={pred_nmse_fo[i]:.4e}, random={pred_nmse_random[i]:.4e}"
         )
 
     # -----------------------------------
@@ -1370,7 +1442,9 @@ def main():
         v_recon_nmse_vs_degree_fo=v_recon_nmse_vs_degree_fo,
         m_eval_for_degree_plot=m_eval_for_degree_plot,
         pred_nmse_fo=pred_nmse_fo,
+        pred_nmse_random=pred_nmse_random,
         ss_kalman_baseline_nmse=ss_kalman_baseline_nmse,
+        full_kalman_baseline_nmse=full_kalman_baseline_nmse,
         target_kind=target_kind,
         exact_q_fir_len=exact_q_fir_len,
     )
@@ -1436,6 +1510,12 @@ def main():
         marker="^",
         label=f"FO fixed bank + LS readout (degree={rp_degree_for_m_curve})",
     )
+    plt.plot(
+        m_vals[1:],
+        pred_nmse_random[1:],
+        marker="o",
+        label=f"Random FO bank + LS readout ({rp_degree_for_m_curve} terms/basis)",
+    )
     plt.axhline(
         ss_kalman_baseline_nmse,
         color="k",
@@ -1452,12 +1532,12 @@ def main():
     )
     plt.xlabel("Number of retained basis vectors (m)")
     plt.ylabel(f"Testing prediction NMSE vs true {target_kind}_{{N}}")
-    plt.title("FO prediction NMSE on unseen chunks")
+    plt.title("Configured FO vs random FO prediction NMSE on unseen chunks")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
     plt.ylim((0, 1))
-    plt.savefig("prediction_nmse_vs_m_fo_only.png", dpi=200)
+    plt.savefig("prediction_nmse_vs_m_fo_vs_random.png", dpi=200)
     plt.show()
 
 
