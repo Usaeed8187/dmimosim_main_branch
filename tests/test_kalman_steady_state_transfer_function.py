@@ -297,6 +297,36 @@ def run_steady_state_predictor(y_hist: np.ndarray, F: np.ndarray, K_ss: np.ndarr
 
     return xhat_pred
 
+def run_full_kalman_one_step_predictor(
+    y_hist: np.ndarray,
+    F: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+) -> np.ndarray:
+    """
+    Uses measurements y_hist = [y_0, ..., y_{T_hist-1}] to produce
+    one-step-ahead predictions:
+        xhat_pred[t] = xhat_{t+1|t}
+    """
+    T_hist, d = y_hist.shape
+
+    xhat_plus = np.zeros(d)
+    P_plus = np.eye(d)
+    xhat_pred = np.zeros((T_hist, d))
+
+    for t in range(T_hist):
+        xhat_minus = F @ xhat_plus
+        P_minus = F @ P_plus @ F.T + Q
+
+        S = P_minus + R
+        K_t = P_minus @ np.linalg.inv(S)
+        innovation = y_hist[t] - xhat_minus
+        xhat_plus = xhat_minus + K_t @ innovation
+        P_plus = (np.eye(d) - K_t) @ P_minus
+
+        xhat_pred[t] = F @ xhat_plus
+
+    return xhat_pred
 
 def steady_state_predictor_transfer_samples(
     A_p: np.ndarray,
@@ -1013,6 +1043,42 @@ def evaluate_prediction_nmse_over_chunks(
     den = np.linalg.norm(T) ** 2
     return float(np.real(num / max(den, 1e-15)))
 
+def evaluate_full_kalman_baseline_nmse_over_chunks(
+    x_all: np.ndarray,
+    y_all: np.ndarray,
+    history_len: int,
+    F: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+    target_kind: str = "x",
+) -> float:
+    """
+    Evaluate the full (time-varying gain) Kalman one-step predictor on the
+    same chunking structure used by the learned-bank predictor.
+    """
+    chunk_len = history_len + 1
+    num_chunks = x_all.shape[0] // chunk_len
+    preds = []
+    trues = []
+
+    for k in range(num_chunks):
+        start = k * chunk_len
+        end = (k + 1) * chunk_len
+        y_chunk = y_all[start:end]
+        x_chunk = x_all[start:end]
+
+        xhat_pred = run_full_kalman_one_step_predictor(y_chunk[:history_len], F, Q, R)
+        pred = xhat_pred[-1]
+
+        true = x_chunk[-1] if target_kind == "x" else y_chunk[-1]
+        preds.append(pred)
+        trues.append(true)
+
+    P = np.stack(preds, axis=0)
+    T = np.stack(trues, axis=0)
+    num = np.linalg.norm(P - T) ** 2
+    den = np.linalg.norm(T) ** 2
+    return float(np.real(num / max(den, 1e-15)))
 
 def evaluate_steady_state_kalman_baseline_nmse_over_chunks(
     x_all: np.ndarray,
@@ -1201,6 +1267,17 @@ def main():
     )
     print(f"Steady-state Kalman baseline NMSE: {ss_kalman_baseline_nmse:.4e}")
 
+    full_kalman_baseline_nmse = evaluate_full_kalman_baseline_nmse_over_chunks(
+        x_all=x_test_all,
+        y_all=y_test_all,
+        history_len=history_len,
+        F=F_true,
+        Q=Q_process,
+        R=R_obs,
+        target_kind=target_kind,
+    )
+    print(f"Full Kalman baseline NMSE: {full_kalman_baseline_nmse:.4e}")
+
     for i, m in enumerate(m_vals):
         if m == 0:
             pred_nmse_exact[i] = np.nan
@@ -1316,6 +1393,7 @@ def main():
         pred_nmse_rp=pred_nmse_rp,
         pred_nmse_fo=pred_nmse_fo,
         ss_kalman_baseline_nmse=ss_kalman_baseline_nmse,
+        full_kalman_baseline_nmse=full_kalman_baseline_nmse,
         target_kind=target_kind,
         exact_q_fir_len=exact_q_fir_len,
     )
@@ -1384,6 +1462,13 @@ def main():
         linestyle="--",
         linewidth=1.5,
         label="Steady-state Kalman baseline",
+    )
+    plt.axhline(
+        full_kalman_baseline_nmse,
+        color="tab:red",
+        linestyle=":",
+        linewidth=1.5,
+        label="Full Kalman baseline",
     )
     plt.xlabel("Number of retained basis vectors (m)")
     plt.ylabel(f"Testing prediction NMSE vs true {target_kind}_{{N}}")
