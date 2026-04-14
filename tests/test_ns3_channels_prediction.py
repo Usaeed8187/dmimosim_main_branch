@@ -170,6 +170,66 @@ def steady_kalman_predict_next(
     z_next = f_aug @ z_hat
     return z_next[:d]
 
+def _init_augmented_state_batch(y_hist_batch: np.ndarray, p: int) -> np.ndarray:
+    # y_hist_batch: [T, Ntiles, D] -> state: [Ntiles, p*D]
+    state_stack = y_hist_batch[p - 1 :: -1][:p].astype(np.complex128)
+    ntiles, d = state_stack.shape[1], state_stack.shape[2]
+    return state_stack.transpose(1, 0, 2).reshape(ntiles, p * d)
+
+
+def full_kalman_predict_next_batch(
+    y_hist_batch: np.ndarray,
+    f_aug: np.ndarray,
+    q_aug: np.ndarray,
+    r_diag: np.ndarray,
+) -> np.ndarray:
+    t_len, ntiles, d = y_hist_batch.shape
+    p = f_aug.shape[0] // d
+    if t_len <= p:
+        return y_hist_batch[-1].astype(np.complex128)
+
+    pd = p * d
+    r_mat = np.diag(np.maximum(r_diag, 1e-12).astype(np.complex128))
+    z_hat = _init_augmented_state_batch(y_hist_batch, p)
+    p_hat = np.broadcast_to(
+        np.eye(pd, dtype=np.complex128) * (float(np.mean(r_diag)) + 1e-6),
+        (ntiles, pd, pd),
+    ).copy()
+
+    for t in range(p, t_len):
+        z_pred = z_hat @ f_aug.T
+        p_pred = f_aug[None, :, :] @ p_hat @ f_aug.conj().T[None, :, :] + q_aug[None, :, :]
+
+        innov = y_hist_batch[t].astype(np.complex128) - z_pred[:, :d]
+        s = p_pred[:, :d, :d] + r_mat[None, :, :]
+        k = p_pred[:, :, :d] @ np.linalg.pinv(s)
+
+        z_hat = z_pred + (k @ innov[:, :, None]).squeeze(-1)
+        p_hat = p_pred - (k @ p_pred[:, :d, :])
+
+    z_next = z_hat @ f_aug.T
+    return z_next[:, :d]
+
+
+def steady_kalman_predict_next_batch(
+    y_hist_batch: np.ndarray,
+    f_aug: np.ndarray,
+    k_ss: np.ndarray,
+) -> np.ndarray:
+    t_len, _, d = y_hist_batch.shape
+    p = f_aug.shape[0] // d
+    if t_len <= p:
+        return y_hist_batch[-1].astype(np.complex128)
+
+    z_hat = _init_augmented_state_batch(y_hist_batch, p)
+
+    for t in range(p, t_len):
+        z_pred = z_hat @ f_aug.T
+        innov = y_hist_batch[t].astype(np.complex128) - z_pred[:, :d]
+        z_hat = z_pred + (k_ss[None, :, :] @ innov[:, :, None]).squeeze(-1)
+
+    z_next = z_hat @ f_aug.T
+    return z_next[:, :d]
 
 def evaluate_nmse_over_chunks(
     h_clean_dec: np.ndarray,
@@ -184,7 +244,7 @@ def evaluate_nmse_over_chunks(
     tiles_clean = channels_to_tiles(h_clean_dec)  # [T, Ntiles, D]
     tiles_noisy = channels_to_tiles(h_noisy_dec)
 
-    t_dec, ntiles, d = tiles_clean.shape
+    t_dec, _, d = tiles_clean.shape
     if t_dec <= history_len:
         raise ValueError("Not enough decimated samples for at least one chunk.")
 
@@ -207,13 +267,12 @@ def evaluate_nmse_over_chunks(
         a_blocks = [a.conj() for a in a_blocks]
         f_aug, q_aug = kf_helper._build_augmented_system(a_blocks, q_proc)
 
-        x_pred_full = np.zeros_like(x_true_next, dtype=np.complex128)
-        x_pred_ss = np.zeros_like(x_true_next, dtype=np.complex128)
+        h_mat = build_augmented_obs_matrix(d, p_eff)
+        r_mat = np.diag(np.maximum(r_diag, 1e-12).astype(np.complex128))
+        _, k_ss = solve_riccati_steady_state_complex(f_aug, q_aug, h_mat, r_mat)
 
-        for tile_idx in range(ntiles):
-            y_hist_tile = y_hist_chunk[:, tile_idx, :]
-            x_pred_full[tile_idx] = full_kalman_predict_next(y_hist_tile, f_aug, q_aug, r_diag)
-            x_pred_ss[tile_idx] = steady_kalman_predict_next(y_hist_tile, f_aug, q_aug, r_diag)
+        x_pred_full = full_kalman_predict_next_batch(y_hist_chunk, f_aug, q_aug, r_diag)
+        x_pred_ss = steady_kalman_predict_next_batch(y_hist_chunk, f_aug, k_ss)
 
         num_full += float(np.sum(np.abs(x_pred_full - x_true_next) ** 2))
         den_full += float(np.sum(np.abs(x_true_next) ** 2))
