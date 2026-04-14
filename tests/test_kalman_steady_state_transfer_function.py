@@ -947,19 +947,22 @@ class FirstOrderBasisBank:
         self.d_out = d_out
         self.d_in = d_in
         self.value_dim = d_out * d_in
+
+        # Atomic first-order states: one state/output per (basis index, first-order term).
         self.state = np.zeros((self.num_basis, self.num_terms, d_out), dtype=np.complex128)
 
     def reset(self):
         self.state.fill(0.0)
 
     def step(self, u_t: np.ndarray) -> np.ndarray:
-        outputs = np.zeros((self.num_basis, self.d_out), dtype=np.complex128)
+        # Return the full atomic first-order outputs, not the sum across terms.
+        atom_outputs = np.zeros((self.num_basis, self.num_terms, self.d_out), dtype=np.complex128)
         for j in range(self.num_basis):
             for k in range(self.num_terms):
                 Cjk = self.residues[j, :, k].reshape(self.d_out, self.d_in, order="F")
                 self.state[j, k] = self.poles[j, k] * self.state[j, k] + Cjk @ u_t
-            outputs[j] = np.sum(self.state[j], axis=0)
-        return outputs
+                atom_outputs[j, k] = self.state[j, k]
+        return atom_outputs
 
 
 class RandomFirstOrderBasisBank:
@@ -987,19 +990,20 @@ class RandomFirstOrderBasisBank:
             + 1j * rng.standard_normal((num_basis, num_terms, d_out, d_in))
         ) / np.sqrt(2.0 * max(d_in, 1))
 
+        # Atomic first-order states for the random baseline as well.
         self.state = np.zeros((num_basis, num_terms, d_out), dtype=np.complex128)
 
     def reset(self):
         self.state.fill(0.0)
 
     def step(self, u_t: np.ndarray) -> np.ndarray:
-        outputs = np.zeros((self.num_basis, self.d_out), dtype=np.complex128)
+        atom_outputs = np.zeros((self.num_basis, self.num_terms, self.d_out), dtype=np.complex128)
         for j in range(self.num_basis):
             for k in range(self.num_terms):
                 Cjk = self.input_maps[j, k]
                 self.state[j, k] = self.poles[j, k] * self.state[j, k] + Cjk @ u_t
-            outputs[j] = np.sum(self.state[j], axis=0)
-        return outputs
+                atom_outputs[j, k] = self.state[j, k]
+        return atom_outputs
 
 
 # ============================================================
@@ -1231,9 +1235,9 @@ def main():
     )
     print(f"use_estimated_F = {use_estimated_F}")
 
-    history_len = 40
-    num_chunks = 200
-    num_test_chunks = 200
+    history_len = 50
+    num_chunks = 400
+    num_test_chunks = 400
     num_freqs = 64
 
     max_em_iters = 50
@@ -1242,13 +1246,13 @@ def main():
     test_seed = 67890
 
     # Transfer-space basis settings
-    rp_degree_for_m_curve = 5
-    max_m = 10
+    rp_degree_for_m_curve = 4
+    max_m = 5
     degree_vals = np.arange(1, 11)
     m_eval_for_degree_plot = max_m
 
     # Prediction settings
-    target_kind = "x"
+    target_kind = "y"
     readout_reg = 1e-8
 
     # -----------------------------------
