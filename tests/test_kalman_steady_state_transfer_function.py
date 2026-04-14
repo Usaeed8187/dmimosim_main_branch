@@ -1522,13 +1522,13 @@ def main():
         m_vals[1:],
         pred_nmse_fo[1:],
         marker="^",
-        label=f"FO fixed bank + LS readout (degree={rp_degree_for_m_curve})",
+        label=f"Configured filterbank + LS readout (degree={rp_degree_for_m_curve})",
     )
     plt.plot(
         m_vals[1:],
         pred_nmse_random[1:],
         marker="o",
-        label=f"Random FO bank + LS readout ({rp_degree_for_m_curve} terms/basis)",
+        label=f"Random filterbank + LS readout ({rp_degree_for_m_curve} terms/basis)",
     )
     plt.axhline(
         ss_kalman_baseline_nmse,
