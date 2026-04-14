@@ -641,6 +641,17 @@ def denominator_coeffs_to_poles(a_den: np.ndarray) -> np.ndarray:
             poles[i] = 1.0 / rx
     return poles
 
+def stabilize_poles(poles: np.ndarray, max_radius: float = 0.98) -> np.ndarray:
+    poles_stable = poles.copy().astype(np.complex128)
+    for i, p in enumerate(poles_stable):
+        mag = np.abs(p)
+        if mag >= max_radius:
+            if mag < 1e-12:
+                poles_stable[i] = 0.0
+            else:
+                # radial projection inside the unit circle
+                poles_stable[i] = p * (max_radius / mag)
+    return poles_stable
 
 def decompose_rp_fit_into_first_order(
     fit_dict: dict,
@@ -656,6 +667,7 @@ def decompose_rp_fit_into_first_order(
 
     Qf_rp = q_column_to_frequency_matrix(q_rp_col, num_freqs, value_dim)
     poles = denominator_coeffs_to_poles(a_den)
+    poles = stabilize_poles(poles, max_radius=0.98)
     num_poles = len(poles)
 
     zinv = np.exp(-1j * omegas)
@@ -901,31 +913,38 @@ class SharedDenominatorIIRBank:
         return outputs
 
 
-class FirstOrderIIRBank:
+class FirstOrderBasisBank:
     def __init__(self, poles: np.ndarray, residues: np.ndarray, d_out: int, d_in: int):
-        # poles shape: (num_filters, num_terms)
-        # residues shape: (num_filters, value_dim, num_terms)
+        # poles shape: (num_basis, num_terms)
+        # residues shape: (num_basis, value_dim, num_terms)
         self.poles = poles.astype(np.complex128)
         self.residues = residues.astype(np.complex128)
-        self.num_filters = residues.shape[0]
+        self.num_basis = residues.shape[0]
         self.num_terms = residues.shape[2]
         self.d_out = d_out
         self.d_in = d_in
         self.value_dim = d_out * d_in
-        self.state = np.zeros((self.num_filters, self.num_terms, d_in), dtype=np.complex128)
+
+        # state[j, k] is the d_out-dimensional contribution of the k-th
+        # first-order term of the j-th retained basis vector. This matches
+        # the derivation
+        #   S_{k,j}(z) = C_{k,j} X(z) / (1 - p_{k,j} z^{-1})
+        # with recursion
+        #   s_{k,j}[t] = p_{k,j} s_{k,j}[t-1] + C_{k,j} u[t].
+        self.state = np.zeros((self.num_basis, self.num_terms, d_out), dtype=np.complex128)
 
     def reset(self):
         self.state.fill(0.0)
 
     def step(self, u_t: np.ndarray) -> np.ndarray:
-        outputs = np.zeros((self.num_filters * self.num_terms, self.d_out), dtype=np.complex128)
-        out_idx = 0
-        for j in range(self.num_filters):
+        # Returns one d_out-dimensional basis-output per retained eigenvector:
+        #   a_j[t] = sum_k s_{k,j}[t]
+        outputs = np.zeros((self.num_basis, self.d_out), dtype=np.complex128)
+        for j in range(self.num_basis):
             for k in range(self.num_terms):
-                self.state[j, k] = self.poles[j, k] * self.state[j, k] + u_t
-                Rjk = self.residues[j, :, k].reshape(self.d_out, self.d_in, order="F")
-                outputs[out_idx] = Rjk @ self.state[j, k]
-                out_idx += 1
+                Cjk = self.residues[j, :, k].reshape(self.d_out, self.d_in, order="F")
+                self.state[j, k] = self.poles[j, k] * self.state[j, k] + Cjk @ u_t
+            outputs[j] = np.sum(self.state[j], axis=0)
         return outputs
 
 
@@ -968,7 +987,7 @@ def build_fo_bank_from_fit_info(fit_info: list, num_freqs: int, d: int):
     )
     poles = np.stack([fo["poles"] for fo in fo_info], axis=0)
     residues = np.stack([fo["residues"] for fo in fo_info], axis=0)
-    return FirstOrderIIRBank(poles=poles, residues=residues, d_out=d, d_in=d), fo_info
+    return FirstOrderBasisBank(poles=poles, residues=residues, d_out=d, d_in=d), fo_info
 
 
 def run_bank_and_collect_features(bank, y_seq: np.ndarray) -> np.ndarray:
@@ -1043,42 +1062,6 @@ def evaluate_prediction_nmse_over_chunks(
     den = np.linalg.norm(T) ** 2
     return float(np.real(num / max(den, 1e-15)))
 
-def evaluate_full_kalman_baseline_nmse_over_chunks(
-    x_all: np.ndarray,
-    y_all: np.ndarray,
-    history_len: int,
-    F: np.ndarray,
-    Q: np.ndarray,
-    R: np.ndarray,
-    target_kind: str = "x",
-) -> float:
-    """
-    Evaluate the full (time-varying gain) Kalman one-step predictor on the
-    same chunking structure used by the learned-bank predictor.
-    """
-    chunk_len = history_len + 1
-    num_chunks = x_all.shape[0] // chunk_len
-    preds = []
-    trues = []
-
-    for k in range(num_chunks):
-        start = k * chunk_len
-        end = (k + 1) * chunk_len
-        y_chunk = y_all[start:end]
-        x_chunk = x_all[start:end]
-
-        xhat_pred = run_full_kalman_one_step_predictor(y_chunk[:history_len], F, Q, R)
-        pred = xhat_pred[-1]
-
-        true = x_chunk[-1] if target_kind == "x" else y_chunk[-1]
-        preds.append(pred)
-        trues.append(true)
-
-    P = np.stack(preds, axis=0)
-    T = np.stack(trues, axis=0)
-    num = np.linalg.norm(P - T) ** 2
-    den = np.linalg.norm(T) ** 2
-    return float(np.real(num / max(den, 1e-15)))
 
 def evaluate_steady_state_kalman_baseline_nmse_over_chunks(
     x_all: np.ndarray,
@@ -1119,6 +1102,42 @@ def evaluate_steady_state_kalman_baseline_nmse_over_chunks(
     den = np.linalg.norm(T) ** 2
     return float(np.real(num / max(den, 1e-15)))
 
+def evaluate_full_kalman_baseline_nmse_over_chunks(
+    x_all: np.ndarray,
+    y_all: np.ndarray,
+    history_len: int,
+    F: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+    target_kind: str = "x",
+) -> float:
+    """
+    Evaluate the full (time-varying gain) Kalman one-step predictor on the
+    same chunking structure used by the learned-bank predictor.
+    """
+    chunk_len = history_len + 1
+    num_chunks = x_all.shape[0] // chunk_len
+    preds = []
+    trues = []
+
+    for k in range(num_chunks):
+        start = k * chunk_len
+        end = (k + 1) * chunk_len
+        y_chunk = y_all[start:end]
+        x_chunk = x_all[start:end]
+
+        xhat_pred = run_full_kalman_one_step_predictor(y_chunk[:history_len], F, Q, R)
+        pred = xhat_pred[-1]
+
+        true = x_chunk[-1] if target_kind == "x" else y_chunk[-1]
+        preds.append(pred)
+        trues.append(true)
+
+    P = np.stack(preds, axis=0)
+    T = np.stack(trues, axis=0)
+    num = np.linalg.norm(P - T) ** 2
+    den = np.linalg.norm(T) ** 2
+    return float(np.real(num / max(den, 1e-15)))
 
 # ============================================================
 # Main
@@ -1163,7 +1182,7 @@ def main():
 
     # Transfer-space basis settings
     rp_degree_for_m_curve = 4
-    max_m = 5
+    max_m = 10
     degree_vals = np.arange(1, 11)
     m_eval_for_degree_plot = max_m
 
@@ -1246,14 +1265,7 @@ def main():
     rng_test = np.random.default_rng(test_seed)
     total_test_T = num_test_chunks * (history_len + 1)
     x_test_all, y_test_all = generate_state_space_data(total_test_T, F_true, Q_process, R_obs, rng_test)
-    signal_power_test = float(np.mean(np.sum(np.abs(x_test_all) ** 2, axis=1)))
-    noise_power = float(np.trace(R_obs))
-    snr_linear = signal_power_test / max(noise_power, 1e-15)
-    snr_db = 10.0 * np.log10(max(snr_linear, 1e-15))
-    print(f"Evaluation SNR (from testing chunks): {snr_db:.2f} dB")
 
-    pred_nmse_exact = np.zeros_like(m_vals, dtype=float)
-    pred_nmse_rp = np.zeros_like(m_vals, dtype=float)
     pred_nmse_fo = np.zeros_like(m_vals, dtype=float)
 
     ss_kalman_baseline_nmse = evaluate_steady_state_kalman_baseline_nmse_over_chunks(
@@ -1280,49 +1292,16 @@ def main():
 
     for i, m in enumerate(m_vals):
         if m == 0:
-            pred_nmse_exact[i] = np.nan
-            pred_nmse_rp[i] = np.nan
             pred_nmse_fo[i] = np.nan
             continue
 
-        def exact_builder_local(m_local=m):
-            return build_exact_q_fir_bank(
-                Q_eig=Q_eig,
-                num_freqs=num_freqs,
-                d=d,
-                m=m_local,
-                fir_len=exact_q_fir_len,
-            )
-
-        pred_nmse_exact[i] = evaluate_prediction_nmse_over_chunks(
-            x_all=x_test_all,
-            y_all=y_test_all,
-            history_len=history_len,
-            bank_builder=exact_builder_local,
-            target_kind=target_kind,
-            reg=readout_reg,
-        )
-
-        def rp_builder_local(m_local=m):
-            bank, _ = build_rp_bank(
-                Q_eig=Q_eig,
-                num_freqs=num_freqs,
-                d=d,
-                m=m_local,
-                degree=rp_degree_for_m_curve,
-            )
-            return bank
-
-        pred_nmse_rp[i] = evaluate_prediction_nmse_over_chunks(
-            x_all=x_test_all,
-            y_all=y_test_all,
-            history_len=history_len,
-            bank_builder=rp_builder_local,
-            target_kind=target_kind,
-            reg=readout_reg,
-        )
-
-        # FO uses fit_info from RP of the same m and fixed degree
+        # Paper-faithful high-level flow:
+        #   1) keep the first m PCA basis vectors,
+        #   2) fit each retained basis vector with its own reduced-order RP model,
+        #   3) decompose each RP model into first-order terms,
+        #   4) keep the resulting FO bank fixed,
+        #   5) for each subframe (chunk), train a fresh linear readout on that
+        #      subframe and test on the held-out final time step.
         _, _, fit_info_m = fit_first_m_q_columns_with_rational_models(
             Q_eig=Q_eig,
             num_freqs=num_freqs,
@@ -1350,8 +1329,9 @@ def main():
         )
 
         print(
-            f"m={m:2d} | transfer NMSE exact={nmse_exact_q[i]:.4e}, RP={nmse_rp_q[i]:.4e}, FO={nmse_fo_q[i]:.4e} | "
-            f"prediction NMSE exact={pred_nmse_exact[i]:.4e}, RP={pred_nmse_rp[i]:.4e}, FO={pred_nmse_fo[i]:.4e}"
+            f"m={m:2d} | transfer NMSE exact={nmse_exact_q[i]:.4e}, "
+            f"RP={nmse_rp_q[i]:.4e}, FO={nmse_fo_q[i]:.4e} | "
+            f"prediction NMSE FO={pred_nmse_fo[i]:.4e}"
         )
 
     # -----------------------------------
@@ -1389,11 +1369,8 @@ def main():
         v_recon_nmse_vs_degree_rp=v_recon_nmse_vs_degree_rp,
         v_recon_nmse_vs_degree_fo=v_recon_nmse_vs_degree_fo,
         m_eval_for_degree_plot=m_eval_for_degree_plot,
-        pred_nmse_exact=pred_nmse_exact,
-        pred_nmse_rp=pred_nmse_rp,
         pred_nmse_fo=pred_nmse_fo,
         ss_kalman_baseline_nmse=ss_kalman_baseline_nmse,
-        full_kalman_baseline_nmse=full_kalman_baseline_nmse,
         target_kind=target_kind,
         exact_q_fir_len=exact_q_fir_len,
     )
@@ -1453,9 +1430,12 @@ def main():
     # Plot 3: Prediction NMSE vs m on unseen testing chunks
     # -----------------------------------
     plt.figure(figsize=(8, 5))
-    plt.plot(m_vals[1:], pred_nmse_exact[1:], marker="o", label="Exact-Q fixed bank + per-chunk LS readout")
-    plt.plot(m_vals[1:], pred_nmse_rp[1:], marker="s", label=f"RP fixed bank + per-chunk LS readout (degree={rp_degree_for_m_curve})")
-    plt.plot(m_vals[1:], pred_nmse_fo[1:], marker="^", label=f"FO fixed bank + per-chunk LS readout (degree={rp_degree_for_m_curve})")
+    plt.plot(
+        m_vals[1:],
+        pred_nmse_fo[1:],
+        marker="^",
+        label=f"FO fixed bank + LS readout (degree={rp_degree_for_m_curve})",
+    )
     plt.axhline(
         ss_kalman_baseline_nmse,
         color="k",
@@ -1472,12 +1452,12 @@ def main():
     )
     plt.xlabel("Number of retained basis vectors (m)")
     plt.ylabel(f"Testing prediction NMSE vs true {target_kind}_{{N}}")
-    plt.title("Prediction NMSE on unseen chunks")
+    plt.title("FO prediction NMSE on unseen chunks")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
     plt.ylim((0, 1))
-    plt.savefig("prediction_nmse_vs_m_exactQ_vs_rpQ_vs_fo.png", dpi=200)
+    plt.savefig("prediction_nmse_vs_m_fo_only.png", dpi=200)
     plt.show()
 
 
