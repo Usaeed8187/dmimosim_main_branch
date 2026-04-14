@@ -214,6 +214,26 @@ def steady_state_predictor_matrices(F_hat: np.ndarray, Q: np.ndarray, R: np.ndar
     return A_p, B_p, K_ss
 
 
+def run_steady_state_predictor(y_hist: np.ndarray, F: np.ndarray, K_ss: np.ndarray) -> np.ndarray:
+    """
+    Uses y[0],...,y[T_hist-1] to produce one-step-ahead predictions:
+        xhat_pred[t] = xhat_{t+1|t}
+    """
+    T_hist, d = y_hist.shape
+    A_p = F - F @ K_ss
+    B_p = F @ K_ss
+
+    xhat_pred = np.zeros((T_hist, d))
+    s_prev = np.zeros(d)
+
+    for t in range(T_hist):
+        s_t = A_p @ s_prev + B_p @ y_hist[t]
+        xhat_pred[t] = s_t
+        s_prev = s_t
+
+    return xhat_pred
+
+
 def steady_state_predictor_transfer_samples(
     A_p: np.ndarray,
     B_p: np.ndarray,
@@ -930,6 +950,46 @@ def evaluate_prediction_nmse_over_chunks(
     return float(np.real(num / max(den, 1e-15)))
 
 
+def evaluate_steady_state_kalman_baseline_nmse_over_chunks(
+    x_all: np.ndarray,
+    y_all: np.ndarray,
+    history_len: int,
+    F: np.ndarray,
+    Q: np.ndarray,
+    R: np.ndarray,
+    target_kind: str = "x",
+) -> float:
+    """
+    Evaluate the true steady-state Kalman one-step predictor on the same
+    chunking structure used by the learned-bank predictor.
+    """
+    _, K_ss = solve_discrete_riccati_steady_state(F, Q, R)
+
+    chunk_len = history_len + 1
+    num_chunks = x_all.shape[0] // chunk_len
+    preds = []
+    trues = []
+
+    for k in range(num_chunks):
+        start = k * chunk_len
+        end = (k + 1) * chunk_len
+        y_chunk = y_all[start:end]
+        x_chunk = x_all[start:end]
+
+        xhat_pred = run_steady_state_predictor(y_chunk[:history_len], F, K_ss)
+        pred = xhat_pred[-1]
+
+        true = x_chunk[-1] if target_kind == "x" else y_chunk[-1]
+        preds.append(pred)
+        trues.append(true)
+
+    P = np.stack(preds, axis=0)
+    T = np.stack(trues, axis=0)
+    num = np.linalg.norm(P - T) ** 2
+    den = np.linalg.norm(T) ** 2
+    return float(np.real(num / max(den, 1e-15)))
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -945,16 +1005,16 @@ def main():
     F_true = project_to_stable_matrix(F_true, max_radius=0.99)
 
     Q_process = np.array([
-        [1e-4, 0.0],
-        [0.0, 1e-4],
-    ], dtype=float)
-
-    R_obs = np.array([
         [1e-3, 0.0],
         [0.0, 1e-3],
     ], dtype=float)
 
-    history_len = 100
+    R_obs = np.array([
+        [1e-3 , 0.0],
+        [0.0, 1e-3],
+    ], dtype=float)
+
+    history_len = 16
     num_chunks = 400
     num_test_chunks = 400
     num_freqs = 64
@@ -966,9 +1026,9 @@ def main():
 
     # Transfer-space basis settings
     rp_degree_for_m_curve = 4
-    max_m = 40
+    max_m = 5
     degree_vals = np.arange(1, 11)
-    m_eval_for_degree_plot = 10
+    m_eval_for_degree_plot = max_m
 
     # Prediction settings
     target_kind = "x"      # choose "x" or "y"
@@ -1053,6 +1113,17 @@ def main():
     pred_nmse_exact = np.zeros_like(m_vals, dtype=float)
     pred_nmse_rp = np.zeros_like(m_vals, dtype=float)
     pred_nmse_fo = np.zeros_like(m_vals, dtype=float)
+
+    ss_kalman_baseline_nmse = evaluate_steady_state_kalman_baseline_nmse_over_chunks(
+        x_all=x_test_all,
+        y_all=y_test_all,
+        history_len=history_len,
+        F=F_true,
+        Q=Q_process,
+        R=R_obs,
+        target_kind=target_kind,
+    )
+    print(f"Steady-state Kalman baseline NMSE: {ss_kalman_baseline_nmse:.4e}")
 
     for i, m in enumerate(m_vals):
         if m == 0:
@@ -1164,6 +1235,7 @@ def main():
         pred_nmse_exact=pred_nmse_exact,
         pred_nmse_rp=pred_nmse_rp,
         pred_nmse_fo=pred_nmse_fo,
+        ss_kalman_baseline_nmse=ss_kalman_baseline_nmse,
         target_kind=target_kind,
         exact_q_fir_len=exact_q_fir_len,
     )
@@ -1226,12 +1298,20 @@ def main():
     plt.plot(m_vals[1:], pred_nmse_exact[1:], marker="o", label="Exact-Q fixed bank + per-chunk LS readout")
     plt.plot(m_vals[1:], pred_nmse_rp[1:], marker="s", label=f"RP fixed bank + per-chunk LS readout (degree={rp_degree_for_m_curve})")
     plt.plot(m_vals[1:], pred_nmse_fo[1:], marker="^", label=f"FO fixed bank + per-chunk LS readout (degree={rp_degree_for_m_curve})")
+    plt.axhline(
+        ss_kalman_baseline_nmse,
+        color="k",
+        linestyle="--",
+        linewidth=1.5,
+        label="Steady-state Kalman baseline",
+    )
     plt.xlabel("Number of retained basis vectors (m)")
     plt.ylabel(f"Testing prediction NMSE vs true {target_kind}_{{N}}")
     plt.title("Prediction NMSE on unseen chunks")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
+    plt.ylim((0, 1))
     plt.savefig("prediction_nmse_vs_m_exactQ_vs_rpQ_vs_fo.png", dpi=200)
     plt.show()
 
