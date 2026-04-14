@@ -231,13 +231,256 @@ def steady_kalman_predict_next_batch(
     z_next = z_hat @ f_aug.T
     return z_next[:, :d]
 
+
+class FirstOrderBasisBank:
+    def __init__(self, poles: np.ndarray, residues: np.ndarray, d_out: int, d_in: int):
+        # poles: [M, K], residues: [M, d_out*d_in, K]
+        self.poles = poles.astype(np.complex128)
+        self.residues = residues.astype(np.complex128)
+        self.num_basis = residues.shape[0]
+        self.num_terms = residues.shape[2]
+        self.d_out = d_out
+        self.d_in = d_in
+        self.state = np.zeros((self.num_basis, self.num_terms, d_out), dtype=np.complex128)
+
+    def reset(self):
+        self.state.fill(0.0)
+
+    def step(self, u_t: np.ndarray) -> np.ndarray:
+        out = np.zeros((self.num_basis, self.num_terms, self.d_out), dtype=np.complex128)
+        for j in range(self.num_basis):
+            for k in range(self.num_terms):
+                cjk = self.residues[j, :, k].reshape(self.d_out, self.d_in, order="F")
+                self.state[j, k] = self.poles[j, k] * self.state[j, k] + cjk @ u_t
+                out[j, k] = self.state[j, k]
+        return out
+
+
+class RandomFirstOrderBasisBank:
+    def __init__(
+        self,
+        num_basis: int,
+        num_terms: int,
+        d_out: int,
+        d_in: int,
+        rng: np.random.Generator,
+        max_radius: float = 0.98,
+        input_scale: float = 0.25,
+    ):
+        self.num_basis = num_basis
+        self.num_terms = num_terms
+        self.d_out = d_out
+        self.d_in = d_in
+        pole_mags = rng.uniform(0.0, max_radius, size=(num_basis, num_terms))
+        pole_phases = rng.uniform(-np.pi, np.pi, size=(num_basis, num_terms))
+        self.poles = pole_mags * np.exp(1j * pole_phases)
+        self.input_maps = input_scale * (
+            rng.standard_normal((num_basis, num_terms, d_out, d_in))
+            + 1j * rng.standard_normal((num_basis, num_terms, d_out, d_in))
+        ) / np.sqrt(2.0 * max(d_in, 1))
+        self.state = np.zeros((num_basis, num_terms, d_out), dtype=np.complex128)
+
+    def reset(self):
+        self.state.fill(0.0)
+
+    def step(self, u_t: np.ndarray) -> np.ndarray:
+        out = np.zeros((self.num_basis, self.num_terms, self.d_out), dtype=np.complex128)
+        for j in range(self.num_basis):
+            for k in range(self.num_terms):
+                self.state[j, k] = self.poles[j, k] * self.state[j, k] + self.input_maps[j, k] @ u_t
+                out[j, k] = self.state[j, k]
+        return out
+
+
+def collect_bank_features_per_tile(bank, y_hist_chunk: np.ndarray) -> np.ndarray:
+    # y_hist_chunk: [T, Ntiles, D]
+    t_len, ntiles, _ = y_hist_chunk.shape
+    feat_dim = bank.num_basis * bank.num_terms * bank.d_out
+    feats = np.zeros((t_len, ntiles, feat_dim), dtype=np.complex128)
+    for n in range(ntiles):
+        bank.reset()
+        for t in range(t_len):
+            feats[t, n] = bank.step(y_hist_chunk[t, n].astype(np.complex128)).reshape(-1)
+    return feats
+
+
+def ls_readout_train_predict_next(
+    feat_hist: np.ndarray,
+    target_hist: np.ndarray,
+    target_next: np.ndarray,
+) -> np.ndarray:
+    # feat_hist: [T, Ntiles, F], target_hist: [T, Ntiles, D], target_next: [Ntiles, D]
+    z_train = feat_hist[:-1].reshape(-1, feat_hist.shape[-1])
+    y_train = target_hist[1:].reshape(-1, target_hist.shape[-1])
+    z_test = feat_hist[-1]
+
+    w_ls = np.linalg.pinv(z_train) @ y_train
+    _ = target_next
+    return z_test @ w_ls
+
+
+def steady_state_predictor_transfer_samples_from_kalman(
+    f_aug: np.ndarray,
+    k_ss: np.ndarray,
+    d: int,
+    num_freqs: int,
+) -> np.ndarray:
+    pd = f_aug.shape[0]
+    h_mat = np.zeros((d, pd), dtype=np.complex128)
+    h_mat[:, :d] = np.eye(d, dtype=np.complex128)
+    c_out = h_mat.copy()
+    a_p = f_aug - f_aug @ k_ss @ h_mat
+    b_p = f_aug @ k_ss
+    omegas = np.linspace(0.0, np.pi, num_freqs, endpoint=True)
+    eye = np.eye(pd, dtype=np.complex128)
+    hs = np.zeros((num_freqs, d, d), dtype=np.complex128)
+    for i, w in enumerate(omegas):
+        zinv = np.exp(-1j * w)
+        hs[i] = c_out @ np.linalg.pinv(eye - a_p * zinv) @ b_p
+    return hs
+
+
+def vectorize_transfer_samples(h_samps: np.ndarray) -> np.ndarray:
+    num_freqs, d_out, d_in = h_samps.shape
+    return np.concatenate([h_samps[i].reshape(d_out * d_in, order="F") for i in range(num_freqs)], axis=0)
+
+
+def estimate_empirical_complex_covariance(v: np.ndarray):
+    mean_v = np.mean(v, axis=1, keepdims=True)
+    vc = v - mean_v
+    kvv = (vc @ vc.conj().T) / max(v.shape[1], 1)
+    kvv = 0.5 * (kvv + kvv.conj().T)
+    return mean_v, vc, kvv
+
+
+def q_column_to_frequency_matrix(q_col: np.ndarray, num_freqs: int, value_dim: int) -> np.ndarray:
+    return q_col.reshape(num_freqs, value_dim)
+
+
+def frequency_matrix_to_q_column(qf: np.ndarray) -> np.ndarray:
+    return qf.reshape(-1)
+
+
+def fit_shared_denominator_vector_rational(
+    q_col: np.ndarray, num_freqs: int, value_dim: int, degree: int, omegas: np.ndarray
+):
+    qf = q_column_to_frequency_matrix(q_col, num_freqs, value_dim)
+    zinv = np.exp(-1j * omegas)
+    z = np.stack([zinv ** k for k in range(1, degree + 1)], axis=1)
+    a_ls = np.zeros((num_freqs * value_dim, degree + value_dim * degree), dtype=np.complex128)
+    y_ls = np.zeros((num_freqs * value_dim,), dtype=np.complex128)
+    row = 0
+    for n in range(num_freqs):
+        for r in range(value_dim):
+            qnr = qf[n, r]
+            a_ls[row, :degree] = qnr * z[n]
+            b0 = degree + r * degree
+            a_ls[row, b0 : b0 + degree] = -z[n]
+            y_ls[row] = -qnr
+            row += 1
+    theta, *_ = np.linalg.lstsq(a_ls, y_ls, rcond=None)
+    a_den = theta[:degree]
+    b_num = theta[degree:].reshape(value_dim, degree)
+    return {"a_den": a_den, "b_num": b_num}
+
+
+def denominator_coeffs_to_poles(a_den: np.ndarray) -> np.ndarray:
+    coeff_desc = np.concatenate([a_den[::-1], np.array([1.0 + 0.0j])])
+    roots_x = np.roots(coeff_desc)
+    poles = np.zeros_like(roots_x, dtype=np.complex128)
+    for i, rx in enumerate(roots_x):
+        poles[i] = 0.0 if np.abs(rx) < 1e-12 else 1.0 / rx
+    return poles
+
+
+def stabilize_poles(poles: np.ndarray, max_radius: float = 0.98) -> np.ndarray:
+    out = poles.copy().astype(np.complex128)
+    for i, p in enumerate(out):
+        mag = np.abs(p)
+        if mag >= max_radius:
+            out[i] = p * (max_radius / (mag + 1e-12))
+    return out
+
+
+def decompose_rp_fit_into_first_order(
+    fit: dict, q_col: np.ndarray, num_freqs: int, value_dim: int, omegas: np.ndarray
+):
+    qf = q_column_to_frequency_matrix(q_col, num_freqs, value_dim)
+    poles = stabilize_poles(denominator_coeffs_to_poles(fit["a_den"]))
+    zinv = np.exp(-1j * omegas)
+    phi = 1.0 / (1.0 - zinv[:, None] * poles[None, :])
+    residues = np.zeros((value_dim, len(poles)), dtype=np.complex128)
+    for r in range(value_dim):
+        residues[r], *_ = np.linalg.lstsq(phi, qf[:, r], rcond=None)
+    return poles, residues
+
+
+def build_configured_filter_bank_from_kalman_stats(
+    tiles_noisy: np.ndarray,
+    ar_order: int,
+    history_len: int,
+    r_diag: np.ndarray,
+    num_basis: int,
+    degree: int,
+    num_freqs: int,
+) -> FirstOrderBasisBank:
+    t_dec, _, d = tiles_noisy.shape
+    p_eff = min(ar_order, history_len - 1)
+    kf_helper = kalman_filter_pred(ar_order=ar_order)
+    omegas = np.linspace(0.0, np.pi, num_freqs, endpoint=True)
+
+    v_list = []
+    for s in range(0, t_dec - history_len):
+        y_hist_chunk = tiles_noisy[s : s + history_len]
+        a_blocks, q_proc = kf_helper._estimate_ar_p_q_joint(y_hist_chunk, p_eff)
+        a_blocks = [a.conj() for a in a_blocks]
+        f_aug, q_aug = kf_helper._build_augmented_system(a_blocks, q_proc)
+        h_mat = build_augmented_obs_matrix(d, p_eff)
+        r_mat = np.diag(np.maximum(r_diag, 1e-12).astype(np.complex128))
+        _, k_ss = solve_riccati_steady_state_complex(f_aug, q_aug, h_mat, r_mat)
+        h_samps = steady_state_predictor_transfer_samples_from_kalman(f_aug, k_ss, d=d, num_freqs=num_freqs)
+        v_list.append(vectorize_transfer_samples(h_samps))
+
+    v = np.stack(v_list, axis=1)
+    mean_v, _, kvv = estimate_empirical_complex_covariance(v)
+    evals, evecs = np.linalg.eigh(kvv)
+    idx = np.argsort(evals)[::-1]
+    q_eig = evecs[:, idx]
+
+    m = min(num_basis, q_eig.shape[1])
+    value_dim = d * d
+    poles_all = np.zeros((m, degree), dtype=np.complex128)
+    residues_all = np.zeros((m, value_dim, degree), dtype=np.complex128)
+    for j in range(m):
+        q_col = q_eig[:, j]
+        fit = fit_shared_denominator_vector_rational(
+            q_col=q_col, num_freqs=num_freqs, value_dim=value_dim, degree=degree, omegas=omegas
+        )
+        poles, residues = decompose_rp_fit_into_first_order(
+            fit=fit, q_col=q_col, num_freqs=num_freqs, value_dim=value_dim, omegas=omegas
+        )
+        poles_all[j] = poles
+        residues_all[j] = residues
+    _ = mean_v
+    return FirstOrderBasisBank(poles=poles_all, residues=residues_all, d_out=d, d_in=d)
+
+
+def build_random_filter_bank(d: int, num_basis: int, degree: int, seed: int):
+    rng = np.random.default_rng(seed)
+    return RandomFirstOrderBasisBank(
+        num_basis=num_basis, num_terms=degree, d_out=d, d_in=d, rng=rng, max_radius=0.98, input_scale=0.25
+    )
+
 def evaluate_nmse_over_chunks(
     h_clean_dec: np.ndarray,
     snr_db: float,
     history_len: int,
     ar_order: int,
+    num_basis: int,
+    rp_degree: int,
+    num_freqs: int,
     seed: int,
-) -> tuple[float, float]:
+) -> tuple[float, float, float, float]:
     rng = np.random.default_rng(seed)
 
     h_noisy_dec, noise_var = add_complex_awgn(h_clean_dec, snr_db, rng)
@@ -253,14 +496,30 @@ def evaluate_nmse_over_chunks(
 
     # shared R across all tiles/subcarriers
     r_diag = noise_var * np.ones((d,), dtype=np.float64)
+    configured_bank = build_configured_filter_bank_from_kalman_stats(
+        tiles_noisy=tiles_noisy,
+        ar_order=ar_order,
+        history_len=history_len,
+        r_diag=r_diag,
+        num_basis=num_basis,
+        degree=rp_degree,
+        num_freqs=num_freqs,
+    )
+    random_bank = build_random_filter_bank(d=d, num_basis=num_basis, degree=rp_degree, seed=seed + 999)
 
     num_full = 0.0
     den_full = 0.0
     num_ss = 0.0
     den_ss = 0.0
+    num_cfg = 0.0
+    den_cfg = 0.0
+    num_rand = 0.0
+    den_rand = 0.0
+
 
     for s in range(0, t_dec - history_len):
         y_hist_chunk = tiles_noisy[s : s + history_len]       # [history_len, Ntiles, D]
+        x_hist_chunk = tiles_clean[s : s + history_len]       # [history_len, Ntiles, D]
         x_true_next = tiles_clean[s + history_len]            # [Ntiles, D]
 
         a_blocks, q_proc = kf_helper._estimate_ar_p_q_joint(y_hist_chunk, p_eff)
@@ -273,6 +532,10 @@ def evaluate_nmse_over_chunks(
 
         x_pred_full = full_kalman_predict_next_batch(y_hist_chunk, f_aug, q_aug, r_diag)
         x_pred_ss = steady_kalman_predict_next_batch(y_hist_chunk, f_aug, k_ss)
+        feat_cfg = collect_bank_features_per_tile(configured_bank, y_hist_chunk)
+        feat_rand = collect_bank_features_per_tile(random_bank, y_hist_chunk)
+        x_pred_cfg = ls_readout_train_predict_next(feat_cfg, x_hist_chunk, x_true_next)
+        x_pred_rand = ls_readout_train_predict_next(feat_rand, x_hist_chunk, x_true_next)
 
         num_full += float(np.sum(np.abs(x_pred_full - x_true_next) ** 2))
         den_full += float(np.sum(np.abs(x_true_next) ** 2))
@@ -280,9 +543,17 @@ def evaluate_nmse_over_chunks(
         num_ss += float(np.sum(np.abs(x_pred_ss - x_true_next) ** 2))
         den_ss += float(np.sum(np.abs(x_true_next) ** 2))
 
+        num_cfg += float(np.sum(np.abs(x_pred_cfg - x_true_next) ** 2))
+        den_cfg += float(np.sum(np.abs(x_true_next) ** 2))
+        
+        num_rand += float(np.sum(np.abs(x_pred_rand - x_true_next) ** 2))
+        den_rand += float(np.sum(np.abs(x_true_next) ** 2))
+
     nmse_full = num_full / max(den_full, 1e-15)
     nmse_ss = num_ss / max(den_ss, 1e-15)
-    return nmse_ss, nmse_full
+    nmse_cfg = num_cfg / max(den_cfg, 1e-15)
+    nmse_rand = num_rand / max(den_rand, 1e-15)
+    return nmse_ss, nmse_full, nmse_cfg, nmse_rand
 
 
 def main():
@@ -295,6 +566,9 @@ def main():
     parser.add_argument("--feedback-delay", type=int, default=4)
     parser.add_argument("--history-len", type=int, default=8)
     parser.add_argument("--ar-order", type=int, default=4)
+    parser.add_argument("--fb-m", type=int, default=4, help="Number of configured/random filter-bank basis vectors")
+    parser.add_argument("--fb-k", type=int, default=4, help="Rational polynomial degree and FO bank terms")
+    parser.add_argument("--fb-num-freqs", type=int, default=32, help="Frequency samples for transfer statistics")
     parser.add_argument("--rx-ant", type=int, default=4)
     parser.add_argument("--tx-ant", type=int, default=4)
     parser.add_argument("--snr-start", type=int, default=0)
@@ -321,21 +595,33 @@ def main():
     snr_vals = np.arange(args.snr_start, args.snr_stop + 1, args.snr_step)
     nmse_ss_vals = []
     nmse_full_vals = []
+    nmse_cfg_vals = []
+    nmse_rand_vals = []
 
     for snr_db in snr_vals:
-        nmse_ss, nmse_full = evaluate_nmse_over_chunks(
+        nmse_ss, nmse_full, nmse_cfg, nmse_rand = evaluate_nmse_over_chunks(
             h_clean_dec=h_clean_dec,
             snr_db=float(snr_db),
             history_len=args.history_len,
             ar_order=args.ar_order,
+            num_basis=args.fb_m,
+            rp_degree=args.fb_k,
+            num_freqs=args.fb_num_freqs,
             seed=args.seed + int(snr_db),
         )
         nmse_ss_vals.append(nmse_ss)
         nmse_full_vals.append(nmse_full)
-        print(f"SNR={snr_db:>2d} dB | NMSE steady={nmse_ss:.4e}, full={nmse_full:.4e}")
+        nmse_cfg_vals.append(nmse_cfg)
+        nmse_rand_vals.append(nmse_rand)
+        print(
+            f"SNR={snr_db:>2d} dB | NMSE steady={nmse_ss:.4e}, full={nmse_full:.4e}, "
+            f"configured_bank={nmse_cfg:.4e}, random_bank={nmse_rand:.4e}"
+        )
 
     nmse_ss_vals = np.asarray(nmse_ss_vals)
     nmse_full_vals = np.asarray(nmse_full_vals)
+    nmse_cfg_vals = np.asarray(nmse_cfg_vals)
+    nmse_rand_vals = np.asarray(nmse_rand_vals)
 
     out_path = Path(args.plot_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -343,6 +629,8 @@ def main():
     plt.figure(figsize=(8, 5))
     plt.plot(snr_vals, nmse_ss_vals, marker="o", label="Steady-state Kalman")
     plt.plot(snr_vals, nmse_full_vals, marker="s", label="Full Kalman")
+    plt.plot(snr_vals, nmse_cfg_vals, marker="^", label="Configured first-order bank + LS readout")
+    plt.plot(snr_vals, nmse_rand_vals, marker="d", label="Random first-order bank + LS readout")
     plt.xlabel("SNR (dB)")
     plt.ylabel("Channel prediction NMSE")
     plt.title(
