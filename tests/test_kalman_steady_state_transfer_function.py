@@ -1231,9 +1231,9 @@ def main():
     )
     print(f"use_estimated_F = {use_estimated_F}")
 
-    history_len = 20
-    num_chunks = 400
-    num_test_chunks = 400
+    history_len = 40
+    num_chunks = 200
+    num_test_chunks = 200
     num_freqs = 64
 
     max_em_iters = 50
