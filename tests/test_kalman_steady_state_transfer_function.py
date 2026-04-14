@@ -1253,7 +1253,7 @@ def main():
 
     # Prediction settings
     target_kind = "y"
-    readout_reg = 1e-8
+    readout_reg = 1e-6
 
     # -----------------------------------
     # Training chunks for transfer-space statistics / basis fixing
