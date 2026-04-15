@@ -644,7 +644,7 @@ def evaluate_nmse_over_chunks(
 def main():
     parser = argparse.ArgumentParser(description="P2P Kalman channel prediction NMSE vs SNR on ns3 saved channels")
     parser.add_argument("--ns3-root", type=str, default="ns3", help="Root folder containing channels_<mobility>_<drop>")
-    parser.add_argument("--mobility", type=str, default="high_mobility", help="Mobility folder key")
+    parser.add_argument("--mobility", type=str, default="higher_mobility", help="Mobility folder key")
     parser.add_argument("--drop-idx", type=int, default=1)
     parser.add_argument("--start-slot", type=int, default=1)
     parser.add_argument("--end-slot", type=int, default=100)
@@ -658,7 +658,7 @@ def main():
         "--esn-activation", "--fb-activation",
         dest="esn_activation",
         type=str,
-        default="tanh",
+        default="identity",
         choices=["identity", "tanh", "relu"],
         help="Activation used in configured/random ESN reservoirs",
     )
