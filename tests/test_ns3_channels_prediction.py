@@ -233,7 +233,7 @@ def steady_kalman_predict_next_batch(
     return z_next[:, :d]
 
 
-class FirstOrderBasisBank:
+class ConfiguredWeightsESN:
     def __init__(
         self,
         poles: np.ndarray,
@@ -259,22 +259,23 @@ class FirstOrderBasisBank:
             1.0,
         )
         self.poles = self.poles * pole_scales
-        self.residue_maps = np.transpose(self.residues, (0, 2, 1)).reshape(
+        self.W_res = self.poles
+        self.W_in = np.transpose(self.residues, (0, 2, 1)).reshape(
             self.num_basis,
             self.num_terms,
             self.d_out,
             self.d_in,
             order="F",
         )
-        self.residue_maps = self.residue_maps * float(input_scale)
+        self.W_in = self.W_in * float(input_scale)
         self.state = np.zeros((self.num_basis, self.num_terms, d_out), dtype=np.complex128)
 
     def reset(self):
         self.state.fill(0.0)
 
     def step(self, u_t: np.ndarray) -> np.ndarray:
-        driven = (self.residue_maps @ u_t[..., None]).squeeze(-1)
-        pre_act = self.poles[..., None] * self.state + driven
+        driven = (self.W_in @ u_t[..., None]).squeeze(-1)
+        pre_act = self.W_res[..., None] * self.state + driven
         self.state = apply_complex_activation(pre_act, self.activation)
         return self.state
 
@@ -287,7 +288,7 @@ def apply_complex_activation(x: np.ndarray, activation: str) -> np.ndarray:
         return np.maximum(np.real(x), 0.0) + 1j * np.maximum(np.imag(x), 0.0)
     raise ValueError(f"Unsupported activation: {activation}")
 
-class RandomFirstOrderBasisBank:
+class RandomWeightsESN:
     def __init__(
         self,
         num_basis: int,
@@ -310,7 +311,8 @@ class RandomFirstOrderBasisBank:
         curr_radius = float(np.max(np.abs(self.poles)))
         if np.isfinite(curr_radius) and curr_radius > 1e-12:
             self.poles = self.poles * (float(spectral_radius) / curr_radius)
-        self.input_maps = input_scale * (
+        self.W_res = self.poles
+        self.W_in = input_scale * (
             rng.standard_normal((num_basis, num_terms, d_out, d_in))
             + 1j * rng.standard_normal((num_basis, num_terms, d_out, d_in))
         ) / np.sqrt(2.0 * max(d_in, 1))
@@ -320,31 +322,27 @@ class RandomFirstOrderBasisBank:
         self.state.fill(0.0)
 
     def step(self, u_t: np.ndarray) -> np.ndarray:
-        driven = (self.input_maps @ u_t[..., None]).squeeze(-1)
-        pre_act = self.poles[..., None] * self.state + driven
+        driven = (self.W_in @ u_t[..., None]).squeeze(-1)
+        pre_act = self.W_res[..., None] * self.state + driven
         self.state = apply_complex_activation(pre_act, self.activation)
         return self.state
 
 
 
-def collect_bank_features_per_tile(bank, y_hist_chunk: np.ndarray) -> np.ndarray:
+def collect_esn_states_per_tile(esn, y_hist_chunk: np.ndarray) -> np.ndarray:
     # y_hist_chunk: [T, Ntiles, D]
     t_len, ntiles, _ = y_hist_chunk.shape
-    feat_dim = bank.num_basis * bank.num_terms * bank.d_out
+    feat_dim = esn.num_basis * esn.num_terms * esn.d_out
     feats = np.zeros((t_len, ntiles, feat_dim), dtype=np.complex128)
-    if hasattr(bank, "residue_maps"):
-        maps = bank.residue_maps
-    else:
-        maps = bank.input_maps
-
-    poles = bank.poles.astype(np.complex128)
-    state = np.zeros((ntiles, bank.num_basis, bank.num_terms, bank.d_out), dtype=np.complex128)
+    W_in = esn.W_in.astype(np.complex128)
+    W_res = esn.W_res.astype(np.complex128)
+    state = np.zeros((ntiles, esn.num_basis, esn.num_terms, esn.d_out), dtype=np.complex128)
 
     for t in range(t_len):
         u_t = y_hist_chunk[t].astype(np.complex128)
-        driven = (maps[None, :, :, :, :] @ u_t[:, None, None, :, None]).squeeze(-1)
-        pre_act = poles[None, :, :, None] * state + driven
-        state = apply_complex_activation(pre_act, bank.activation)
+        driven = (W_in[None, :, :, :, :] @ u_t[:, None, None, :, None]).squeeze(-1)
+        pre_act = W_res[None, :, :, None] * state + driven
+        state = apply_complex_activation(pre_act, esn.activation)
         feats[t] = state.reshape(ntiles, feat_dim)
     return feats
 
@@ -365,9 +363,9 @@ def ls_readout_train_predict_next(
     f_dim = z_train.shape[1]
     gram = z_train.conj().T @ z_train + reg * np.eye(f_dim, dtype=np.complex128)
     gain = np.linalg.pinv(gram) @ z_train.conj().T
-    w_ls = gain @ y_train
+    W_out = gain @ y_train
     _ = target_next
-    return z_test @ w_ls
+    return z_test @ W_out
 
 
 def steady_state_predictor_transfer_samples_from_kalman(
@@ -461,7 +459,7 @@ def decompose_rp_fit_into_first_order(
     return poles, residues
 
 
-def build_configured_filter_bank_from_kalman_stats(
+def build_configured_esn_from_kalman_stats(
     tiles_noisy: np.ndarray,
     ar_order: int,
     history_len: int,
@@ -470,7 +468,7 @@ def build_configured_filter_bank_from_kalman_stats(
     degree: int,
     num_freqs: int,
     activation: str,
-) -> FirstOrderBasisBank:
+) -> ConfiguredWeightsESN:
     t_dec, _, d = tiles_noisy.shape
     p_eff = min(ar_order, history_len - 1)
     kf_helper = kalman_filter_pred(ar_order=ar_order)
@@ -529,12 +527,12 @@ def build_configured_filter_bank_from_kalman_stats(
         poles_all[j] = poles
         residues_all[j] = residues
     _ = mean_v
-    return FirstOrderBasisBank(poles=poles_all, residues=residues_all, d_out=d, d_in=d, activation=activation)
+    return ConfiguredWeightsESN(poles=poles_all, residues=residues_all, d_out=d, d_in=d, activation=activation)
 
 
-def build_random_filter_bank(d: int, num_basis: int, degree: int, seed: int, activation: str):
+def build_random_esn(d: int, num_basis: int, degree: int, seed: int, activation: str):
     rng = np.random.default_rng(seed)
-    return RandomFirstOrderBasisBank(
+    return RandomWeightsESN(
         num_basis=num_basis,
         num_terms=degree,
         d_out=d,
@@ -572,7 +570,7 @@ def evaluate_nmse_over_chunks(
 
     # shared R across all tiles/subcarriers
     r_diag = noise_var * np.ones((d,), dtype=np.float64)
-    configured_bank = build_configured_filter_bank_from_kalman_stats(
+    configured_esn = build_configured_esn_from_kalman_stats(
         tiles_noisy=tiles_noisy,
         ar_order=ar_order,
         history_len=history_len,
@@ -582,7 +580,7 @@ def evaluate_nmse_over_chunks(
         num_freqs=num_freqs,
         activation=activation,
     )
-    random_bank = build_random_filter_bank(
+    random_esn = build_random_esn(
         d=d,
         num_basis=num_basis,
         degree=rp_degree,
@@ -615,13 +613,13 @@ def evaluate_nmse_over_chunks(
 
         x_pred_full = full_kalman_predict_next_batch(y_hist_chunk, f_aug, q_aug, r_diag)
         x_pred_ss = steady_kalman_predict_next_batch(y_hist_chunk, f_aug, k_ss)
-        feat_cfg = collect_bank_features_per_tile(configured_bank, y_hist_chunk)
-        feat_rand = collect_bank_features_per_tile(random_bank, y_hist_chunk)
+        esn_states_cfg = collect_esn_states_per_tile(configured_esn, y_hist_chunk)
+        esn_states_rand = collect_esn_states_per_tile(random_esn, y_hist_chunk)
         x_pred_cfg = ls_readout_train_predict_next(
-            feat_cfg, x_hist_chunk, x_true_next, reg=ls_reg
+            esn_states_cfg, x_hist_chunk, x_true_next, reg=ls_reg
         )
         x_pred_rand = ls_readout_train_predict_next(
-            feat_rand, x_hist_chunk, x_true_next, reg=ls_reg
+            esn_states_rand, x_hist_chunk, x_true_next, reg=ls_reg
         )
 
         num_full += float(np.sum(np.abs(x_pred_full - x_true_next) ** 2))
@@ -653,21 +651,23 @@ def main():
     parser.add_argument("--feedback-delay", type=int, default=4)
     parser.add_argument("--history-len", type=int, default=8)
     parser.add_argument("--ar-order", type=int, default=4)
-    parser.add_argument("--fb-m", type=int, default=4, help="Number of configured/random filter-bank basis vectors")
-    parser.add_argument("--fb-k", type=int, default=4, help="Rational polynomial degree and FO bank terms")
-    parser.add_argument("--fb-num-freqs", type=int, default=32, help="Frequency samples for transfer statistics")
+    parser.add_argument("--esn-m", "--fb-m", dest="esn_m", type=int, default=4, help="Number of configured/random ESN basis vectors")
+    parser.add_argument("--esn-k", "--fb-k", dest="esn_k", type=int, default=4, help="Rational polynomial degree and ESN modal terms")
+    parser.add_argument("--esn-num-freqs", "--fb-num-freqs", dest="esn_num_freqs", type=int, default=32, help="Frequency samples for transfer statistics")
     parser.add_argument(
-        "--fb-activation",
+        "--esn-activation", "--fb-activation",
+        dest="esn_activation",
         type=str,
         default="tanh",
         choices=["identity", "tanh", "relu"],
-        help="Activation used in configured/random first-order filter banks",
+        help="Activation used in configured/random ESN reservoirs",
     )
     parser.add_argument(
-        "--fb-ls-reg",
+        "--esn-ls-reg", "--fb-ls-reg",
+        dest="esn_ls_reg",
         type=float,
         default=1e-6,
-        help="Ridge regularization used by filter-bank LS readout solve",
+        help="Ridge regularization used by ESN readout solve",
     )
     parser.add_argument("--rx-ant", type=int, default=2)
     parser.add_argument("--tx-ant", type=int, default=2)
@@ -678,7 +678,7 @@ def main():
     parser.add_argument("--plot-path", type=str, default="results/kalman_p2p_nmse_vs_snr.png")
     args = parser.parse_args()
 
-    save_path = f"results/kalman_p2p_nmse_vs_snr_data_activation_{args.fb_activation}.npz"
+    save_path = f"results/kalman_p2p_nmse_vs_snr_data_activation_{args.esn_activation}.npz"
 
     h_clean_dec, selected_slots = load_clean_p2p_channels(
         ns3_folder=Path(args.ns3_root),
@@ -706,11 +706,11 @@ def main():
             snr_db=float(snr_db),
             history_len=args.history_len,
             ar_order=args.ar_order,
-            num_basis=args.fb_m,
-            rp_degree=args.fb_k,
-            num_freqs=args.fb_num_freqs,
-            activation=args.fb_activation,
-            ls_reg=float(args.fb_ls_reg),
+            num_basis=args.esn_m,
+            rp_degree=args.esn_k,
+            num_freqs=args.esn_num_freqs,
+            activation=args.esn_activation,
+            ls_reg=float(args.esn_ls_reg),
             seed=args.seed,
         )
         nmse_ss_vals.append(nmse_ss)
@@ -719,7 +719,7 @@ def main():
         nmse_rand_vals.append(nmse_rand)
         print(
             f"SNR={snr_db:>2d} dB | NMSE steady={nmse_ss:.4e}, full={nmse_full:.4e}, "
-            f"configured_bank={nmse_cfg:.4e}, random_bank={nmse_rand:.4e}"
+            f"configured_esn={nmse_cfg:.4e}, random_esn={nmse_rand:.4e}"
         )
 
         hold = 1
@@ -732,14 +732,14 @@ def main():
     out_path = Path(args.plot_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path = out_path.with_name(
-        out_path.stem + f"_activation_{args.fb_activation}" + out_path.suffix
+        out_path.stem + f"_activation_{args.esn_activation}" + out_path.suffix
     )
 
     plt.figure(figsize=(8, 5))
     plt.plot(snr_vals, nmse_ss_vals, marker="o", label="Steady-state Kalman")
     plt.plot(snr_vals, nmse_full_vals, marker="s", label="Full Kalman")
-    plt.plot(snr_vals, nmse_cfg_vals, marker="^", label="Configured first-order bank + LS readout")
-    plt.plot(snr_vals, nmse_rand_vals, marker="d", label="Random first-order bank + LS readout")
+    plt.plot(snr_vals, nmse_cfg_vals, marker="^", label="Configured ESN + LS readout")
+    plt.plot(snr_vals, nmse_rand_vals, marker="d", label="Random ESN + LS readout")
     plt.xlabel("SNR (dB)")
     plt.ylabel("Channel prediction NMSE")
     plt.title(
