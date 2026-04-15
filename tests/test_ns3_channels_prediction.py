@@ -5,6 +5,7 @@ import sys
 import os
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.sparse.linalg import eigsh
 
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
@@ -442,17 +443,37 @@ def build_configured_filter_bank_from_kalman_stats(
         v_list.append(vectorize_transfer_samples(h_samps))
 
     v = np.stack(v_list, axis=1)
-    mean_v, _, kvv = estimate_empirical_complex_covariance(v)
-    evals, evecs = np.linalg.eigh(kvv)
-    idx = np.argsort(evals)[::-1]
-    q_eig = evecs[:, idx]
+    mean_v, vc, kvv = estimate_empirical_complex_covariance(v)
+    m = min(num_basis, kvv.shape[0])
+    if m < 1:
+        raise ValueError("num_basis must be at least 1.")
 
-    m = min(num_basis, q_eig.shape[1])
+    # Compute only the dominant modes: use a skinny-SVD path when V is tall,
+    # otherwise use a partial Hermitian eigensolver on the symmetrized covariance.
+    if vc.shape[0] > vc.shape[1] and m <= vc.shape[1]:
+        u, svals, _ = np.linalg.svd(vc, full_matrices=False)
+        evals = (svals**2) / max(vc.shape[1], 1)
+        q_eig = u[:, :m]
+    else:
+        if m < kvv.shape[0]:
+            evals, q_eig = eigsh(kvv, k=m, which="LA")
+        else:
+            evals, evecs = np.linalg.eigh(kvv)
+            q_eig = evecs
+    idx = np.argsort(evals)[::-1][:m]
+    q_eig = q_eig[:, idx]
+    assert q_eig.shape == (num_freqs * d * d, m), "Leading eigenvector matrix shape changed unexpectedly."
+
     value_dim = d * d
     poles_all = np.zeros((m, degree), dtype=np.complex128)
     residues_all = np.zeros((m, value_dim, degree), dtype=np.complex128)
     for j in range(m):
         q_col = q_eig[:, j]
+        assert q_col.shape == (num_freqs * value_dim,), "q_col shape changed unexpectedly."
+        assert q_column_to_frequency_matrix(q_col, num_freqs, value_dim).shape == (
+            num_freqs,
+            value_dim,
+        ), "Downstream q_col reshape changed unexpectedly."
         fit = fit_shared_denominator_vector_rational(
             q_col=q_col, num_freqs=num_freqs, value_dim=value_dim, degree=degree, omegas=omegas
         )
@@ -569,8 +590,8 @@ def main():
     parser.add_argument("--fb-m", type=int, default=4, help="Number of configured/random filter-bank basis vectors")
     parser.add_argument("--fb-k", type=int, default=4, help="Rational polynomial degree and FO bank terms")
     parser.add_argument("--fb-num-freqs", type=int, default=32, help="Frequency samples for transfer statistics")
-    parser.add_argument("--rx-ant", type=int, default=4)
-    parser.add_argument("--tx-ant", type=int, default=4)
+    parser.add_argument("--rx-ant", type=int, default=2)
+    parser.add_argument("--tx-ant", type=int, default=2)
     parser.add_argument("--snr-start", type=int, default=0)
     parser.add_argument("--snr-stop", type=int, default=15)
     parser.add_argument("--snr-step", type=int, default=2)
@@ -617,6 +638,8 @@ def main():
             f"SNR={snr_db:>2d} dB | NMSE steady={nmse_ss:.4e}, full={nmse_full:.4e}, "
             f"configured_bank={nmse_cfg:.4e}, random_bank={nmse_rand:.4e}"
         )
+
+        hold = 1
 
     nmse_ss_vals = np.asarray(nmse_ss_vals)
     nmse_full_vals = np.asarray(nmse_full_vals)
