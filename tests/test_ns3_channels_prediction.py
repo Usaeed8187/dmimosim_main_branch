@@ -700,6 +700,9 @@ def main():
 
     out_path = Path(args.plot_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path = out_path.with_name(
+        out_path.stem + f"_activation_{args.fb_activation}" + out_path.suffix
+    )
 
     plt.figure(figsize=(8, 5))
     plt.plot(snr_vals, nmse_ss_vals, marker="o", label="Steady-state Kalman")
