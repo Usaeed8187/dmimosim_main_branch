@@ -241,6 +241,8 @@ class FirstOrderBasisBank:
         d_out: int,
         d_in: int,
         activation: str = "identity",
+        spectral_radius: float = 0.6,
+        input_scale: float = 0.15,
     ):
         # poles: [M, K], residues: [M, d_out*d_in, K]
         self.poles = poles.astype(np.complex128)
@@ -250,6 +252,13 @@ class FirstOrderBasisBank:
         self.d_out = d_out
         self.d_in = d_in
         self.activation = activation
+        pole_mags = np.abs(self.poles)
+        pole_scales = np.where(
+            pole_mags > float(spectral_radius),
+            float(spectral_radius) / (pole_mags + 1e-12),
+            1.0,
+        )
+        self.poles = self.poles * pole_scales
         self.residue_maps = np.transpose(self.residues, (0, 2, 1)).reshape(
             self.num_basis,
             self.num_terms,
@@ -257,6 +266,7 @@ class FirstOrderBasisBank:
             self.d_in,
             order="F",
         )
+        self.residue_maps = self.residue_maps * float(input_scale)
         self.state = np.zeros((self.num_basis, self.num_terms, d_out), dtype=np.complex128)
 
     def reset(self):
@@ -286,17 +296,20 @@ class RandomFirstOrderBasisBank:
         d_in: int,
         rng: np.random.Generator,
         activation: str = "identity",
-        max_radius: float = 0.98,
-        input_scale: float = 0.25,
+        spectral_radius: float = 0.5,
+        input_scale: float = 0.8,
     ):
         self.num_basis = num_basis
         self.num_terms = num_terms
         self.d_out = d_out
         self.d_in = d_in
         self.activation = activation
-        pole_mags = rng.uniform(0.0, max_radius, size=(num_basis, num_terms))
+        pole_mags = rng.uniform(0.0, 1.0, size=(num_basis, num_terms))
         pole_phases = rng.uniform(-np.pi, np.pi, size=(num_basis, num_terms))
         self.poles = pole_mags * np.exp(1j * pole_phases)
+        curr_radius = float(np.max(np.abs(self.poles)))
+        if np.isfinite(curr_radius) and curr_radius > 1e-12:
+            self.poles = self.poles * (float(spectral_radius) / curr_radius)
         self.input_maps = input_scale * (
             rng.standard_normal((num_basis, num_terms, d_out, d_in))
             + 1j * rng.standard_normal((num_basis, num_terms, d_out, d_in))
@@ -340,13 +353,19 @@ def ls_readout_train_predict_next(
     feat_hist: np.ndarray,
     target_hist: np.ndarray,
     target_next: np.ndarray,
+    reg: float = 1e-6,
 ) -> np.ndarray:
     # feat_hist: [T, Ntiles, F], target_hist: [T, Ntiles, D], target_next: [Ntiles, D]
     z_train = feat_hist[:-1].reshape(-1, feat_hist.shape[-1])
     y_train = target_hist[1:].reshape(-1, target_hist.shape[-1])
     z_test = feat_hist[-1]
 
-    w_ls = np.linalg.pinv(z_train) @ y_train
+    # Ridge-regularized LS solve for Z @ W ~= Y:
+    # W = (Z^H Z + λI)^(-1) Z^H Y
+    f_dim = z_train.shape[1]
+    gram = z_train.conj().T @ z_train + reg * np.eye(f_dim, dtype=np.complex128)
+    gain = np.linalg.pinv(gram) @ z_train.conj().T
+    w_ls = gain @ y_train
     _ = target_next
     return z_test @ w_ls
 
@@ -522,8 +541,8 @@ def build_random_filter_bank(d: int, num_basis: int, degree: int, seed: int, act
         d_in=d,
         rng=rng,
         activation=activation,
-        max_radius=0.98,
-        input_scale=0.25,
+        spectral_radius=0.5,
+        input_scale=0.8,
     )
 
 def evaluate_nmse_over_chunks(
@@ -535,6 +554,7 @@ def evaluate_nmse_over_chunks(
     rp_degree: int,
     num_freqs: int,
     activation: str,
+    ls_reg: float,
     seed: int,
 ) -> tuple[float, float, float, float]:
     rng = np.random.default_rng(seed)
@@ -566,7 +586,7 @@ def evaluate_nmse_over_chunks(
         d=d,
         num_basis=num_basis,
         degree=rp_degree,
-        seed=seed + 999,
+        seed=seed,
         activation=activation,
     )
 
@@ -597,8 +617,12 @@ def evaluate_nmse_over_chunks(
         x_pred_ss = steady_kalman_predict_next_batch(y_hist_chunk, f_aug, k_ss)
         feat_cfg = collect_bank_features_per_tile(configured_bank, y_hist_chunk)
         feat_rand = collect_bank_features_per_tile(random_bank, y_hist_chunk)
-        x_pred_cfg = ls_readout_train_predict_next(feat_cfg, x_hist_chunk, x_true_next)
-        x_pred_rand = ls_readout_train_predict_next(feat_rand, x_hist_chunk, x_true_next)
+        x_pred_cfg = ls_readout_train_predict_next(
+            feat_cfg, x_hist_chunk, x_true_next, reg=ls_reg
+        )
+        x_pred_rand = ls_readout_train_predict_next(
+            feat_rand, x_hist_chunk, x_true_next, reg=ls_reg
+        )
 
         num_full += float(np.sum(np.abs(x_pred_full - x_true_next) ** 2))
         den_full += float(np.sum(np.abs(x_true_next) ** 2))
@@ -635,9 +659,15 @@ def main():
     parser.add_argument(
         "--fb-activation",
         type=str,
-        default="identity",
+        default="tanh",
         choices=["identity", "tanh", "relu"],
         help="Activation used in configured/random first-order filter banks",
+    )
+    parser.add_argument(
+        "--fb-ls-reg",
+        type=float,
+        default=1e-6,
+        help="Ridge regularization used by filter-bank LS readout solve",
     )
     parser.add_argument("--rx-ant", type=int, default=2)
     parser.add_argument("--tx-ant", type=int, default=2)
@@ -680,7 +710,8 @@ def main():
             rp_degree=args.fb_k,
             num_freqs=args.fb_num_freqs,
             activation=args.fb_activation,
-            seed=args.seed + int(snr_db),
+            ls_reg=float(args.fb_ls_reg),
+            seed=args.seed,
         )
         nmse_ss_vals.append(nmse_ss)
         nmse_full_vals.append(nmse_full)
