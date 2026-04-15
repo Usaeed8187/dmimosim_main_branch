@@ -250,20 +250,23 @@ class FirstOrderBasisBank:
         self.d_out = d_out
         self.d_in = d_in
         self.activation = activation
+        self.residue_maps = np.transpose(self.residues, (0, 2, 1)).reshape(
+            self.num_basis,
+            self.num_terms,
+            self.d_out,
+            self.d_in,
+            order="F",
+        )
         self.state = np.zeros((self.num_basis, self.num_terms, d_out), dtype=np.complex128)
 
     def reset(self):
         self.state.fill(0.0)
 
     def step(self, u_t: np.ndarray) -> np.ndarray:
-        out = np.zeros((self.num_basis, self.num_terms, self.d_out), dtype=np.complex128)
-        for j in range(self.num_basis):
-            for k in range(self.num_terms):
-                cjk = self.residues[j, :, k].reshape(self.d_out, self.d_in, order="F")
-                pre_act = self.poles[j, k] * self.state[j, k] + cjk @ u_t
-                self.state[j, k] = apply_complex_activation(pre_act, self.activation)
-                out[j, k] = self.state[j, k]
-        return out
+        driven = (self.residue_maps @ u_t[..., None]).squeeze(-1)
+        pre_act = self.poles[..., None] * self.state + driven
+        self.state = apply_complex_activation(pre_act, self.activation)
+        return self.state
 
 def apply_complex_activation(x: np.ndarray, activation: str) -> np.ndarray:
     if activation == "identity":
@@ -304,13 +307,11 @@ class RandomFirstOrderBasisBank:
         self.state.fill(0.0)
 
     def step(self, u_t: np.ndarray) -> np.ndarray:
-        out = np.zeros((self.num_basis, self.num_terms, self.d_out), dtype=np.complex128)
-        for j in range(self.num_basis):
-            for k in range(self.num_terms):
-                pre_act = self.poles[j, k] * self.state[j, k] + self.input_maps[j, k] @ u_t
-                self.state[j, k] = apply_complex_activation(pre_act, self.activation)
-                out[j, k] = self.state[j, k]
-        return out
+        driven = (self.input_maps @ u_t[..., None]).squeeze(-1)
+        pre_act = self.poles[..., None] * self.state + driven
+        self.state = apply_complex_activation(pre_act, self.activation)
+        return self.state
+
 
 
 def collect_bank_features_per_tile(bank, y_hist_chunk: np.ndarray) -> np.ndarray:
@@ -318,10 +319,20 @@ def collect_bank_features_per_tile(bank, y_hist_chunk: np.ndarray) -> np.ndarray
     t_len, ntiles, _ = y_hist_chunk.shape
     feat_dim = bank.num_basis * bank.num_terms * bank.d_out
     feats = np.zeros((t_len, ntiles, feat_dim), dtype=np.complex128)
-    for n in range(ntiles):
-        bank.reset()
-        for t in range(t_len):
-            feats[t, n] = bank.step(y_hist_chunk[t, n].astype(np.complex128)).reshape(-1)
+    if hasattr(bank, "residue_maps"):
+        maps = bank.residue_maps
+    else:
+        maps = bank.input_maps
+
+    poles = bank.poles.astype(np.complex128)
+    state = np.zeros((ntiles, bank.num_basis, bank.num_terms, bank.d_out), dtype=np.complex128)
+
+    for t in range(t_len):
+        u_t = y_hist_chunk[t].astype(np.complex128)
+        driven = (maps[None, :, :, :, :] @ u_t[:, None, None, :, None]).squeeze(-1)
+        pre_act = poles[None, :, :, None] * state + driven
+        state = apply_complex_activation(pre_act, bank.activation)
+        feats[t] = state.reshape(ntiles, feat_dim)
     return feats
 
 
@@ -362,9 +373,7 @@ def steady_state_predictor_transfer_samples_from_kalman(
 
 
 def vectorize_transfer_samples(h_samps: np.ndarray) -> np.ndarray:
-    num_freqs, d_out, d_in = h_samps.shape
-    return np.concatenate([h_samps[i].reshape(d_out * d_in, order="F") for i in range(num_freqs)], axis=0)
-
+    return h_samps.transpose(0, 2, 1).reshape(-1)
 
 def estimate_empirical_complex_covariance(v: np.ndarray):
     mean_v = np.mean(v, axis=1, keepdims=True)
@@ -388,17 +397,20 @@ def fit_shared_denominator_vector_rational(
     qf = q_column_to_frequency_matrix(q_col, num_freqs, value_dim)
     zinv = np.exp(-1j * omegas)
     z = np.stack([zinv ** k for k in range(1, degree + 1)], axis=1)
-    a_ls = np.zeros((num_freqs * value_dim, degree + value_dim * degree), dtype=np.complex128)
-    y_ls = np.zeros((num_freqs * value_dim,), dtype=np.complex128)
-    row = 0
-    for n in range(num_freqs):
-        for r in range(value_dim):
-            qnr = qf[n, r]
-            a_ls[row, :degree] = qnr * z[n]
-            b0 = degree + r * degree
-            a_ls[row, b0 : b0 + degree] = -z[n]
-            y_ls[row] = -qnr
-            row += 1
+    num_rows = num_freqs * value_dim
+    a_ls = np.zeros((num_rows, degree + value_dim * degree), dtype=np.complex128)
+    q_col = qf.reshape(num_rows)
+    z_rep = np.repeat(z, value_dim, axis=0)
+
+    a_ls[:, :degree] = q_col[:, None] * z_rep
+
+    row_ids = np.arange(num_rows)[:, None]
+    r_ids = np.tile(np.arange(value_dim), num_freqs)[:, None]
+    deg_ids = np.arange(degree)[None, :]
+    col_ids = degree + r_ids * degree + deg_ids
+    a_ls[row_ids, col_ids] = -z_rep
+
+    y_ls = -q_col
     theta, *_ = np.linalg.lstsq(a_ls, y_ls, rcond=None)
     a_den = theta[:degree]
     b_num = theta[degree:].reshape(value_dim, degree)
@@ -408,19 +420,14 @@ def fit_shared_denominator_vector_rational(
 def denominator_coeffs_to_poles(a_den: np.ndarray) -> np.ndarray:
     coeff_desc = np.concatenate([a_den[::-1], np.array([1.0 + 0.0j])])
     roots_x = np.roots(coeff_desc)
-    poles = np.zeros_like(roots_x, dtype=np.complex128)
-    for i, rx in enumerate(roots_x):
-        poles[i] = 0.0 if np.abs(rx) < 1e-12 else 1.0 / rx
-    return poles
+    return np.where(np.abs(roots_x) < 1e-12, 0.0 + 0.0j, 1.0 / roots_x).astype(np.complex128)
 
 
 def stabilize_poles(poles: np.ndarray, max_radius: float = 0.98) -> np.ndarray:
     out = poles.copy().astype(np.complex128)
-    for i, p in enumerate(out):
-        mag = np.abs(p)
-        if mag >= max_radius:
-            out[i] = p * (max_radius / (mag + 1e-12))
-    return out
+    mags = np.abs(out)
+    scales = np.where(mags >= max_radius, max_radius / (mags + 1e-12), 1.0)
+    return out * scales
 
 
 def decompose_rp_fit_into_first_order(
@@ -430,9 +437,8 @@ def decompose_rp_fit_into_first_order(
     poles = stabilize_poles(denominator_coeffs_to_poles(fit["a_den"]))
     zinv = np.exp(-1j * omegas)
     phi = 1.0 / (1.0 - zinv[:, None] * poles[None, :])
-    residues = np.zeros((value_dim, len(poles)), dtype=np.complex128)
-    for r in range(value_dim):
-        residues[r], *_ = np.linalg.lstsq(phi, qf[:, r], rcond=None)
+    residues_t, *_ = np.linalg.lstsq(phi, qf, rcond=None)
+    residues = residues_t.T
     return poles, residues
 
 
@@ -444,6 +450,7 @@ def build_configured_filter_bank_from_kalman_stats(
     num_basis: int,
     degree: int,
     num_freqs: int,
+    activation: str,
 ) -> FirstOrderBasisBank:
     t_dec, _, d = tiles_noisy.shape
     p_eff = min(ar_order, history_len - 1)
