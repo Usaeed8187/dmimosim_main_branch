@@ -234,7 +234,14 @@ def steady_kalman_predict_next_batch(
 
 
 class FirstOrderBasisBank:
-    def __init__(self, poles: np.ndarray, residues: np.ndarray, d_out: int, d_in: int):
+    def __init__(
+        self,
+        poles: np.ndarray,
+        residues: np.ndarray,
+        d_out: int,
+        d_in: int,
+        activation: str = "identity",
+    ):
         # poles: [M, K], residues: [M, d_out*d_in, K]
         self.poles = poles.astype(np.complex128)
         self.residues = residues.astype(np.complex128)
@@ -242,6 +249,7 @@ class FirstOrderBasisBank:
         self.num_terms = residues.shape[2]
         self.d_out = d_out
         self.d_in = d_in
+        self.activation = activation
         self.state = np.zeros((self.num_basis, self.num_terms, d_out), dtype=np.complex128)
 
     def reset(self):
@@ -252,10 +260,19 @@ class FirstOrderBasisBank:
         for j in range(self.num_basis):
             for k in range(self.num_terms):
                 cjk = self.residues[j, :, k].reshape(self.d_out, self.d_in, order="F")
-                self.state[j, k] = self.poles[j, k] * self.state[j, k] + cjk @ u_t
+                pre_act = self.poles[j, k] * self.state[j, k] + cjk @ u_t
+                self.state[j, k] = apply_complex_activation(pre_act, self.activation)
                 out[j, k] = self.state[j, k]
         return out
 
+def apply_complex_activation(x: np.ndarray, activation: str) -> np.ndarray:
+    if activation == "identity":
+        return x
+    if activation == "tanh":
+        return np.tanh(np.real(x)) + 1j * np.tanh(np.imag(x))
+    if activation == "relu":
+        return np.maximum(np.real(x), 0.0) + 1j * np.maximum(np.imag(x), 0.0)
+    raise ValueError(f"Unsupported activation: {activation}")
 
 class RandomFirstOrderBasisBank:
     def __init__(
@@ -265,6 +282,7 @@ class RandomFirstOrderBasisBank:
         d_out: int,
         d_in: int,
         rng: np.random.Generator,
+        activation: str = "identity",
         max_radius: float = 0.98,
         input_scale: float = 0.25,
     ):
@@ -272,6 +290,7 @@ class RandomFirstOrderBasisBank:
         self.num_terms = num_terms
         self.d_out = d_out
         self.d_in = d_in
+        self.activation = activation
         pole_mags = rng.uniform(0.0, max_radius, size=(num_basis, num_terms))
         pole_phases = rng.uniform(-np.pi, np.pi, size=(num_basis, num_terms))
         self.poles = pole_mags * np.exp(1j * pole_phases)
@@ -288,7 +307,8 @@ class RandomFirstOrderBasisBank:
         out = np.zeros((self.num_basis, self.num_terms, self.d_out), dtype=np.complex128)
         for j in range(self.num_basis):
             for k in range(self.num_terms):
-                self.state[j, k] = self.poles[j, k] * self.state[j, k] + self.input_maps[j, k] @ u_t
+                pre_act = self.poles[j, k] * self.state[j, k] + self.input_maps[j, k] @ u_t
+                self.state[j, k] = apply_complex_activation(pre_act, self.activation)
                 out[j, k] = self.state[j, k]
         return out
 
@@ -483,13 +503,20 @@ def build_configured_filter_bank_from_kalman_stats(
         poles_all[j] = poles
         residues_all[j] = residues
     _ = mean_v
-    return FirstOrderBasisBank(poles=poles_all, residues=residues_all, d_out=d, d_in=d)
+    return FirstOrderBasisBank(poles=poles_all, residues=residues_all, d_out=d, d_in=d, activation=activation)
 
 
-def build_random_filter_bank(d: int, num_basis: int, degree: int, seed: int):
+def build_random_filter_bank(d: int, num_basis: int, degree: int, seed: int, activation: str):
     rng = np.random.default_rng(seed)
     return RandomFirstOrderBasisBank(
-        num_basis=num_basis, num_terms=degree, d_out=d, d_in=d, rng=rng, max_radius=0.98, input_scale=0.25
+        num_basis=num_basis,
+        num_terms=degree,
+        d_out=d,
+        d_in=d,
+        rng=rng,
+        activation=activation,
+        max_radius=0.98,
+        input_scale=0.25,
     )
 
 def evaluate_nmse_over_chunks(
@@ -500,6 +527,7 @@ def evaluate_nmse_over_chunks(
     num_basis: int,
     rp_degree: int,
     num_freqs: int,
+    activation: str,
     seed: int,
 ) -> tuple[float, float, float, float]:
     rng = np.random.default_rng(seed)
@@ -525,8 +553,15 @@ def evaluate_nmse_over_chunks(
         num_basis=num_basis,
         degree=rp_degree,
         num_freqs=num_freqs,
+        activation=activation,
     )
-    random_bank = build_random_filter_bank(d=d, num_basis=num_basis, degree=rp_degree, seed=seed + 999)
+    random_bank = build_random_filter_bank(
+        d=d,
+        num_basis=num_basis,
+        degree=rp_degree,
+        seed=seed + 999,
+        activation=activation,
+    )
 
     num_full = 0.0
     den_full = 0.0
@@ -590,6 +625,13 @@ def main():
     parser.add_argument("--fb-m", type=int, default=4, help="Number of configured/random filter-bank basis vectors")
     parser.add_argument("--fb-k", type=int, default=4, help="Rational polynomial degree and FO bank terms")
     parser.add_argument("--fb-num-freqs", type=int, default=32, help="Frequency samples for transfer statistics")
+    parser.add_argument(
+        "--fb-activation",
+        type=str,
+        default="identity",
+        choices=["identity", "tanh", "relu"],
+        help="Activation used in configured/random first-order filter banks",
+    )
     parser.add_argument("--rx-ant", type=int, default=2)
     parser.add_argument("--tx-ant", type=int, default=2)
     parser.add_argument("--snr-start", type=int, default=0)
@@ -598,6 +640,8 @@ def main():
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--plot-path", type=str, default="results/kalman_p2p_nmse_vs_snr.png")
     args = parser.parse_args()
+
+    save_path = f"results/kalman_p2p_nmse_vs_snr_data_activation_{args.fb_activation}.npz"
 
     h_clean_dec, selected_slots = load_clean_p2p_channels(
         ns3_folder=Path(args.ns3_root),
@@ -628,6 +672,7 @@ def main():
             num_basis=args.fb_m,
             rp_degree=args.fb_k,
             num_freqs=args.fb_num_freqs,
+            activation=args.fb_activation,
             seed=args.seed + int(snr_db),
         )
         nmse_ss_vals.append(nmse_ss)
@@ -663,8 +708,19 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
+    plt.ylim(bottom=0, top=1.0)
     plt.savefig(out_path, dpi=200)
     print(f"Saved plot to: {out_path}")
+
+    np.savez(
+        save_path,
+        snr_vals=snr_vals,
+        nmse_ss_vals=nmse_ss_vals,
+        nmse_full_vals=nmse_full_vals,
+        nmse_cfg_vals=nmse_cfg_vals,
+        nmse_rand_vals=nmse_rand_vals,
+    )
+    print(f"Saved raw NMSE data to: {save_path}")
 
 
 if __name__ == "__main__":
