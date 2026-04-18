@@ -468,6 +468,7 @@ def build_configured_esn_from_kalman_stats(
     degree: int,
     num_freqs: int,
     activation: str,
+    diagnostics: dict | None = None,
 ) -> ConfiguredWeightsESN:
     t_dec, _, d = tiles_noisy.shape
     p_eff = min(ar_order, history_len - 1)
@@ -505,6 +506,7 @@ def build_configured_esn_from_kalman_stats(
             evals, evecs = np.linalg.eigh(kvv)
             q_eig = evecs
     idx = np.argsort(evals)[::-1][:m]
+    evals_sorted = np.sort(np.real(evals))[::-1]
     q_eig = q_eig[:, idx]
     assert q_eig.shape == (num_freqs * d * d, m), "Leading eigenvector matrix shape changed unexpectedly."
 
@@ -527,6 +529,36 @@ def build_configured_esn_from_kalman_stats(
         poles_all[j] = poles
         residues_all[j] = residues
     _ = mean_v
+    if diagnostics is not None:
+        total_eval = float(np.sum(np.maximum(evals_sorted, 0.0)))
+        cum_energy = (
+            np.cumsum(np.maximum(evals_sorted, 0.0)) / max(total_eval, 1e-15)
+            if evals_sorted.size > 0
+            else np.asarray([], dtype=np.float64)
+        )
+        energy_thresholds = [0.90, 0.95, 0.99]
+        suggested_m = {}
+        for thr in energy_thresholds:
+            idx_thr = int(np.searchsorted(cum_energy, thr, side="left")) + 1 if cum_energy.size > 0 else 0
+            suggested_m[thr] = min(idx_thr, int(evals_sorted.size))
+        pole_mag = np.abs(poles_all.reshape(-1))
+        residue_mag = np.abs(residues_all.reshape(-1))
+        diagnostics.update(
+            {
+                "kvv_eigenvalues_sorted": evals_sorted,
+                "kvv_cumulative_energy": cum_energy,
+                "suggested_m": suggested_m,
+                "configured_pole_mag_min": float(np.min(pole_mag)) if pole_mag.size > 0 else 0.0,
+                "configured_pole_mag_p50": float(np.quantile(pole_mag, 0.50)) if pole_mag.size > 0 else 0.0,
+                "configured_pole_mag_p90": float(np.quantile(pole_mag, 0.90)) if pole_mag.size > 0 else 0.0,
+                "configured_pole_mag_max": float(np.max(pole_mag)) if pole_mag.size > 0 else 0.0,
+                "configured_residue_mag_p50": float(np.quantile(residue_mag, 0.50)) if residue_mag.size > 0 else 0.0,
+                "configured_residue_mag_p90": float(np.quantile(residue_mag, 0.90)) if residue_mag.size > 0 else 0.0,
+                "configured_residue_mag_max": float(np.max(residue_mag)) if residue_mag.size > 0 else 0.0,
+                "num_transfer_samples": int(v.shape[1]),
+                "transfer_feature_dim": int(v.shape[0]),
+            }
+        )
     return ConfiguredWeightsESN(poles=poles_all, residues=residues_all, d_out=d, d_in=d, activation=activation)
 
 
@@ -554,6 +586,7 @@ def evaluate_nmse_over_chunks(
     activation: str,
     ls_reg: float,
     seed: int,
+    run_diagnostics: bool = False,
 ) -> tuple[float, float, float, float]:
     rng = np.random.default_rng(seed)
 
@@ -570,6 +603,7 @@ def evaluate_nmse_over_chunks(
 
     # shared R across all tiles/subcarriers
     r_diag = noise_var * np.ones((d,), dtype=np.float64)
+    diag_info = {} if run_diagnostics else None
     configured_esn = build_configured_esn_from_kalman_stats(
         tiles_noisy=tiles_noisy,
         ar_order=ar_order,
@@ -579,6 +613,7 @@ def evaluate_nmse_over_chunks(
         degree=rp_degree,
         num_freqs=num_freqs,
         activation=activation,
+        diagnostics=diag_info,
     )
     random_esn = build_random_esn(
         d=d,
@@ -597,6 +632,8 @@ def evaluate_nmse_over_chunks(
     num_rand = 0.0
     den_rand = 0.0
 
+    cond_cfg_vals = []
+    cond_rand_vals = []
 
     for s in range(0, t_dec - history_len):
         y_hist_chunk = tiles_noisy[s : s + history_len]       # [history_len, Ntiles, D]
@@ -622,6 +659,14 @@ def evaluate_nmse_over_chunks(
             esn_states_rand, x_hist_chunk, x_true_next, reg=ls_reg
         )
 
+        if run_diagnostics:
+            z_cfg = esn_states_cfg[:-1].reshape(-1, esn_states_cfg.shape[-1])
+            z_rand = esn_states_rand[:-1].reshape(-1, esn_states_rand.shape[-1])
+            gram_cfg = z_cfg.conj().T @ z_cfg + ls_reg * np.eye(z_cfg.shape[1], dtype=np.complex128)
+            gram_rand = z_rand.conj().T @ z_rand + ls_reg * np.eye(z_rand.shape[1], dtype=np.complex128)
+            cond_cfg_vals.append(float(np.linalg.cond(gram_cfg)))
+            cond_rand_vals.append(float(np.linalg.cond(gram_rand)))
+
         num_full += float(np.sum(np.abs(x_pred_full - x_true_next) ** 2))
         den_full += float(np.sum(np.abs(x_true_next) ** 2))
 
@@ -638,6 +683,54 @@ def evaluate_nmse_over_chunks(
     nmse_ss = num_ss / max(den_ss, 1e-15)
     nmse_cfg = num_cfg / max(den_cfg, 1e-15)
     nmse_rand = num_rand / max(den_rand, 1e-15)
+
+    if run_diagnostics and diag_info is not None:
+        def _fmt_float(x: float) -> str:
+            return f"{x:.3e}"
+
+        print("\n[ESN diagnostics]")
+        print(
+            "K_vv eigvals (top-10): "
+            + ", ".join(_fmt_float(float(vv)) for vv in diag_info["kvv_eigenvalues_sorted"][:10])
+        )
+        cum_e = diag_info["kvv_cumulative_energy"]
+        print(
+            "K_vv cumulative energy (top-10 modes): "
+            + ", ".join(_fmt_float(float(cc)) for cc in cum_e[:10])
+        )
+        sugg_m = diag_info["suggested_m"]
+        print(
+            f"Suggested esn_m by explained-energy thresholds: "
+            f"90%->{sugg_m[0.90]}, 95%->{sugg_m[0.95]}, 99%->{sugg_m[0.99]}"
+        )
+        print(
+            f"Configured pole |.| stats: min={diag_info['configured_pole_mag_min']:.3f}, "
+            f"p50={diag_info['configured_pole_mag_p50']:.3f}, "
+            f"p90={diag_info['configured_pole_mag_p90']:.3f}, "
+            f"max={diag_info['configured_pole_mag_max']:.3f}"
+        )
+        print(
+            f"Configured residue |.| stats: p50={diag_info['configured_residue_mag_p50']:.3e}, "
+            f"p90={diag_info['configured_residue_mag_p90']:.3e}, "
+            f"max={diag_info['configured_residue_mag_max']:.3e}"
+        )
+        if len(cond_cfg_vals) > 0 and len(cond_rand_vals) > 0:
+            cfg_cond = np.asarray(cond_cfg_vals)
+            rand_cond = np.asarray(cond_rand_vals)
+            print(
+                f"LS Gram cond (configured): median={np.median(cfg_cond):.3e}, "
+                f"p90={np.quantile(cfg_cond, 0.90):.3e}, max={np.max(cfg_cond):.3e}"
+            )
+            print(
+                f"LS Gram cond (random): median={np.median(rand_cond):.3e}, "
+                f"p90={np.quantile(rand_cond, 0.90):.3e}, max={np.max(rand_cond):.3e}"
+            )
+        print(
+            f"Transfer-stat sample count={diag_info['num_transfer_samples']}, "
+            f"feature_dim={diag_info['transfer_feature_dim']}"
+        )
+        print("[/ESN diagnostics]\n")
+
     return nmse_ss, nmse_full, nmse_cfg, nmse_rand
 
 
@@ -653,7 +746,7 @@ def main():
     parser.add_argument("--ar-order", type=int, default=4)
     parser.add_argument("--esn-m", "--fb-m", dest="esn_m", type=int, default=4, help="Number of configured/random ESN basis vectors")
     parser.add_argument("--esn-k", "--fb-k", dest="esn_k", type=int, default=4, help="Rational polynomial degree and ESN modal terms")
-    parser.add_argument("--esn-num-freqs", "--fb-num-freqs", dest="esn_num_freqs", type=int, default=32, help="Frequency samples for transfer statistics")
+    parser.add_argument("--esn-num-freqs", "--fb-num-freqs", dest="esn_num_freqs", type=int, default=64, help="Frequency samples for transfer statistics")
     parser.add_argument(
         "--esn-activation", "--fb-activation",
         dest="esn_activation",
@@ -666,7 +759,7 @@ def main():
         "--esn-ls-reg", "--fb-ls-reg",
         dest="esn_ls_reg",
         type=float,
-        default=1e-6,
+        default=0,
         help="Ridge regularization used by ESN readout solve",
     )
     parser.add_argument("--rx-ant", type=int, default=2)
@@ -676,6 +769,12 @@ def main():
     parser.add_argument("--snr-step", type=int, default=2)
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--plot-path", type=str, default="results/kalman_p2p_nmse_vs_snr.png")
+    parser.add_argument(
+        "--esn-diagnostics",
+        action="store_true",
+        default=True,
+        help="Print diagnostics for configured-ESN hyperparameter selection (K_vv spectrum, pole/residue stats, LS conditioning).",
+    )
     args = parser.parse_args()
 
     save_path = f"results/kalman_p2p_nmse_vs_snr_data_activation_{args.esn_activation}.npz"
@@ -712,6 +811,7 @@ def main():
             activation=args.esn_activation,
             ls_reg=float(args.esn_ls_reg),
             seed=args.seed,
+            run_diagnostics=bool(args.esn_diagnostics),
         )
         nmse_ss_vals.append(nmse_ss)
         nmse_full_vals.append(nmse_full)
@@ -749,7 +849,7 @@ def main():
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.ylim(bottom=0, top=1.0)
+    # plt.ylim(bottom=0, top=1.0)
     plt.savefig(out_path, dpi=200)
     print(f"Saved plot to: {out_path}")
 
