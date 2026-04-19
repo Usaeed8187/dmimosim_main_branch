@@ -586,6 +586,7 @@ def evaluate_nmse_over_chunks(
     activation: str,
     ls_reg: float,
     seed: int,
+    offline_ratio: float = 0.5,
     run_diagnostics: bool = False,
 ) -> tuple[float, float, float, float]:
     rng = np.random.default_rng(seed)
@@ -597,6 +598,35 @@ def evaluate_nmse_over_chunks(
     t_dec, _, d = tiles_clean.shape
     if t_dec <= history_len:
         raise ValueError("Not enough decimated samples for at least one chunk.")
+    if not (0.0 < float(offline_ratio) <= 1.0):
+        raise ValueError(f"offline_ratio must be in (0, 1], got {offline_ratio}.")
+
+    if float(offline_ratio) >= 1.0:
+        # Special case requested by user:
+        # configure on all data and evaluate on all data (original behavior).
+        offline_len = t_dec
+        online_len = t_dec
+        tiles_clean_offline = tiles_clean
+        tiles_noisy_offline = tiles_noisy
+        tiles_clean_online = tiles_clean
+        tiles_noisy_online = tiles_noisy
+    else:
+        offline_len = int(np.floor(t_dec * float(offline_ratio)))
+        offline_len = max(1, min(offline_len, t_dec - 1))
+        online_len = t_dec - offline_len
+        if offline_len <= history_len:
+            raise ValueError(
+                f"Offline phase too short for statistics collection: offline_len={offline_len}, history_len={history_len}."
+            )
+        if online_len <= history_len:
+            raise ValueError(
+                f"Online phase too short for prediction evaluation: online_len={online_len}, history_len={history_len}."
+            )
+
+        tiles_clean_offline = tiles_clean[:offline_len]
+        tiles_noisy_offline = tiles_noisy[:offline_len]
+        tiles_clean_online = tiles_clean[offline_len:]
+        tiles_noisy_online = tiles_noisy[offline_len:]
 
     kf_helper = kalman_filter_pred(ar_order=ar_order)
     p_eff = min(ar_order, history_len - 1)
@@ -605,7 +635,7 @@ def evaluate_nmse_over_chunks(
     r_diag = noise_var * np.ones((d,), dtype=np.float64)
     diag_info = {} if run_diagnostics else None
     configured_esn = build_configured_esn_from_kalman_stats(
-        tiles_noisy=tiles_noisy,
+        tiles_noisy=tiles_noisy_offline,
         ar_order=ar_order,
         history_len=history_len,
         r_diag=r_diag,
@@ -635,10 +665,10 @@ def evaluate_nmse_over_chunks(
     cond_cfg_vals = []
     cond_rand_vals = []
 
-    for s in range(0, t_dec - history_len):
-        y_hist_chunk = tiles_noisy[s : s + history_len]       # [history_len, Ntiles, D]
-        x_hist_chunk = tiles_clean[s : s + history_len]       # [history_len, Ntiles, D]
-        x_true_next = tiles_clean[s + history_len]            # [Ntiles, D]
+    for s in range(0, online_len - history_len):
+        y_hist_chunk = tiles_noisy_online[s : s + history_len]       # [history_len, Ntiles, D]
+        x_hist_chunk = tiles_clean_online[s : s + history_len]       # [history_len, Ntiles, D]
+        x_true_next = tiles_clean_online[s + history_len]            # [Ntiles, D]
 
         a_blocks, q_proc = kf_helper._estimate_ar_p_q_joint(y_hist_chunk, p_eff)
         a_blocks = [a.conj() for a in a_blocks]
@@ -737,21 +767,21 @@ def evaluate_nmse_over_chunks(
 def main():
     parser = argparse.ArgumentParser(description="P2P Kalman channel prediction NMSE vs SNR on ns3 saved channels")
     parser.add_argument("--ns3-root", type=str, default="ns3", help="Root folder containing channels_<mobility>_<drop>")
-    parser.add_argument("--mobility", type=str, default="high_mobility", help="Mobility folder key")
+    parser.add_argument("--mobility", type=str, default="higher_mobility", help="Mobility folder key")
     parser.add_argument("--drop-idx", type=int, default=1)
     parser.add_argument("--start-slot", type=int, default=1)
     parser.add_argument("--end-slot", type=int, default=100)
     parser.add_argument("--feedback-delay", type=int, default=4)
-    parser.add_argument("--history-len", type=int, default=8)
-    parser.add_argument("--ar-order", type=int, default=4)
-    parser.add_argument("--esn-m", "--fb-m", dest="esn_m", type=int, default=4, help="Number of configured/random ESN basis vectors")
-    parser.add_argument("--esn-k", "--fb-k", dest="esn_k", type=int, default=4, help="Rational polynomial degree and ESN modal terms")
+    parser.add_argument("--history-len", type=int, default=6)
+    parser.add_argument("--ar-order", type=int, default=2)
+    parser.add_argument("--esn-m", "--fb-m", dest="esn_m", type=int, default=12, help="Number of configured/random ESN basis vectors")
+    parser.add_argument("--esn-k", "--fb-k", dest="esn_k", type=int, default=12, help="Rational polynomial degree and ESN modal terms")
     parser.add_argument("--esn-num-freqs", "--fb-num-freqs", dest="esn_num_freqs", type=int, default=64, help="Frequency samples for transfer statistics")
     parser.add_argument(
         "--esn-activation", "--fb-activation",
         dest="esn_activation",
         type=str,
-        default="identity",
+        default="tanh",
         choices=["identity", "tanh", "relu"],
         help="Activation used in configured/random ESN reservoirs",
     )
@@ -759,20 +789,26 @@ def main():
         "--esn-ls-reg", "--fb-ls-reg",
         dest="esn_ls_reg",
         type=float,
-        default=0,
+        default=1e-6,
         help="Ridge regularization used by ESN readout solve",
     )
     parser.add_argument("--rx-ant", type=int, default=2)
     parser.add_argument("--tx-ant", type=int, default=2)
     parser.add_argument("--snr-start", type=int, default=0)
     parser.add_argument("--snr-stop", type=int, default=15)
-    parser.add_argument("--snr-step", type=int, default=2)
+    parser.add_argument("--snr-step", type=int, default=5)
     parser.add_argument("--seed", type=int, default=12345)
+    parser.add_argument(
+        "--offline-ratio",
+        type=float,
+        default=0.35,
+        help="Fraction in (0,1] of decimated slots used for offline WESN configuration; 1.0 uses all data for both configuration and testing.",
+    )
     parser.add_argument("--plot-path", type=str, default="results/kalman_p2p_nmse_vs_snr.png")
     parser.add_argument(
         "--esn-diagnostics",
         action="store_true",
-        default=True,
+        default=False,
         help="Print diagnostics for configured-ESN hyperparameter selection (K_vv spectrum, pole/residue stats, LS conditioning).",
     )
     args = parser.parse_args()
@@ -811,6 +847,7 @@ def main():
             activation=args.esn_activation,
             ls_reg=float(args.esn_ls_reg),
             seed=args.seed,
+            offline_ratio=float(args.offline_ratio),
             run_diagnostics=bool(args.esn_diagnostics),
         )
         nmse_ss_vals.append(nmse_ss)
