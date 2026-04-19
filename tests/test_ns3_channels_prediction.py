@@ -808,7 +808,7 @@ def main():
     parser.add_argument(
         "--esn-diagnostics",
         action="store_true",
-        default=False,
+        default=True,
         help="Print diagnostics for configured-ESN hyperparameter selection (K_vv spectrum, pole/residue stats, LS conditioning).",
     )
     args = parser.parse_args()
