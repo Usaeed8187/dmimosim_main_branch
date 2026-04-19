@@ -772,10 +772,10 @@ def main():
     parser.add_argument("--start-slot", type=int, default=1)
     parser.add_argument("--end-slot", type=int, default=100)
     parser.add_argument("--feedback-delay", type=int, default=4)
-    parser.add_argument("--history-len", type=int, default=6)
+    parser.add_argument("--history-len", type=int, default=8)
     parser.add_argument("--ar-order", type=int, default=2)
-    parser.add_argument("--esn-m", "--fb-m", dest="esn_m", type=int, default=12, help="Number of configured/random ESN basis vectors")
-    parser.add_argument("--esn-k", "--fb-k", dest="esn_k", type=int, default=12, help="Rational polynomial degree and ESN modal terms")
+    parser.add_argument("--esn-m", "--fb-m", dest="esn_m", type=int, default=4, help="Number of configured/random ESN basis vectors")
+    parser.add_argument("--esn-k", "--fb-k", dest="esn_k", type=int, default=4, help="Rational polynomial degree and ESN modal terms")
     parser.add_argument("--esn-num-freqs", "--fb-num-freqs", dest="esn_num_freqs", type=int, default=64, help="Frequency samples for transfer statistics")
     parser.add_argument(
         "--esn-activation", "--fb-activation",
@@ -801,7 +801,7 @@ def main():
     parser.add_argument(
         "--offline-ratio",
         type=float,
-        default=0.35,
+        default=0.5,
         help="Fraction in (0,1] of decimated slots used for offline WESN configuration; 1.0 uses all data for both configuration and testing.",
     )
     parser.add_argument("--plot-path", type=str, default="results/kalman_p2p_nmse_vs_snr.png")
@@ -813,7 +813,7 @@ def main():
     )
     args = parser.parse_args()
 
-    save_path = f"results/kalman_p2p_nmse_vs_snr_data_activation_{args.esn_activation}.npz"
+    save_path = f"results/kalman_p2p_nmse_vs_snr_data_activation_{args.esn_activation}_{args.mobility}.npz"
 
     h_clean_dec, selected_slots = load_clean_p2p_channels(
         ns3_folder=Path(args.ns3_root),
@@ -869,7 +869,7 @@ def main():
     out_path = Path(args.plot_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path = out_path.with_name(
-        out_path.stem + f"_activation_{args.esn_activation}" + out_path.suffix
+        out_path.stem + f"_activation_{args.esn_activation}_{args.mobility}" + out_path.suffix
     )
 
     plt.figure(figsize=(8, 5))
