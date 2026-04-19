@@ -30,6 +30,10 @@ from dmimo.channel import standard_rc_pred_freq_mimo, default_ddpg_predictor
 from dmimo.channel.ddpg_predictor import DDPGChannelPredictor
 from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter_pred, kalman_filter_pred
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
+from dmimo.channel.configured_wesn_pred import (
+    build_configured_predictors_simple,
+    predict_all_links_with_configured_simple,
+)
 from dmimo.channel.wesn_rx_sig_pred import rx_sig_predict_all_links_simple
 from dmimo.channel.rl_beam_selector_v2 import RLBeamSelector
 from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
@@ -430,7 +434,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     estimated_channels_dir=cfg.estimated_channels_dir,
                 )
                 err_var_csi_history = None
-            elif "kalman" in cfg.channel_prediction_method:
+            elif "kalman" in cfg.channel_prediction_method or "configured_wesn" in cfg.channel_prediction_method:
                 h_freq_csi_history, err_var_csi_history = rc_predictor.get_csi_history_with_err_var(
                     cfg.first_slot_idx,
                     cfg.csi_delay,
@@ -492,6 +496,19 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
                 end_time_all_loops = time.time()
                 # print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
+        elif "configured_wesn" in cfg.channel_prediction_method:
+            configured_predictors = getattr(cfg, "configured_wesn_predictors", None)
+            if configured_predictors is None:
+                raise ValueError(
+                    "Configured WESN predictors not found. "
+                    "Please configure offline predictors before running online slots."
+                )
+            h_freq_csi = predict_all_links_with_configured_simple(
+                h_freq_csi_history,
+                configured_predictors,
+                ns3cfg,
+                err_var_csi_history=err_var_csi_history,
+            )
 
         elif cfg.channel_prediction_method == "old":
             h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
@@ -714,7 +731,72 @@ def sim_mu_mimo_all(
         rl_selector.set_evaluation_mode(bool(getattr(cfg, "rl_evaluation_only", False)))
     cfg.rl_selector = rl_selector
 
-    for first_slot_idx in np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2):
+    slot_indices = np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2)
+
+    if cfg.csi_prediction and "configured_wesn" in str(cfg.channel_prediction_method):
+        offline_ratio = float(getattr(cfg, "wesn_offline_ratio", 0.5))
+        if not (0.0 < offline_ratio <= 1.0):
+            raise ValueError(f"wesn_offline_ratio must be in (0, 1], got {offline_ratio}.")
+        if slot_indices.size <= 1:
+            raise ValueError("Configured WESN requires at least two cycles (offline + online).")
+
+        offline_cycles = int(np.floor(slot_indices.size * offline_ratio))
+        offline_cycles = max(1, min(offline_cycles, slot_indices.size - 1))
+        offline_slot_indices = slot_indices[:offline_cycles]
+        slot_indices = slot_indices[offline_cycles:]
+
+        dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+        num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
+        csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
+        csi_guard_carriers_1 = (cfg.fft_size - csi_effective_subcarriers) // 2
+        csi_guard_carriers_2 = (cfg.fft_size - csi_effective_subcarriers) - csi_guard_carriers_1
+        rg_csi = ResourceGrid(
+            num_ofdm_symbols=14,
+            fft_size=cfg.fft_size,
+            subcarrier_spacing=cfg.subcarrier_spacing,
+            num_tx=1,
+            num_streams_per_tx=num_txs_ant,
+            cyclic_prefix_length=cfg.cyclic_prefix_len,
+            num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
+            dc_null=False,
+            pilot_pattern="kronecker",
+            pilot_ofdm_symbol_indices=[2, 11],
+        )
+
+        rc_predictor = getattr(cfg, "rc_predictor", None)
+        if rc_predictor is None:
+            rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, rc_config, ns3cfg)
+            cfg.rc_predictor = rc_predictor
+        rc_predictor.reset_csi_history()
+
+        freq_cov_mat = getattr(cfg, "freq_cov_mat", None)
+        lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
+        offline_histories = []
+        offline_err_histories = []
+
+        first_slot_idx = offline_slot_indices[0]
+        rc_predictor.history_len = offline_slot_indices.size
+        h_hist, err_hist = rc_predictor.get_csi_history_with_err_var(
+            first_slot_idx,
+            cfg.csi_delay,
+            rg_csi,
+            dmimo_chans,
+            cfo_vals=cfg.random_cfo_vals,
+            sto_vals=cfg.random_sto_vals,
+            estimated_channels_dir=cfg.estimated_channels_dir,
+            freq_cov_mat=freq_cov_mat,
+            lmmse_interpolator=lmmse_interpolator,
+        )
+        offline_history = np.asarray(h_hist)
+        offline_err_history = np.asarray(err_hist)
+        cfg.configured_wesn_predictors = build_configured_predictors_simple(
+            offline_history,
+            rc_config,
+            ns3cfg,
+            err_var_csi_history=offline_err_history,
+        )
+
+    for first_slot_idx in slot_indices:
         
         # print("first_slot_idx: ", first_slot_idx)
 

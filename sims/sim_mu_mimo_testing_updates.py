@@ -95,10 +95,11 @@ link_adapt = True
 
 perfect_csi = False
 csi_prediction = True
-channel_prediction_setting = "two_mode" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "pilot_obs"
-channel_prediction_method = "two_mode" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "pilot_obs"
+channel_prediction_setting = "configured_wesn" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
+channel_prediction_method = "configured_wesn" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
+wesn_offline_ratio = 0.5  # Fraction of simulation cycles used for offline WESN configuration
 history_len = 8
-window_length = 5
+window_length = 2
 num_neurons = 16
 csi_quantization_on = True
 rl_train_end_drop = 45
@@ -202,7 +203,7 @@ def run_simulation():
     # Simulation settings
     cfg = SimConfig()
     cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
-    cfg.total_slots = 56       # total number of slots in ns-3 channels
+    cfg.total_slots = 100       # total number of slots in ns-3 channels
     cfg.start_slot_idx = 33     # starting slots (must be greater than csi_delay + 5)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = perfect_csi
@@ -246,10 +247,11 @@ def run_simulation():
     rc_config.history_len = history_len
     rc_config.state_dim_left = state_dim_left
     rc_config.state_dim_right = state_dim_right
-    if channel_prediction_setting == "two_mode_kalman_config":
+    if channel_prediction_setting in ("two_mode_kalman_config", "configured_wesn"):
         rc_config.enable_kalman_weight_config = True
     else:
         rc_config.enable_kalman_weight_config = False
+    cfg.wesn_offline_ratio = wesn_offline_ratio
 
     cfg.rl_checkpoint = rl_checkpoint
     cfg.rl_evaluation_only = rl_evaluation_only
