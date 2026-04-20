@@ -243,7 +243,7 @@ class ConfiguredWeightsESN:
         d_out: int,
         d_in: int,
         activation: str = "identity",
-        spectral_radius: float = 0.6,
+        spectral_radius: float = 0.3,
         input_scale: float = 0.15,
     ):
         # poles: [M, K], residues: [M, d_out*d_in, K]
@@ -300,7 +300,7 @@ class RandomWeightsESN:
         rng: np.random.Generator,
         activation: str = "identity",
         spectral_radius: float = 0.5,
-        input_scale: float = 0.8,
+        input_scale: float = 0.15,
     ):
         self.num_basis = num_basis
         self.num_terms = num_terms
@@ -786,7 +786,7 @@ def evaluate_nmse_over_chunks(
 def main():
     parser = argparse.ArgumentParser(description="P2P Kalman channel prediction NMSE vs SNR on ns3 saved channels")
     parser.add_argument("--ns3-root", type=str, default="ns3", help="Root folder containing channels_<mobility>_<drop>")
-    parser.add_argument("--mobility", type=str, default="high_mobility", help="Mobility folder key")
+    parser.add_argument("--mobility", type=str, default="higher_mobility", help="Mobility folder key")
     parser.add_argument("--drop-idx", type=int, default=1)
     parser.add_argument("--start-slot", type=int, default=1)
     parser.add_argument("--end-slot", type=int, default=100)
