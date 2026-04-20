@@ -709,26 +709,7 @@ def sim_mu_mimo_all(
     per_step_throughput = []
     chan_pred_nmse = []
 
-    no_rl_throughput = None
-    total_steps = None
-
-    if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
-        data = np.load('results/channels_multiple_mu_mimo/channels_high_mobility_{}/mu_mimo_results_link_adapt_rx_UE_{}_tx_UE_{}_prediction_two_mode_pmi_quantization_True.npz'.format(cfg.drop_idx, ns3cfg.num_rxue_sel, ns3cfg.num_txue_sel))
-        no_rl_throughput = data['per_step_throughput']
-        assert(len(no_rl_throughput) == len(np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2))-1)
-        cfg.num_transitions = len(no_rl_throughput) - 1
-        total_steps = cfg.num_transitions
-
-        cfg.curr_no_rl_throughput = no_rl_throughput[0]
-    else:
-        cfg.curr_no_rl_throughput = None
-
-    if rl_selector is None and cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
-        rl_selector = RLBeamSelector(total_steps=total_steps)
-        checkpoint = getattr(cfg, "rl_checkpoint", None)
-        if checkpoint:
-            rl_selector.load_all(Path(checkpoint))
-        rl_selector.set_evaluation_mode(bool(getattr(cfg, "rl_evaluation_only", False)))
+    cfg.curr_no_rl_throughput = None
     cfg.rl_selector = rl_selector
 
     slot_indices = np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2)
@@ -744,6 +725,41 @@ def sim_mu_mimo_all(
         offline_cycles = max(1, min(offline_cycles, slot_indices.size - 1))
         offline_slot_indices = slot_indices[:offline_cycles]
         slot_indices = slot_indices[offline_cycles:]
+
+        # Reset UE selection. Start with all TX and RX UEs selected.
+        tmp_num_rxue_sel = ns3cfg.num_rxue_sel
+        tmp_num_txue_sel = ns3cfg.num_txue_sel
+        ns3cfg.reset_ue_selection()
+        tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
+        ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+
+        if not cfg.scheduling:
+            rx_ue_mask = np.zeros(10)
+            tx_ue_mask = np.zeros(10)
+            rx_ue_mask[:tmp_num_rxue_sel] = 1
+            tx_ue_mask[:tmp_num_txue_sel] = 1
+            ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+
+            ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
+            scheduled_rx_UEs = np.arange(1, tmp_num_rxue_sel+1)
+            for ue_idx in scheduled_rx_UEs:
+                start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+                end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+                ue_indices.append(list(np.arange(start, end)))
+            cfg.scheduled_rx_ue_indices = np.array(ue_indices)
+            cfg.num_scheduled_ues = cfg.scheduled_rx_ue_indices.shape[0]-2
+            if not cfg.rank_adapt:
+                cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
+
+            ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
+            scheduled_tx_UEs = np.arange(1, tmp_num_txue_sel+1)
+            for ue_idx in scheduled_tx_UEs:
+                start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+                end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+                ue_indices.append(list(np.arange(start, end)))
+            cfg.scheduled_tx_ue_indices = np.array(ue_indices)
+        else:
+            raise Exception ("Scheduling not supported in this version.")
 
         dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
         num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant

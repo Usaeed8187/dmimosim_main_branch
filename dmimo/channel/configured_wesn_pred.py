@@ -415,19 +415,25 @@ class configured_wesn_pred:
             pred = np.zeros(h[0].shape, dtype=self.dtype)
             return pred.transpose([0, 1, 2, 3, 4, 6, 5])
 
-        test_in = h[1:, 0, 0, :, 0, :, :, :]
-        T = test_in.shape[0]
+        obs_seq = h[:, 0, 0, :, 0, :, :, :]
+        T = obs_seq.shape[0]
         B = num_freq * num_ofdm
 
-        test_batch = np.transpose(test_in, (0, 3, 4, 1, 2)).reshape(T, B, self.N_r, self.N_t)
-        u_test = self._window_sequence(test_batch)
-        s_test = self._state_rollout(u_test)
-        feat_test = np.concatenate([s_test, u_test], axis=-1)
-        y_hat = (feat_test.reshape(-1, self.feature_dim) @ self.W_out.T).reshape(T, B, self.output_dim)
+        obs_batch = np.transpose(obs_seq, (0, 3, 4, 1, 2)).reshape(T, B, self.N_r, self.N_t)
+
+        # Mimic the test script behavior: solve LS readout online from the current
+        # history window and use the last feature vector for one-step prediction.
+        u_hist = self._window_sequence(obs_batch)
+        s_hist = self._state_rollout(u_hist)
+
+        self._fit_readout(states=s_hist[:-1], inputs=u_hist[:-1], targets=obs_batch[1:])
+
+        feat_last = np.concatenate([s_hist[-1], u_hist[-1]], axis=-1)
+        y_last = feat_last @ self.W_out.T
 
         pred = np.zeros(h[0].shape, dtype=self.dtype)
 
-        last = y_hat[-1].reshape(num_freq, num_ofdm, self.N_r, self.N_t)
+        last = y_last.reshape(num_freq, num_ofdm, self.N_r, self.N_t)
         last = np.transpose(last, (2, 3, 0, 1))
         pred[0, 0, :, 0, :, :, :] = last
 

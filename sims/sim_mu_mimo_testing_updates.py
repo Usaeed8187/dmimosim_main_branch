@@ -86,8 +86,8 @@ arguments = sys.argv[1:]
 
 mobility = 'higher_mobility'
 drop_idx = '1'
-rx_ues_arr = [3]
-num_txue_sel = 4
+rx_ues_arr = [0]
+num_txue_sel = 0
 
 modulation_order = 4
 code_rate = 1 / 2
@@ -109,10 +109,10 @@ state_dim_left = 2
 state_dim_right = 2
 esn_m = 4
 esn_k = 4
-esn_num_freqs = 16
+esn_num_freqs = 64
 esn_activation = "tanh"
 esn_ls_reg = 1e-6
-esn_diagnostics = False
+esn_diagnostics = True
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
