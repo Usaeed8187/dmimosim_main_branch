@@ -796,6 +796,8 @@ def sim_mu_mimo_all(
             err_var_csi_history=offline_err_history,
         )
 
+    cfg.start_slot_idx = slot_indices[0]
+    
     for first_slot_idx in slot_indices:
         
         # print("first_slot_idx: ", first_slot_idx)
@@ -808,9 +810,6 @@ def sim_mu_mimo_all(
         # print("Cycle time: ", end_time - start_time, " seconds\n")
         
         if first_slot_idx > cfg.start_slot_idx:
-
-            if cfg.csi_prediction and "deqn" in cfg.channel_prediction_method:
-                cfg.curr_no_rl_throughput = no_rl_throughput[total_cycles]
 
             total_cycles += 1
             
