@@ -297,7 +297,8 @@ class configured_wesn_pred:
             else:
                 evals, evecs = np.linalg.eigh(kvv)
                 q_eig = evecs
-
+        evals_real_sorted = np.sort(np.real(evals))[::-1]
+        
         idx = np.argsort(np.real(evals))[::-1][:m]
         q_eig = q_eig[:, idx]
 
@@ -343,10 +344,24 @@ class configured_wesn_pred:
         self.W_in = (self.input_scale * w_in).astype(self.dtype)
 
         if self.esn_diagnostics:
+            total_eval = float(np.sum(np.maximum(evals_real_sorted, 0.0)))
+            cum_energy = (
+                np.cumsum(np.maximum(evals_real_sorted, 0.0)) / max(total_eval, 1e-15)
+                if evals_real_sorted.size > 0
+                else np.asarray([], dtype=np.float64)
+            )
+            suggested_m = {}
+            for thr in (0.90, 0.95, 0.99):
+                idx_thr = int(np.searchsorted(cum_energy, thr, side="left")) + 1 if cum_energy.size > 0 else 0
+                suggested_m[thr] = min(idx_thr, int(evals_real_sorted.size))
             print(
                 f"[configured_wesn] m={m}, k={self.esn_k}, num_freqs={self.esn_num_freqs}, "
                 f"pole|.| p50={float(np.quantile(np.abs(poles_all), 0.5)):.3f}, "
                 f"p90={float(np.quantile(np.abs(poles_all), 0.9)):.3f}"
+            )
+            print(
+                f"[configured_wesn] suggested esn_m by explained-energy thresholds: "
+                f"90%->{suggested_m[0.90]}, 95%->{suggested_m[0.95]}, 99%->{suggested_m[0.99]}"
             )
 
     def fit_offline(self, h_freq_csi_history, err_var_history=None):

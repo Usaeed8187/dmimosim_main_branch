@@ -702,10 +702,10 @@ def evaluate_nmse_over_chunks(
         esn_states_cfg = collect_esn_states_per_tile(configured_esn, y_hist_chunk)
         esn_states_rand = collect_esn_states_per_tile(random_esn, y_hist_chunk)
         x_pred_cfg = ls_readout_train_predict_next(
-            esn_states_cfg, x_hist_chunk, x_true_next, reg=ls_reg
+            esn_states_cfg, y_hist_chunk, x_true_next, reg=ls_reg
         )
         x_pred_rand = ls_readout_train_predict_next(
-            esn_states_rand, x_hist_chunk, x_true_next, reg=ls_reg
+            esn_states_rand, y_hist_chunk, x_true_next, reg=ls_reg
         )
 
         if run_diagnostics:
