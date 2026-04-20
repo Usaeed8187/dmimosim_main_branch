@@ -95,8 +95,8 @@ link_adapt = True
 
 perfect_csi = False
 csi_prediction = True
-channel_prediction_setting = "configured_wesn" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
-channel_prediction_method = "configured_wesn" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
+channel_prediction_setting = "kalman_filter" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
+channel_prediction_method = "kalman_filter" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
 wesn_offline_ratio = 0.5  # Fraction of simulation cycles used for offline WESN configuration
 history_len = 8
 window_length = 2
@@ -113,6 +113,7 @@ esn_num_freqs = 64
 esn_activation = "tanh"
 esn_ls_reg = 1e-6
 esn_diagnostics = True
+input_scale = 0.15
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -259,6 +260,7 @@ def run_simulation():
     rc_config.esn_activation = esn_activation
     rc_config.esn_ls_reg = esn_ls_reg
     rc_config.esn_diagnostics = esn_diagnostics
+    rc_config.input_scale = input_scale
     if channel_prediction_setting in ("two_mode_kalman_config", "configured_wesn"):
         rc_config.enable_kalman_weight_config = True
     else:
