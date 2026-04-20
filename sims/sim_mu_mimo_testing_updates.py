@@ -84,7 +84,7 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'higher_mobility'
+mobility = 'high_mobility'
 drop_idx = '1'
 rx_ues_arr = [0]
 num_txue_sel = 0
@@ -95,8 +95,8 @@ link_adapt = True
 
 perfect_csi = False
 csi_prediction = True
-channel_prediction_setting = "kalman_filter" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
-channel_prediction_method = "kalman_filter" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
+channel_prediction_setting = "configured_wesn" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
+channel_prediction_method = "configured_wesn" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
 wesn_offline_ratio = 0.5  # Fraction of simulation cycles used for offline WESN configuration
 history_len = 8
 window_length = 2
