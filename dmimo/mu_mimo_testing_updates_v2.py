@@ -466,6 +466,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
                                                 batch_size=cfg.num_slots_p2)
         
+        start_time = time.time()
         if "pilot_obs" in cfg.channel_prediction_method:
             _, _, _, num_rx_ant, num_pilot_syms, num_freq = rx_sig_freq_history.shape
             # rx_sig_pred = rx_sig_predictor.predict(rx_sig_freq_history)
@@ -530,6 +531,8 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             )
         else:
             raise ValueError("Channel prediction method not implemented here.")
+        end_time = time.time()
+        print("{} Prediction Time: {}".format(cfg.channel_prediction_method, end_time - start_time))
     else:
         h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
                                                 batch_size=cfg.num_slots_p2)
