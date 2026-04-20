@@ -202,7 +202,7 @@ def parse_args() -> argparse.Namespace:
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8, 10],
+        default=[2, 4, 6, 8],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
@@ -238,9 +238,9 @@ def main() -> None:
     output_path = _resolve_path(args.output_dir, SCRIPT_DIR)
 
     scenarios = [
-        Scenario(label="No prediction", prediction=False),
-        Scenario(label="Wiener filter", prediction=True, prediction_method="weiner_filter"),
-        Scenario(label="Two-mode", prediction=True, prediction_method="two_mode"),
+        Scenario(label="Two-mode WESN", prediction=True, prediction_method="two_mode"),
+        Scenario(label="Configured WESN", prediction=True, prediction_method="configured_wesn"),
+        Scenario(label="Kalman Filter", prediction=True, prediction_method="kalman_filter"),
     ]
 
     prefix = _build_filename_prefix(

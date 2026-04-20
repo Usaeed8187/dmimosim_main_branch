@@ -351,22 +351,30 @@ def _default_scenarios(
         #     label="Outdated CSI",
         #     link_adapt=link_adapt,
         # ),
-        # Scenario(
-        #     perfect_csi=False,
-        #     prediction=True,
-        #     quantization=True,
-        #     label="Two-Mode WESN Prediction",
-        #     prediction_method="two_mode",
-        #     link_adapt=link_adapt,
-        # ),
-        # Scenario(
-        #     perfect_csi=False,
-        #     prediction=True,
-        #     quantization=True,
-        #     label="Wiener Filter Prediction",
-        #     link_adapt=link_adapt,
-        #     prediction_method="weiner_filter",
-        # ),
+        Scenario(
+            perfect_csi=False,
+            prediction=True,
+            quantization=True,
+            label="Two-Mode WESN Prediction",
+            prediction_method="two_mode",
+            link_adapt=link_adapt,
+        ),
+        Scenario(
+            perfect_csi=False,
+            prediction=True,
+            quantization=True,
+            label="Kalman Filter Prediction",
+            link_adapt=link_adapt,
+            prediction_method="kalman_filter",
+        ),
+        Scenario(
+            perfect_csi=False,
+            prediction=True,
+            quantization=True,
+            label="Configured WESN",
+            link_adapt=link_adapt,
+            prediction_method="configured_wesn",
+        ),
         # Scenario(
         #     perfect_csi=False,
         #     prediction=True,
@@ -375,13 +383,13 @@ def _default_scenarios(
         #     link_adapt=link_adapt,
         #     prediction_method="deqn_plus_two_mode",
         # ),
-        Scenario(
-            perfect_csi=True,
-            prediction=False,
-            quantization=True,
-            label="Perfect Prediction",
-            link_adapt=link_adapt,
-        ),
+        # Scenario(
+        #     perfect_csi=True,
+        #     prediction=False,
+        #     quantization=True,
+        #     label="Perfect Prediction",
+        #     link_adapt=link_adapt,
+        # ),
         # Scenario(
         #     perfect_csi=True,
         #     prediction=False,
@@ -513,14 +521,14 @@ def main() -> None:
         "--rx-ues",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8, 10],
+        default=[4],
         help="UE counts that were simulated.",
     )
     parser.add_argument(
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[10],
+        default=[2, 4, 6, 8],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
@@ -558,7 +566,7 @@ def main() -> None:
     parser.add_argument(
         "--fixed-tx",
         type=int,
-        default=10,
+        default=8,
         help="RU count to hold fixed when sweeping UEs.",
     )
     parser.add_argument(
