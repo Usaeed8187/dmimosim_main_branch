@@ -28,6 +28,12 @@ class RCConfig(Config):
         self._kalman_eps = 1e-8
         self._state_dim_left = None
         self._state_dim_right = None
+        self._esn_m = 4
+        self._esn_k = 4
+        self._esn_num_freqs = 64
+        self._esn_activation = 'tanh'
+        self._esn_ls_reg = 1e-6
+        self._esn_diagnostics = False
 
         super().__init__(**kwargs)
 
@@ -206,3 +212,51 @@ class RCConfig(Config):
     @state_dim_right.setter
     def state_dim_right(self, val):
         self._state_dim_right = val
+
+    @property
+    def esn_m(self):
+        return self._esn_m
+
+    @esn_m.setter
+    def esn_m(self, val):
+        self._esn_m = val
+
+    @property
+    def esn_k(self):
+        return self._esn_k
+
+    @esn_k.setter
+    def esn_k(self, val):
+        self._esn_k = val
+
+    @property
+    def esn_num_freqs(self):
+        return self._esn_num_freqs
+
+    @esn_num_freqs.setter
+    def esn_num_freqs(self, val):
+        self._esn_num_freqs = val
+
+    @property
+    def esn_activation(self):
+        return self._esn_activation
+
+    @esn_activation.setter
+    def esn_activation(self, val):
+        self._esn_activation = val
+
+    @property
+    def esn_ls_reg(self):
+        return self._esn_ls_reg
+
+    @esn_ls_reg.setter
+    def esn_ls_reg(self, val):
+        self._esn_ls_reg = val
+
+    @property
+    def esn_diagnostics(self):
+        return self._esn_diagnostics
+
+    @esn_diagnostics.setter
+    def esn_diagnostics(self, val):
+        self._esn_diagnostics = val

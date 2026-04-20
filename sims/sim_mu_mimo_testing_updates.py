@@ -107,6 +107,12 @@ rl_checkpoint = None
 rl_evaluation_only = True
 state_dim_left = 2
 state_dim_right = 2
+esn_m = 4
+esn_k = 4
+esn_num_freqs = 16
+esn_activation = "tanh"
+esn_ls_reg = 1e-6
+esn_diagnostics = False
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -247,6 +253,12 @@ def run_simulation():
     rc_config.history_len = history_len
     rc_config.state_dim_left = state_dim_left
     rc_config.state_dim_right = state_dim_right
+    rc_config.esn_m = esn_m
+    rc_config.esn_k = esn_k
+    rc_config.esn_num_freqs = esn_num_freqs
+    rc_config.esn_activation = esn_activation
+    rc_config.esn_ls_reg = esn_ls_reg
+    rc_config.esn_diagnostics = esn_diagnostics
     if channel_prediction_setting in ("two_mode_kalman_config", "configured_wesn"):
         rc_config.enable_kalman_weight_config = True
     else:

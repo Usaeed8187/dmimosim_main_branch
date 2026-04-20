@@ -6,6 +6,8 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.sparse.linalg import eigsh
+from scipy.sparse import coo_matrix
+from scipy.sparse.linalg import lsqr
 
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
@@ -392,11 +394,13 @@ def steady_state_predictor_transfer_samples_from_kalman(
 def vectorize_transfer_samples(h_samps: np.ndarray) -> np.ndarray:
     return h_samps.transpose(0, 2, 1).reshape(-1)
 
-def estimate_empirical_complex_covariance(v: np.ndarray):
+def estimate_empirical_complex_covariance(v: np.ndarray, compute_kvv: bool = False):
     mean_v = np.mean(v, axis=1, keepdims=True)
     vc = v - mean_v
-    kvv = (vc @ vc.conj().T) / max(v.shape[1], 1)
-    kvv = 0.5 * (kvv + kvv.conj().T)
+    kvv = None
+    if compute_kvv:
+        kvv = (vc @ vc.conj().T) / max(v.shape[1], 1)
+        kvv = 0.5 * (kvv + kvv.conj().T)
     return mean_v, vc, kvv
 
 
@@ -415,20 +419,32 @@ def fit_shared_denominator_vector_rational(
     zinv = np.exp(-1j * omegas)
     z = np.stack([zinv ** k for k in range(1, degree + 1)], axis=1)
     num_rows = num_freqs * value_dim
-    a_ls = np.zeros((num_rows, degree + value_dim * degree), dtype=np.complex128)
     q_col = qf.reshape(num_rows)
     z_rep = np.repeat(z, value_dim, axis=0)
 
-    a_ls[:, :degree] = q_col[:, None] * z_rep
+    # Sparse LS system:
+    # [diag(q_col) @ z_rep, -blockdiag(z, ..., z)] @ theta = -q_col
+    rows_dense = np.repeat(np.arange(num_rows), degree)
+    cols_dense = np.tile(np.arange(degree), num_rows)
+    vals_dense = (q_col[:, None] * z_rep).reshape(-1)
 
-    row_ids = np.arange(num_rows)[:, None]
-    r_ids = np.tile(np.arange(value_dim), num_freqs)[:, None]
-    deg_ids = np.arange(degree)[None, :]
-    col_ids = degree + r_ids * degree + deg_ids
-    a_ls[row_ids, col_ids] = -z_rep
+    r_ids = np.tile(np.arange(value_dim), num_freqs)
+    deg_ids = np.tile(np.arange(degree), num_rows)
+    cols_block = degree + np.repeat(r_ids, degree) * degree + deg_ids
+    vals_block = (-z_rep).reshape(-1)
+
+    rows = np.concatenate([rows_dense, rows_dense])
+    cols = np.concatenate([cols_dense, cols_block])
+    vals = np.concatenate([vals_dense, vals_block])
+
+    a_ls = coo_matrix(
+        (vals, (rows, cols)),
+        shape=(num_rows, degree + value_dim * degree),
+        dtype=np.complex128,
+    ).tocsr()
 
     y_ls = -q_col
-    theta, *_ = np.linalg.lstsq(a_ls, y_ls, rcond=None)
+    theta = lsqr(a_ls, y_ls, atol=1e-8, btol=1e-8, iter_lim=2000)[0]
     a_den = theta[:degree]
     b_num = theta[degree:].reshape(value_dim, degree)
     return {"a_den": a_den, "b_num": b_num}
@@ -488,18 +504,21 @@ def build_configured_esn_from_kalman_stats(
         v_list.append(vectorize_transfer_samples(h_samps))
 
     v = np.stack(v_list, axis=1)
-    mean_v, vc, kvv = estimate_empirical_complex_covariance(v)
-    m = min(num_basis, kvv.shape[0])
+    mean_v, vc, _ = estimate_empirical_complex_covariance(v, compute_kvv=False)
+    m = min(num_basis, vc.shape[0], vc.shape[1])
+    m = num_basis
     if m < 1:
         raise ValueError("num_basis must be at least 1.")
 
     # Compute only the dominant modes: use a skinny-SVD path when V is tall,
     # otherwise use a partial Hermitian eigensolver on the symmetrized covariance.
-    if vc.shape[0] > vc.shape[1] and m <= vc.shape[1]:
+    if vc.shape[0] > vc.shape[1]:
         u, svals, _ = np.linalg.svd(vc, full_matrices=False)
         evals = (svals**2) / max(vc.shape[1], 1)
         q_eig = u[:, :m]
     else:
+        kvv = (vc @ vc.conj().T) / max(vc.shape[1], 1)
+        kvv = 0.5 * (kvv + kvv.conj().T)
         if m < kvv.shape[0]:
             evals, q_eig = eigsh(kvv, k=m, which="LA")
         else:
@@ -808,7 +827,7 @@ def main():
     parser.add_argument(
         "--esn-diagnostics",
         action="store_true",
-        default=True,
+        default=False,
         help="Print diagnostics for configured-ESN hyperparameter selection (K_vv spectrum, pole/residue stats, LS conditioning).",
     )
     args = parser.parse_args()
