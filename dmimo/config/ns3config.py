@@ -11,7 +11,7 @@ class Ns3Config(NetworkConfig):
         self._total_slots = 10      # total number of subframes/slots in the channel file
         self._data_folder = "../ns3/channels"
         self._file_prefix = "dmimochans"
-        self._bs_txpwr_dbm = 28     # maximum transmission power per BS (dBm)
+        self._bs_txpwr_dbm = 35     # maximum transmission power per BS (dBm)
         self._ue_txpwr_dbm = 26     # maximum transmission power per UE (dBm)
         self._bs_ant_gain = 5       # BS antenna gain using 5dBi dipoles
         self._ue_ant_gain = 5       # UE antenna gain using 5dBi monopole

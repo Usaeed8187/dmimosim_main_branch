@@ -84,8 +84,8 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'higher_mobility'
-drop_idx = '1'
+mobility = 'high_mobility'
+drop_idx = '2'
 rx_ues_arr = [0]
 num_txue_sel = 0
 
