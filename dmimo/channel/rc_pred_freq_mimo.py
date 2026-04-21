@@ -116,7 +116,7 @@ class standard_rc_pred_freq_mimo:
         self.pilot_obs_history_slots = None
         self.pilot_symbols = None
 
-    def _load_or_estimate_channel(self, slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator):
+    def _load_or_estimate_channel(self, slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator, use_rx_snr_for_nvar=True):
         """Load a single channel estimate from disk or run LMMSE estimation."""
 
         folder_path = estimated_channels_dir + "_rx_{}_tx_{}".format(
@@ -138,7 +138,8 @@ class standard_rc_pred_freq_mimo:
                     cfo_vals=cfo_vals,
                     sto_vals=sto_vals,
                     freq_cov_mat=freq_cov_mat,
-                    lmmse_interpolator=lmmse_interpolator
+                    lmmse_interpolator=lmmse_interpolator,
+                    use_rx_snr_for_nvar=use_rx_snr_for_nvar,
                 )
                 np.savez(file_path, h_freq_csi=h_freq_csi, err_var_csi=err_var_csi)
 
@@ -151,14 +152,15 @@ class standard_rc_pred_freq_mimo:
                 cfo_vals=cfo_vals,
                 sto_vals=sto_vals,
                 freq_cov_mat=freq_cov_mat,
-                lmmse_interpolator=lmmse_interpolator
+                lmmse_interpolator=lmmse_interpolator,
+                use_rx_snr_for_nvar=use_rx_snr_for_nvar,
             )
             os.makedirs(folder_path, exist_ok=True)
             np.savez(file_path, h_freq_csi=h_freq_csi, err_var_csi=err_var_csi)
 
         return np.expand_dims(h_freq_csi, axis=0), np.expand_dims(err_var_csi, axis=0)
 
-    def _get_csi_history_internal(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None, freq_cov_mat=None, lmmse_interpolator=None):
+    def _get_csi_history_internal(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None, freq_cov_mat=None, lmmse_interpolator=None, use_rx_snr_for_nvar=True):
 
         first_csi_history_idx = first_slot_idx - (csi_delay * self.history_len)
         channel_history_slots = np.arange(first_csi_history_idx, first_slot_idx, csi_delay)
@@ -172,7 +174,8 @@ class standard_rc_pred_freq_mimo:
         ):
             channel_data_list = [
                 self._load_or_estimate_channel(
-                    slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator
+                    slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator,
+                    use_rx_snr_for_nvar=use_rx_snr_for_nvar
                 )
                 for slot_idx in channel_history_slots
             ]
@@ -191,7 +194,8 @@ class standard_rc_pred_freq_mimo:
         if np.array_equal(self.csi_history_slots[1:], channel_history_slots[:-1]):
             newest_slot_idx = channel_history_slots[-1]
             new_entry = self._load_or_estimate_channel(
-                newest_slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator
+                newest_slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator,
+                use_rx_snr_for_nvar=use_rx_snr_for_nvar
             )
             self.csi_history_buffer = np.concatenate([self.csi_history_buffer[1:], new_entry[0]], axis=0)
             self.csi_err_var_history_buffer = np.concatenate([self.csi_err_var_history_buffer[1:], new_entry[1]], axis=0)
@@ -203,7 +207,8 @@ class standard_rc_pred_freq_mimo:
         # Fallback: rebuild buffer if slot progression is unexpected
         channel_data_list = [
             self._load_or_estimate_channel(
-                slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir
+                slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals, estimated_channels_dir, freq_cov_mat, lmmse_interpolator,
+                use_rx_snr_for_nvar=use_rx_snr_for_nvar
             )
             for slot_idx in channel_history_slots
         ]
@@ -286,7 +291,7 @@ class standard_rc_pred_freq_mimo:
         self.pilot_obs_history_slots = history_slots
         return self.pilot_obs_history_buffer, self.pilot_symbols
 
-    def get_csi_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None, freq_cov_mat=None, lmmse_interpolator=None):
+    def get_csi_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None, freq_cov_mat=None, lmmse_interpolator=None, use_rx_snr_for_nvar=True):
         h_freq_csi_history, _ = self._get_csi_history_internal(
             first_slot_idx,
             csi_delay,
@@ -297,10 +302,11 @@ class standard_rc_pred_freq_mimo:
             estimated_channels_dir=estimated_channels_dir,
             freq_cov_mat=freq_cov_mat,
             lmmse_interpolator=lmmse_interpolator,
+            use_rx_snr_for_nvar=use_rx_snr_for_nvar,
         )
         return h_freq_csi_history
 
-    def get_csi_history_with_err_var(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None, freq_cov_mat=None, lmmse_interpolator=None):
+    def get_csi_history_with_err_var(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None, freq_cov_mat=None, lmmse_interpolator=None, use_rx_snr_for_nvar=True):
         return self._get_csi_history_internal(
             first_slot_idx,
             csi_delay,
@@ -311,6 +317,7 @@ class standard_rc_pred_freq_mimo:
             estimated_channels_dir=estimated_channels_dir,
             freq_cov_mat=freq_cov_mat,
             lmmse_interpolator=lmmse_interpolator,
+            use_rx_snr_for_nvar=use_rx_snr_for_nvar,
         )
     
     def get_pilot_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None):

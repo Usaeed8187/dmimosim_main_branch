@@ -88,7 +88,8 @@ def estimate_freq_time_cov(dmimo_chans: dMIMOChannels, rg: ResourceGrid, start_s
 
 
 def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_idx, cache_slots=5, ebno_db=12.0,
-                             cfo_vals=[0], sto_vals=[0], freq_cov_mat=None, lmmse_interpolator=None):
+                             cfo_vals=[0], sto_vals=[0], freq_cov_mat=None, lmmse_interpolator=None,
+                             use_rx_snr_for_nvar=True):
     # Only allow channel estimation from slot 1 onward
     assert slot_idx >= 0, "Current slot index must be a positive integer"
 
@@ -113,8 +114,15 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
     
     ls_estimator = LSChannelEstimator(rg, interpolator=lmmse_int)
 
-    # Calculate noise variance for LS channel estimation
-    nvar = ebnodb2no(ebno_db, num_bits_per_symbol, 0.5)
+    # Calculate noise variance for LS channel estimation.
+    # Optionally derive it from the per-slot NS-3 Rx SNR so channel-estimation
+    # quality tracks transmit power / pathloss changes.
+    if use_rx_snr_for_nvar:
+        _, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=slot_idx, batch_size=1)
+        rx_snr_lin = np.power(10.0, np.asarray(rx_snr_db) / 10.0)
+        nvar = tf.cast(np.mean(1.0 / np.maximum(rx_snr_lin, 1e-12)), tf.float32)
+    else:
+        nvar = ebnodb2no(ebno_db, num_bits_per_symbol, 0.5)
 
     # Generate OFDM grid signals
     bs = binary_source([1, 1, rg.num_streams_per_tx, rg.num_data_symbols * num_bits_per_symbol])

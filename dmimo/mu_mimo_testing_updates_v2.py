@@ -47,6 +47,26 @@ from dmimo.utils import add_frequency_offset, add_timing_offset, compute_UE_wise
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
 
+def _compute_effective_snr_db(h_freq_csi, err_var_csi, eps=1e-12):
+    """Compute effective post-estimation SNR in dB from channel and error variance."""
+
+    if h_freq_csi is None or err_var_csi is None:
+        return None
+
+    h_np = np.asarray(h_freq_csi)
+    err_np = np.asarray(err_var_csi)
+    eff_snr_lin = np.mean(np.abs(h_np) ** 2 / np.maximum(err_np, eps))
+    return 10.0 * np.log10(eff_snr_lin + eps)
+
+
+def _print_lmmse_effective_snr(tag, h_freq_csi, err_var_csi):
+    """Print effective SNR after LMMSE channel estimation."""
+
+    snr_db = _compute_effective_snr_db(h_freq_csi, err_var_csi)
+    if snr_db is None:
+        return
+    print(f"{tag} Effective SNR after LMMSE channel estimation: {snr_db:.2f} dB")
+
 class MU_MIMO(Model):
 
     def __init__(self, cfg: SimConfig, rg_csi: ResourceGrid, **kwargs):
@@ -398,6 +418,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     # Cacheable LMMSE resources for the current drop
     freq_cov_mat = getattr(cfg, "freq_cov_mat", None)
     lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
+    lmmse_use_rx_snr_for_nvar = getattr(cfg, "lmmse_use_rx_snr_for_nvar", True)
 
     # Channel CSI estimation using channels in previous frames/slots
     h_freq_csi_history = None
@@ -445,7 +466,14 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     estimated_channels_dir=cfg.estimated_channels_dir,
                     freq_cov_mat=freq_cov_mat,
                     lmmse_interpolator=lmmse_interpolator,
+                    use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
                 )
+                if getattr(cfg, "print_lmmse_effective_snr", True):
+                    _print_lmmse_effective_snr(
+                        "CSI history",
+                        h_freq_csi_history,
+                        err_var_csi_history,
+                    )
             else:
                 h_freq_csi_history = rc_predictor.get_csi_history(
                     cfg.first_slot_idx,
@@ -457,6 +485,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     estimated_channels_dir=cfg.estimated_channels_dir,
                     freq_cov_mat=freq_cov_mat,
                     lmmse_interpolator=lmmse_interpolator,
+                    use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
                 )
                 err_var_csi_history = None
                 
@@ -465,6 +494,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
         h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
                                                 batch_size=cfg.num_slots_p2)
+        print("avg rx_snr_db: ", np.mean(rx_snr_db))
         
         start_time = time.time()
         if "pilot_obs" in cfg.channel_prediction_method:
@@ -532,7 +562,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         else:
             raise ValueError("Channel prediction method not implemented here.")
         end_time = time.time()
-        print("{} Prediction Time: {}".format(cfg.channel_prediction_method, end_time - start_time))
+        # print("{} Prediction Time: {}".format(cfg.channel_prediction_method, end_time - start_time))
     else:
         h_freq_csi_perfect, rx_snr_db, _ = dmimo_chans.load_channel(slot_idx=cfg.first_slot_idx,
                                                 batch_size=cfg.num_slots_p2)
@@ -543,7 +573,10 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                            cfo_vals=cfg.random_cfo_vals,
                                                            sto_vals=cfg.random_sto_vals,
                                                            freq_cov_mat=freq_cov_mat,
-                                                           lmmse_interpolator=lmmse_interpolator)
+                                                           lmmse_interpolator=lmmse_interpolator,
+                                                           use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar)
+        if getattr(cfg, "print_lmmse_effective_snr", True):
+            _print_lmmse_effective_snr("Current slot", h_freq_csi, err_var_csi)
     
     chan_pred_nmse = tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...] - h_freq_csi[0:1,...])**2) / tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...])**2)
     print("{} Prediction NMSE: {}".format(cfg.channel_prediction_method, chan_pred_nmse))
@@ -790,6 +823,7 @@ def sim_mu_mimo_all(
 
         freq_cov_mat = getattr(cfg, "freq_cov_mat", None)
         lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
+        lmmse_use_rx_snr_for_nvar = getattr(cfg, "lmmse_use_rx_snr_for_nvar", True)
         offline_histories = []
         offline_err_histories = []
 
@@ -805,6 +839,7 @@ def sim_mu_mimo_all(
             estimated_channels_dir=cfg.estimated_channels_dir,
             freq_cov_mat=freq_cov_mat,
             lmmse_interpolator=lmmse_interpolator,
+            use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
         )
         offline_history = np.asarray(h_hist)
         offline_err_history = np.asarray(err_hist)

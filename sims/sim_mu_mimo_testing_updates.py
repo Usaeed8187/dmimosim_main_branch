@@ -84,7 +84,7 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'high_mobility'
+mobility = 'higher_mobility'
 drop_idx = '1'
 rx_ues_arr = [0]
 num_txue_sel = 0
@@ -107,15 +107,17 @@ rl_checkpoint = None
 rl_evaluation_only = True
 state_dim_left = 2
 state_dim_right = 2
-esn_m = 4
+esn_m = 3
 esn_k = 4
 esn_num_freqs = 64
 esn_activation = "tanh"
 esn_ls_reg = 1e-6
 esn_diagnostics = True
-enable_skip_connections = False
+enable_skip_connections = True
 input_scale = 0.15
 W_tran_radius = 0.1
+print_lmmse_effective_snr = True
+lmmse_use_rx_snr_for_nvar = False
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -234,6 +236,8 @@ def run_simulation():
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
     cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
     cfg.drop_idx = drop_idx
+    cfg.print_lmmse_effective_snr = print_lmmse_effective_snr
+    cfg.lmmse_use_rx_snr_for_nvar = lmmse_use_rx_snr_for_nvar
 
     if cfg.perfect_csi:
         cfg.csi_prediction = False
