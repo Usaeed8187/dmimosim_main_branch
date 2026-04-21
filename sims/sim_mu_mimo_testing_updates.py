@@ -84,8 +84,8 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'high_mobility'
-drop_idx = '2'
+mobility = 'higher_mobility'
+drop_idx = '1'
 rx_ues_arr = [0]
 num_txue_sel = 0
 
@@ -95,10 +95,10 @@ link_adapt = True
 
 perfect_csi = False
 csi_prediction = True
-channel_prediction_setting = "configured_wesn" # "None", "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
-channel_prediction_method = "configured_wesn" # None, "weiner_filter", "kalman_filter", "two_mode", "two_mode_kalman_config", "configured_wesn", "pilot_obs"
+channel_prediction_setting = "configured_wesn" # "None", "kalman_filter", "configured_wesn", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
+channel_prediction_method = "configured_wesn" # None, "kalman_filter", "configured_wesn", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
 wesn_offline_ratio = 0.5  # Fraction of simulation cycles used for offline WESN configuration
-history_len = 8
+history_len = 5
 window_length = 2
 num_neurons = 16
 csi_quantization_on = True
@@ -116,7 +116,7 @@ esn_diagnostics = True
 enable_skip_connections = True
 input_scale = 0.15
 W_tran_radius = 0.1
-print_lmmse_effective_snr = True
+print_lmmse_effective_snr = False
 lmmse_use_rx_snr_for_nvar = False
 
 def log_error(exc: Exception) -> str:
@@ -251,7 +251,7 @@ def run_simulation():
     ns3cfg.num_txue_sel = num_txue_sel        
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
-    # print("Using channels in {}".format(folder_name))    
+    print("Using channels in {}".format(folder_name))    
 
     rc_config = RCConfig()
     rc_config.enable_window = True
@@ -409,9 +409,9 @@ def run_simulation():
 
 
 if __name__ == "__main__":
-    try:
-        run_simulation()
-    except Exception as exc:  # noqa: BLE001
-        log_error(exc)
-        sys.exit(1)
-    # run_simulation()
+    # try:
+    #     run_simulation()
+    # except Exception as exc:  # noqa: BLE001
+    #     log_error(exc)
+    #     sys.exit(1)
+    run_simulation()

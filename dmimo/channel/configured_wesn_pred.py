@@ -134,9 +134,10 @@ def denominator_coeffs_to_poles(a_den: np.ndarray) -> np.ndarray:
 
 def stabilize_poles(poles: np.ndarray, max_radius: float = 0.98) -> np.ndarray:
     out = poles.copy().astype(np.complex128)
-    mags = np.abs(out)
-    scales = np.where(mags >= max_radius, max_radius / (mags + 1e-12), 1.0)
-    return out * scales
+    max_mag = float(np.max(np.abs(out))) if out.size > 0 else 0.0
+    if np.isfinite(max_mag) and max_mag > float(max_radius) and max_mag > 1e-12:
+        out *= float(max_radius) / max_mag
+    return out
 
 
 def decompose_rp_fit_into_first_order(
@@ -330,13 +331,9 @@ class configured_wesn_pred:
             poles_all[j] = poles
             residues_all[j] = residues
 
-        pole_mags = np.abs(poles_all)
-        pole_scales = np.where(
-            pole_mags > float(self.spectral_radius),
-            float(self.spectral_radius) / (pole_mags + 1e-12),
-            1.0,
-        )
-        poles_all = poles_all * pole_scales
+        pole_max_mag = float(np.max(np.abs(poles_all))) if poles_all.size > 0 else 0.0
+        if np.isfinite(pole_max_mag) and pole_max_mag > float(self.spectral_radius) and pole_max_mag > 1e-12:
+            poles_all = poles_all * (float(self.spectral_radius) / pole_max_mag)
 
         w_res = np.tile(poles_all.reshape(-1), int(np.ceil(self.state_dim / (m * self.esn_k))))[: self.state_dim]
         self.W_res = np.diag(w_res.astype(self.dtype))

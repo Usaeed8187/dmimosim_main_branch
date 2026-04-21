@@ -748,19 +748,38 @@ def sim_mu_mimo_all(
     cfg.curr_no_rl_throughput = None
     cfg.rl_selector = rl_selector
 
-    slot_indices = np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2)
+    slot_indices_all = np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2)
+    slot_indices = slot_indices_all.copy()
 
-    if cfg.csi_prediction and "configured_wesn" in str(cfg.channel_prediction_method):
-        offline_ratio = float(getattr(cfg, "wesn_offline_ratio", 0.5))
-        if not (0.0 < offline_ratio <= 1.0):
-            raise ValueError(f"wesn_offline_ratio must be in (0, 1], got {offline_ratio}.")
-        if slot_indices.size <= 1:
+    eval_on_online_segment_only = bool(getattr(cfg, "eval_on_online_segment_only", True))
+    cfg.eval_on_online_segment_only = eval_on_online_segment_only
+
+    offline_ratio = float(getattr(cfg, "wesn_offline_ratio", 0.5))
+    if not (0.0 < offline_ratio <= 1.0):
+        raise ValueError(f"wesn_offline_ratio must be in (0, 1], got {offline_ratio}.")
+
+    if slot_indices_all.size <= 1:
+        offline_cycles = 0
+    else:
+        offline_cycles = int(np.floor(slot_indices_all.size * offline_ratio))
+        offline_cycles = max(1, min(offline_cycles, slot_indices_all.size - 1))
+    offline_slot_indices = slot_indices_all[:offline_cycles]
+    num_offline_cycles = int(offline_cycles)
+    num_online_cycles = int(slot_indices_all.size - offline_cycles)
+
+    is_configured_wesn = cfg.csi_prediction and "configured_wesn" in str(cfg.channel_prediction_method)
+    is_kalman_filter = cfg.csi_prediction and "kalman_filter" in str(cfg.channel_prediction_method)
+
+    if eval_on_online_segment_only and is_kalman_filter:
+        if slot_indices_all.size <= 1:
+            raise ValueError("Kalman filter evaluation requires at least two cycles (offline + online).")
+        slot_indices = slot_indices_all[offline_cycles:]
+
+    if is_configured_wesn:
+        if slot_indices_all.size <= 1:
             raise ValueError("Configured WESN requires at least two cycles (offline + online).")
-
-        offline_cycles = int(np.floor(slot_indices.size * offline_ratio))
-        offline_cycles = max(1, min(offline_cycles, slot_indices.size - 1))
-        offline_slot_indices = slot_indices[:offline_cycles]
-        slot_indices = slot_indices[offline_cycles:]
+        if eval_on_online_segment_only:
+            slot_indices = slot_indices_all[offline_cycles:]
 
         # Reset UE selection. Start with all TX and RX UEs selected.
         tmp_num_rxue_sel = ns3cfg.num_rxue_sel
@@ -850,6 +869,15 @@ def sim_mu_mimo_all(
             err_var_csi_history=offline_err_history,
         )
 
+    if eval_on_online_segment_only and is_kalman_filter:
+        online_loop_slot_indices = slot_indices_all[offline_cycles + 1:]
+    else:
+        online_loop_slot_indices = slot_indices[1:]
+    print(
+        f"Drop {cfg.drop_idx}, {cfg.channel_prediction_method} online loop slot indices: "
+        f"{online_loop_slot_indices.tolist()}"
+    )
+
     cfg.start_slot_idx = slot_indices[0]
     
     for first_slot_idx in slot_indices:
@@ -863,8 +891,10 @@ def sim_mu_mimo_all(
         end_time = time.time()
         # print("Cycle time: ", end_time - start_time, " seconds\n")
         
-        if first_slot_idx > cfg.start_slot_idx:
+        use_cycle_for_avg = first_slot_idx > cfg.start_slot_idx
 
+        if use_cycle_for_avg:
+            
             total_cycles += 1
             
             uncoded_ber += bers[0]
@@ -889,9 +919,19 @@ def sim_mu_mimo_all(
 
         hold = 1
 
-    goodput = goodput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
-    throughput = throughput / (total_cycles * slot_time * 1e6) * overhead  # Mbps
-    bitrate = bitrate / (total_cycles * slot_time * 1e6) * overhead  # Mbps
+    num_cycles_used_for_avg = int(total_cycles)
+    print(
+        f"Drop {cfg.drop_idx}, {cfg.channel_prediction_method} cycle counts: "
+        f"num_offline_cycles={num_offline_cycles}, "
+        f"num_online_cycles={num_online_cycles}, "
+        f"num_cycles_used_for_avg={num_cycles_used_for_avg}"
+    )
+    if num_cycles_used_for_avg <= 0:
+        raise ValueError("No cycles available for averaging after applying evaluation filters.")
+
+    goodput = goodput / (num_cycles_used_for_avg * slot_time * 1e6) * overhead  # Mbps
+    throughput = throughput / (num_cycles_used_for_avg * slot_time * 1e6) * overhead  # Mbps
+    bitrate = bitrate / (num_cycles_used_for_avg * slot_time * 1e6) * overhead  # Mbps
 
     # print("Average throughput: {:.2f} Mbps".format(throughput))
     # print("Average uncoded BER: {:.2f}".format(uncoded_ber / total_cycles))
@@ -922,8 +962,8 @@ def sim_mu_mimo_all(
     print("Drop {}, Average throughput: {:.2f} Mbps\n".format(cfg.drop_idx, throughput))
 
     return [
-        uncoded_ber / total_cycles,
-        ldpc_ber / total_cycles,
+        uncoded_ber / num_cycles_used_for_avg,
+        ldpc_ber / num_cycles_used_for_avg,
         goodput,
         throughput,
         bitrate,
