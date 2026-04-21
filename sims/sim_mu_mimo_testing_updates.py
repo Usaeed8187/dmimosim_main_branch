@@ -84,7 +84,7 @@ script_name = sys.argv[0]
 arguments = sys.argv[1:]
 
 
-mobility = 'higher_mobility'
+mobility = 'high_mobility'
 drop_idx = '1'
 rx_ues_arr = [0]
 num_txue_sel = 0
@@ -107,12 +107,13 @@ rl_checkpoint = None
 rl_evaluation_only = True
 state_dim_left = 2
 state_dim_right = 2
-esn_m = 3
+esn_m = 4
 esn_k = 4
 esn_num_freqs = 64
 esn_activation = "tanh"
-esn_ls_reg = 1e-3
+esn_ls_reg = 1e-6
 esn_diagnostics = True
+enable_skip_connections = False
 input_scale = 0.15
 W_tran_radius = 0.1
 
@@ -261,6 +262,7 @@ def run_simulation():
     rc_config.esn_activation = esn_activation
     rc_config.esn_ls_reg = esn_ls_reg
     rc_config.esn_diagnostics = esn_diagnostics
+    rc_config.enable_skip_connections = enable_skip_connections
     rc_config.input_scale = input_scale
     rc_config.W_tran_radius = W_tran_radius
     if channel_prediction_setting in ("two_mode_kalman_config", "configured_wesn"):

@@ -34,6 +34,7 @@ class RCConfig(Config):
         self._esn_activation = 'tanh'
         self._esn_ls_reg = 1e-6
         self._esn_diagnostics = False
+        self._enable_skip_connections = True
 
         super().__init__(**kwargs)
 
@@ -260,3 +261,11 @@ class RCConfig(Config):
     @esn_diagnostics.setter
     def esn_diagnostics(self, val):
         self._esn_diagnostics = val
+
+    @property
+    def enable_skip_connections(self):
+        return self._enable_skip_connections
+
+    @enable_skip_connections.setter
+    def enable_skip_connections(self, val):
+        self._enable_skip_connections = val

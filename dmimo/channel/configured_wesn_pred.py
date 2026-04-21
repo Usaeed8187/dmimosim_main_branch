@@ -176,11 +176,12 @@ class configured_wesn_pred:
         self.esn_activation = str(getattr(rc_config, "esn_activation", "tanh"))
         self.esn_ls_reg = float(getattr(rc_config, "esn_ls_reg", self.reg))
         self.esn_diagnostics = bool(getattr(rc_config, "esn_diagnostics", False))
+        self.enable_skip_connections = bool(getattr(rc_config, "enable_skip_connections", True))
 
         self.input_dim = int(self.N_r * (self.N_t * self.window_length if self.enable_window else self.N_t))
         self.state_dim = int(max(self.input_dim, self.esn_m * self.esn_k * self.N_r * self.N_t))
         self.output_dim = int(self.N_r * self.N_t)
-        self.feature_dim = int(self.state_dim + self.input_dim)
+        self.feature_dim = int(self.state_dim + self.input_dim if self.enable_skip_connections else self.state_dim)
 
         self.RS = np.random.RandomState(10)
         self.is_frozen = False
@@ -239,7 +240,10 @@ class configured_wesn_pred:
         return states.astype(self.dtype)
 
     def _fit_readout(self, states, inputs, targets):
-        feat = np.concatenate([states, inputs], axis=-1).reshape(-1, self.feature_dim)
+        if self.enable_skip_connections:
+            feat = np.concatenate([states, inputs], axis=-1).reshape(-1, self.feature_dim)
+        else:
+            feat = states.reshape(-1, self.feature_dim)
         y = targets.reshape(-1, self.output_dim)
         gram = feat.conj().T @ feat + self.esn_ls_reg * np.eye(self.feature_dim, dtype=self.dtype)
         self.W_out = (np.linalg.pinv(gram) @ feat.conj().T @ y).T.astype(self.dtype)
@@ -444,7 +448,10 @@ class configured_wesn_pred:
 
         self._fit_readout(states=s_hist[:-1], inputs=u_hist[:-1], targets=obs_batch[1:])
 
-        feat_last = np.concatenate([s_hist[-1], u_hist[-1]], axis=-1)
+        if self.enable_skip_connections:
+            feat_last = np.concatenate([s_hist[-1], u_hist[-1]], axis=-1)
+        else:
+            feat_last = s_hist[-1]
         y_last = feat_last @ self.W_out.T
 
         pred = np.zeros(h[0].shape, dtype=self.dtype)
