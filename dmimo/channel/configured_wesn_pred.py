@@ -292,11 +292,12 @@ class configured_wesn_pred:
             evals = (svals ** 2) / max(vc.shape[1], 1)
             q_eig = u[:, :m]
         else:
-            if m < kvv.shape[0]:
-                evals, q_eig = eigsh(kvv, k=m, which="LA")
-            else:
-                evals, evecs = np.linalg.eigh(kvv)
-                q_eig = evecs
+            # if m < kvv.shape[0]:
+            #     evals, q_eig = eigsh(kvv, k=m, which="LA")
+            # else:
+            #     evals, evecs = np.linalg.eigh(kvv)
+            #     q_eig = evecs
+            raise Exception("Not enough time-series data to get m eigenvectors. Consider reducing esn_m or reducing window size.")
         evals_real_sorted = np.sort(np.real(evals))[::-1]
         
         idx = np.argsort(np.real(evals))[::-1][:m]
