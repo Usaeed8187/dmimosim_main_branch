@@ -846,7 +846,7 @@ def sim_mu_mimo_all(
         offline_histories = []
         offline_err_histories = []
 
-        first_slot_idx = offline_slot_indices[0]
+        first_slot_idx = slot_indices_all[offline_cycles]
         rc_predictor.history_len = offline_slot_indices.size
         h_hist, err_hist = rc_predictor.get_csi_history_with_err_var(
             first_slot_idx,

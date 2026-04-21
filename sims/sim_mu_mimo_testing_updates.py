@@ -118,6 +118,7 @@ input_scale = 0.15
 W_tran_radius = 0.1
 print_lmmse_effective_snr = False
 lmmse_use_rx_snr_for_nvar = False
+num_slots_p2 = 1
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
