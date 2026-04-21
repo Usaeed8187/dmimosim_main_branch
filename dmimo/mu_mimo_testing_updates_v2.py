@@ -313,6 +313,25 @@ class MU_MIMO(Model):
         # sinr_linear = tf.reduce_mean(sinr_linear, axis=0)
         sinr_dB_arr = 10 * np.log10(sinr_linear.numpy() + 1e-12)
 
+        if bool(getattr(self.cfg, "return_first_slot_only", False)):
+            d_first = d[0:1, ...]
+            d_hard_first = d_hard[0:1, ...]
+            x_first = x[0:1, ...]
+            x_hard_first = x_hard[0:1, ...]
+
+            dec_bits = dec_bits[0:1, ...]
+            x_hat = x_hat[0:1, ...]
+            uncoded_ber = compute_ber(d_first, d_hard_first).numpy()
+            uncoded_ser = np.count_nonzero(x_first - x_hard_first) / np.prod(x_first.shape)
+            node_wise_uncoded_ser = compute_UE_wise_SER(
+                x_first,
+                x_hard_first,
+                self.cfg.ue_ranks[0],
+                self.cfg.num_tx_streams,
+            )
+            if np.ndim(sinr_dB_arr) > 0:
+                sinr_dB_arr = sinr_dB_arr[0:1, ...]
+
         return dec_bits, uncoded_ber, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_dB_arr
 
 
@@ -684,7 +703,10 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         # print("Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
 
     # Update error statistics
-    info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
+    if bool(getattr(cfg, "return_first_slot_only", False)):
+        info_bits = tf.reshape(info_bits[0:1, ...], dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
+    else:
+        info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
     # print("Uncoded BER: ", uncoded_ber_phase_2)
@@ -959,7 +981,8 @@ def sim_mu_mimo_all(
     chan_pred_nmse = np.array(chan_pred_nmse)
 
     print("Drop {}, {} Average Prediction NMSE: {}".format(cfg.drop_idx, cfg.channel_prediction_method, np.mean(chan_pred_nmse)))
-    print("Drop {}, Average throughput: {:.2f} Mbps\n".format(cfg.drop_idx, throughput))
+    print("Drop {}, Average throughput: {:.2f} Mbps".format(cfg.drop_idx, throughput))
+    print("Drop {}, Average uncoded BER: {:.2f}\n".format(cfg.drop_idx, uncoded_ber / num_cycles_used_for_avg))
 
     return [
         uncoded_ber / num_cycles_used_for_avg,

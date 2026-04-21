@@ -95,8 +95,8 @@ link_adapt = True
 
 perfect_csi = False
 csi_prediction = True
-channel_prediction_setting = "configured_wesn" # "None", "kalman_filter", "configured_wesn", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
-channel_prediction_method = "configured_wesn" # None, "kalman_filter", "configured_wesn", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
+channel_prediction_setting = "kalman_filter" # "None", "kalman_filter", "configured_wesn", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
+channel_prediction_method = "kalman_filter" # None, "kalman_filter", "configured_wesn", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
 wesn_offline_ratio = 0.5  # Fraction of simulation cycles used for offline WESN configuration
 history_len = 5
 window_length = 2
@@ -118,7 +118,7 @@ input_scale = 0.15
 W_tran_radius = 0.1
 print_lmmse_effective_snr = False
 lmmse_use_rx_snr_for_nvar = False
-num_slots_p2 = 1
+return_first_slot_only = True
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -239,6 +239,7 @@ def run_simulation():
     cfg.drop_idx = drop_idx
     cfg.print_lmmse_effective_snr = print_lmmse_effective_snr
     cfg.lmmse_use_rx_snr_for_nvar = lmmse_use_rx_snr_for_nvar
+    cfg.return_first_slot_only = return_first_slot_only
 
     if cfg.perfect_csi:
         cfg.csi_prediction = False

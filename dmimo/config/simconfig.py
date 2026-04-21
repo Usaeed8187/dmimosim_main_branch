@@ -42,6 +42,7 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._pilot_observation_cache_dir = None                    # Optional override for pilot-observation history cache
         self._rl_user_count = 2                                     # Number of worst users for transmitter-side DEQN
         self._tx_ue_selection_method = "rx_power"                   # Tx UE selection method: "rx_power", "proxy_mi"
+        self._return_first_slot_only = False                        # Return only first-slot MU-MIMO outputs from batched P2 call
         super().__init__(**kwargs)
 
     @property
@@ -123,6 +124,14 @@ class SimConfig(CarrierConfig, MCSConfig):
     @ue_indices.setter
     def ue_indices(self, val):
         self._ue_indices = val
+
+    @property
+    def return_first_slot_only(self):
+        return self._return_first_slot_only
+
+    @return_first_slot_only.setter
+    def return_first_slot_only(self, val):
+        self._return_first_slot_only = bool(val)
 
     @property
     def ue_ranks(self):
