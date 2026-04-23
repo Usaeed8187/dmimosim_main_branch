@@ -143,6 +143,36 @@ def _collect_nmse(
         merged[label] = np.concatenate(chunks) if chunks else np.array([], dtype=float)
     return merged
 
+def _remove_outliers_by_percentile(
+    values: np.ndarray,
+    lower_percentile: float,
+    upper_percentile: float,
+) -> np.ndarray:
+    if values.size == 0:
+        return values
+
+    low = np.percentile(values, lower_percentile)
+    high = np.percentile(values, upper_percentile)
+    return values[(values >= low) & (values <= high)]
+
+
+def _apply_outlier_filter(
+    nmse_values: Dict[str, np.ndarray],
+    lower_percentile: float,
+    upper_percentile: float,
+) -> Dict[str, np.ndarray]:
+    if lower_percentile <= 0.0 and upper_percentile >= 100.0:
+        return nmse_values
+
+    filtered: Dict[str, np.ndarray] = {}
+    for label, values in nmse_values.items():
+        updated = _remove_outliers_by_percentile(values, lower_percentile, upper_percentile)
+        print(
+            f"[INFO] Outlier filtering ({lower_percentile:.2f}-{upper_percentile:.2f} pct), "
+            f"{label}: kept {updated.size}/{values.size} samples"
+        )
+        filtered[label] = updated
+    return filtered
 
 def _plot_cdf(
     nmse_values: Dict[str, np.ndarray],
@@ -163,7 +193,7 @@ def _plot_cdf(
     xlabel = "Channel prediction NMSE (dB)" if nmse_in_db else "Channel prediction NMSE"
     plt.xlabel(xlabel)
     plt.ylabel("CDF")
-    plt.title(title)
+    # plt.title(title)
     plt.grid(alpha=0.25)
     plt.legend()
     plt.tight_layout()
@@ -188,7 +218,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         nargs="+",
         # default=[1, 2, 3, 5],
-        default=list(range(1, 6)),
+        default=list(range(1, 21)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -202,7 +232,7 @@ def parse_args() -> argparse.Namespace:
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8],
+        default=[2, 4, 6, 8, 10],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
@@ -224,6 +254,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--link-adapt", action="store_true", default=True)
     parser.add_argument("--nmse-in-db", action="store_true", default=False)
     parser.add_argument(
+        "--outlier-lower-percentile",
+        type=float,
+        default=0.0,
+        help="Lower percentile bound used to remove outliers (0 disables lower clipping).",
+    )
+    parser.add_argument(
+        "--outlier-upper-percentile",
+        type=float,
+        default=98.0,
+        help="Upper percentile bound used to remove outliers (100 disables upper clipping).",
+    )
+    parser.add_argument(
         "--output-dir",
         default=SCRIPT_DIR / "plots",
         help="Directory to save the generated plots.",
@@ -233,6 +275,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if not (0.0 <= args.outlier_lower_percentile < args.outlier_upper_percentile <= 100.0):
+        raise ValueError(
+            "--outlier-lower-percentile and --outlier-upper-percentile must satisfy "
+            "0 <= lower < upper <= 100"
+        )
 
     base_dir = _resolve_path(args.base_dir, SCRIPT_DIR)
     output_path = _resolve_path(args.output_dir, SCRIPT_DIR)
@@ -258,6 +305,11 @@ def main() -> None:
         prefix=prefix,
         quantization=args.quantization,
         scenarios=scenarios,
+    )
+    nmse_values = _apply_outlier_filter(
+        nmse_values=nmse_values,
+        lower_percentile=args.outlier_lower_percentile,
+        upper_percentile=args.outlier_upper_percentile,
     )
 
     summary = ", ".join(f"{k}: {v.size} samples" for k, v in nmse_values.items())

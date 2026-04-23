@@ -513,22 +513,22 @@ def main() -> None:
         "--drops",
         type=int,
         nargs="+",
-        # default=[1, 2, 3, 5],
-        default=list(range(1, 6)),
+        # default=[1, 3, 4],
+        default=list(range(1, 21)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
         "--rx-ues",
         type=int,
         nargs="+",
-        default=[4],
+        default=[2, 4, 6, 8, 10],
         help="UE counts that were simulated.",
     )
     parser.add_argument(
         "--tx-ues",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8],
+        default=[2, 4, 6, 8, 10],
         help="RU counts that were simulated (num_txue_sel).",
     )
     parser.add_argument(
