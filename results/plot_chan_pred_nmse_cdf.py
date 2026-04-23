@@ -214,6 +214,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--mobility", default="high_mobility")
     parser.add_argument(
+        "--mobilities",
+        nargs="+",
+        default=["high_mobility", "higher_mobility"],
+        help=(
+            "One or more mobility folder names (e.g., high_mobility higher_mobility). "
+            "If provided, this takes precedence over --mobility."
+        ),
+    )
+    parser.add_argument(
         "--drops",
         type=int,
         nargs="+",
@@ -283,6 +292,7 @@ def main() -> None:
 
     base_dir = _resolve_path(args.base_dir, SCRIPT_DIR)
     output_path = _resolve_path(args.output_dir, SCRIPT_DIR)
+    mobilities = args.mobilities if args.mobilities else [args.mobility]
 
     scenarios = [
         Scenario(label="Two-mode WESN", prediction=True, prediction_method="two_mode"),
@@ -298,19 +308,23 @@ def main() -> None:
         tx_ues=args.tx_ues,
     )
 
-    nmse_values = _collect_nmse(
-        base_dir=base_dir,
-        mobility=args.mobility,
-        drops=args.drops,
-        prefix=prefix,
-        quantization=args.quantization,
-        scenarios=scenarios,
-    )
-    nmse_values = _apply_outlier_filter(
-        nmse_values=nmse_values,
-        lower_percentile=args.outlier_lower_percentile,
-        upper_percentile=args.outlier_upper_percentile,
-    )
+    nmse_values: Dict[str, np.ndarray] = {}
+    for mobility in mobilities:
+        per_mobility_nmse = _collect_nmse(
+            base_dir=base_dir,
+            mobility=mobility,
+            drops=args.drops,
+            prefix=prefix,
+            quantization=args.quantization,
+            scenarios=scenarios,
+        )
+        per_mobility_nmse = _apply_outlier_filter(
+            nmse_values=per_mobility_nmse,
+            lower_percentile=args.outlier_lower_percentile,
+            upper_percentile=args.outlier_upper_percentile,
+        )
+        for scenario_label, values in per_mobility_nmse.items():
+            nmse_values[f"{scenario_label} ({mobility})"] = values
 
     summary = ", ".join(f"{k}: {v.size} samples" for k, v in nmse_values.items())
     print(f"Loaded NMSE sample counts -> {summary}")
@@ -320,7 +334,7 @@ def main() -> None:
         nmse_in_db=args.nmse_in_db,
         title=(
             f"MU-MIMO channel prediction NMSE comparison "
-            f"({args.mobility}, rx={args.rx_ues}, tx={args.tx_ues})"
+            f"({', '.join(mobilities)}, rx={args.rx_ues}, tx={args.tx_ues})"
         ),
         output_path=output_path,
     )
