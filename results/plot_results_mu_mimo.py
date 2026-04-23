@@ -375,21 +375,13 @@ def _default_scenarios(
             link_adapt=link_adapt,
             prediction_method="configured_wesn",
         ),
-        # Scenario(
-        #     perfect_csi=False,
-        #     prediction=True,
-        #     quantization=True,
-        #     label="DEQN beam adaptation + Two-Mode WESN prediction",
-        #     link_adapt=link_adapt,
-        #     prediction_method="deqn_plus_two_mode",
-        # ),
-        # Scenario(
-        #     perfect_csi=True,
-        #     prediction=False,
-        #     quantization=True,
-        #     label="Perfect Prediction",
-        #     link_adapt=link_adapt,
-        # ),
+        Scenario(
+            perfect_csi=True,
+            prediction=False,
+            quantization=True,
+            label="Perfect Prediction",
+            link_adapt=link_adapt,
+        ),
         # Scenario(
         #     perfect_csi=True,
         #     prediction=False,
