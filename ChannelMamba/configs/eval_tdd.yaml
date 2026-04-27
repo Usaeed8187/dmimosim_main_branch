@@ -1,0 +1,34 @@
+model:
+  d_in: 96
+  prev_len: 16
+  pred_len: 4
+  d_model: 512
+  d_state: 16
+  d_conv: 4
+  expand: 2
+  td_headdim: 64
+  ngroups: 1
+  num_td_layers: 2
+  num_bimamba_layers: 3
+  num_ffn_layers: 1
+  d_ff_ratio: 4
+  d_tf: 128
+  n_head: 4
+  num_transformer_layers: 1
+  fusion_type: concat
+  dropout: 0.1
+  ssm_backend: mamba2
+eval:
+  batch_size: 64
+  se_reference_snr_db: 10.0
+  single_speed_index: 5
+  single_snr_db: 10.0
+  snr_speed_index: 5
+  snr_values: [0, 5, 10, 15, 20, 25, 30]
+  velocity_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  velocity_snr_db: 18.0
+runtime:
+  device: auto
+  output_root: outputs
+  run_name: eval_tdd
+  num_workers: 4

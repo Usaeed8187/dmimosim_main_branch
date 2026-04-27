@@ -1,0 +1,44 @@
+model:
+  d_in: 96
+  prev_len: 16
+  pred_len: 4
+  d_model: 512
+  d_state: 16
+  d_conv: 4
+  expand: 2
+  td_headdim: 64
+  ngroups: 1
+  num_td_layers: 2
+  num_bimamba_layers: 3
+  num_ffn_layers: 1
+  d_ff_ratio: 4
+  d_tf: 128
+  n_head: 4
+  num_transformer_layers: 1
+  fusion_type: concat
+  dropout: 0.1
+  ssm_backend: mamba2
+data:
+  train_ratio: 0.9
+  val_ratio: 0.1
+  antenna_group_size: 32
+  train_noise_min_snr_db: 5.0
+  train_noise_max_snr_db: 20.0
+train:
+  lr: 0.0001
+  epochs: 500
+  batch_size: 128
+  weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.999
+  eta_min: 1.0e-7
+  grad_clip: 1.0
+  seed: 1234
+runtime:
+  device: auto
+  output_root: outputs
+  run_name: channelmamba_tdd
+  num_workers: 4
+  use_data_parallel: true
+  save_last: true
+  log_every: 20

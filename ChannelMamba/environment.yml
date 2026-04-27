@@ -1,0 +1,24 @@
+name: channelmamba
+channels:
+  - pytorch
+  - nvidia
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pyyaml=6.0.2
+  - numpy=1.26.3
+  - scipy=1.15.2
+  - pandas=2.2.3
+  - pytorch=2.1.1
+  - torchvision=0.16.1
+  - torchaudio=2.1.1
+  - cudatoolkit=11.8
+  - pip:
+      - einops==0.8.0
+      - hdf5storage==0.1.19
+      - tensorboard==2.19.0
+      - thop==0.1.1.post2209072238
+      - tqdm==4.66.5
+      - causal-conv1d==1.4.0
+      - mamba-ssm==2.2.2
