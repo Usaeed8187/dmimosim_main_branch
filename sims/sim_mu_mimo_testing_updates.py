@@ -95,9 +95,10 @@ link_adapt = True
 
 perfect_csi = False
 csi_prediction = True
-channel_prediction_setting = "kalman_filter" # "None", "kalman_filter", "configured_wesn", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
-channel_prediction_method = "kalman_filter" # None, "kalman_filter", "configured_wesn", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
+channel_prediction_setting = "channelmamba" # "None", "kalman_filter", "configured_wesn", "channelmamba", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
+channel_prediction_method = "channelmamba" # None, "kalman_filter", "configured_wesn", "channelmamba", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
 wesn_offline_ratio = 0.5  # Fraction of simulation cycles used for offline WESN configuration
+channelmamba_train_ratio = 0.9
 history_len = 8
 window_length = 2
 num_neurons = 16
@@ -119,6 +120,14 @@ W_tran_radius = 0.1
 print_lmmse_effective_snr = False
 lmmse_use_rx_snr_for_nvar = False
 return_first_slot_only = True
+channelmamba_checkpoint = None
+channelmamba_device = "cpu"
+channelmamba_epochs = 20
+channelmamba_batch_size = 128
+channelmamba_prev_len = 16
+channelmamba_pred_len = 1
+channelmamba_rb_size = 12
+channelmamba_max_num_rb = 42
 
 def log_error(exc: Exception) -> str:
     os.makedirs("results/logs", exist_ok=True)
@@ -276,6 +285,15 @@ def run_simulation():
     else:
         rc_config.enable_kalman_weight_config = False
     cfg.wesn_offline_ratio = wesn_offline_ratio
+    cfg.channelmamba_train_ratio = channelmamba_train_ratio
+    cfg.channelmamba_checkpoint = channelmamba_checkpoint
+    cfg.channelmamba_device = channelmamba_device
+    cfg.channelmamba_epochs = channelmamba_epochs
+    cfg.channelmamba_batch_size = channelmamba_batch_size
+    cfg.channelmamba_prev_len = channelmamba_prev_len
+    cfg.channelmamba_pred_len = channelmamba_pred_len
+    cfg.channelmamba_rb_size = channelmamba_rb_size
+    cfg.channelmamba_max_num_rb = channelmamba_max_num_rb
 
     cfg.rl_checkpoint = rl_checkpoint
     cfg.rl_evaluation_only = rl_evaluation_only
@@ -411,9 +429,9 @@ def run_simulation():
 
 
 if __name__ == "__main__":
-    try:
-        run_simulation()
-    except Exception as exc:  # noqa: BLE001
-        log_error(exc)
-        sys.exit(1)
-    # run_simulation()
+    # try:
+    #     run_simulation()
+    # except Exception as exc:  # noqa: BLE001
+    #     log_error(exc)
+    #     sys.exit(1)
+    run_simulation()

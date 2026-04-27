@@ -35,8 +35,8 @@ class ChannelMamba(nn.Module):
         ssm_backend: str = "mamba2",
     ) -> None:
         super().__init__()
-        if d_in != 96:
-            raise ValueError("ChannelMamba expects d_in=96 based on the released preprocessing pipeline.")
+        if d_in <= 0:
+            raise ValueError("d_in must be positive.")
         if fusion_type not in {"concat", "add"}:
             raise ValueError("fusion_type must be 'concat' or 'add'.")
         if d_tf % n_head != 0:

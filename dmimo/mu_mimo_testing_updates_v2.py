@@ -559,6 +559,20 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                 ns3cfg,
                 err_var_csi_history=err_var_csi_history,
             )
+        elif "channelmamba" in cfg.channel_prediction_method:
+            from dmimo.channel.channelmamba_pred import predict_all_links_with_channelmamba_simple
+
+            channelmamba_predictor = getattr(cfg, "channelmamba_predictor", None)
+            if channelmamba_predictor is None:
+                raise ValueError(
+                    "ChannelMamba predictor not found. "
+                    "Please run offline ChannelMamba training before online slots."
+                )
+            h_freq_csi = predict_all_links_with_channelmamba_simple(
+                h_freq_csi_history,
+                channelmamba_predictor,
+                ns3cfg,
+            )
 
         elif cfg.channel_prediction_method == "old":
             h_freq_csi = rc_predictor.rc_siso_predict(h_freq_csi_history)
@@ -776,9 +790,16 @@ def sim_mu_mimo_all(
     eval_on_online_segment_only = bool(getattr(cfg, "eval_on_online_segment_only", True))
     cfg.eval_on_online_segment_only = eval_on_online_segment_only
 
-    offline_ratio = float(getattr(cfg, "wesn_offline_ratio", 0.5))
+    is_configured_wesn = cfg.csi_prediction and "configured_wesn" in str(cfg.channel_prediction_method)
+    is_kalman_filter = cfg.csi_prediction and "kalman_filter" in str(cfg.channel_prediction_method)
+    is_channelmamba = cfg.csi_prediction and "channelmamba" in str(cfg.channel_prediction_method)
+
+    if is_channelmamba:
+        offline_ratio = float(getattr(cfg, "channelmamba_train_ratio", 0.9))
+    else:
+        offline_ratio = float(getattr(cfg, "wesn_offline_ratio", 0.5))
     if not (0.0 < offline_ratio <= 1.0):
-        raise ValueError(f"wesn_offline_ratio must be in (0, 1], got {offline_ratio}.")
+        raise ValueError(f"offline ratio must be in (0, 1], got {offline_ratio}.")
 
     if slot_indices_all.size <= 1:
         offline_cycles = 0
@@ -788,9 +809,6 @@ def sim_mu_mimo_all(
     offline_slot_indices = slot_indices_all[:offline_cycles]
     num_offline_cycles = int(offline_cycles)
     num_online_cycles = int(slot_indices_all.size - offline_cycles)
-
-    is_configured_wesn = cfg.csi_prediction and "configured_wesn" in str(cfg.channel_prediction_method)
-    is_kalman_filter = cfg.csi_prediction and "kalman_filter" in str(cfg.channel_prediction_method)
 
     if eval_on_online_segment_only and is_kalman_filter:
         if slot_indices_all.size <= 1:
@@ -890,6 +908,63 @@ def sim_mu_mimo_all(
             ns3cfg,
             err_var_csi_history=offline_err_history,
         )
+
+    if is_channelmamba:
+        from dmimo.channel.channelmamba_pred import build_channelmamba_predictor
+
+        if slot_indices_all.size <= 1:
+            raise ValueError("ChannelMamba evaluation requires at least two cycles (offline + online).")
+        if eval_on_online_segment_only:
+            slot_indices = slot_indices_all[offline_cycles:]
+
+        dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+        num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
+        csi_effective_subcarriers = (cfg.fft_size // num_txs_ant) * num_txs_ant
+        csi_guard_carriers_1 = (cfg.fft_size - csi_effective_subcarriers) // 2
+        csi_guard_carriers_2 = (cfg.fft_size - csi_effective_subcarriers) - csi_guard_carriers_1
+        rg_csi = ResourceGrid(
+            num_ofdm_symbols=14,
+            fft_size=cfg.fft_size,
+            subcarrier_spacing=cfg.subcarrier_spacing,
+            num_tx=1,
+            num_streams_per_tx=num_txs_ant,
+            cyclic_prefix_length=cfg.cyclic_prefix_len,
+            num_guard_carriers=[csi_guard_carriers_1, csi_guard_carriers_2],
+            dc_null=False,
+            pilot_pattern="kronecker",
+            pilot_ofdm_symbol_indices=[2, 11],
+        )
+
+        rc_predictor = getattr(cfg, "rc_predictor", None)
+        if rc_predictor is None:
+            rc_predictor = standard_rc_pred_freq_mimo('MU_MIMO', cfg.num_tx_streams, rc_config, ns3cfg)
+            cfg.rc_predictor = rc_predictor
+        rc_predictor.reset_csi_history()
+
+        freq_cov_mat = getattr(cfg, "freq_cov_mat", None)
+        lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
+        lmmse_use_rx_snr_for_nvar = getattr(cfg, "lmmse_use_rx_snr_for_nvar", True)
+
+        first_online_slot_idx = slot_indices_all[offline_cycles]
+        old_history_len = rc_predictor.history_len
+        rc_predictor.history_len = offline_slot_indices.size
+        h_hist, _ = rc_predictor.get_csi_history_with_err_var(
+            first_online_slot_idx,
+            cfg.csi_delay,
+            rg_csi,
+            dmimo_chans,
+            cfo_vals=cfg.random_cfo_vals,
+            sto_vals=cfg.random_sto_vals,
+            estimated_channels_dir=cfg.estimated_channels_dir,
+            freq_cov_mat=freq_cov_mat,
+            lmmse_interpolator=lmmse_interpolator,
+            use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+        )
+        rc_predictor.history_len = old_history_len
+
+        channelmamba_predictor = build_channelmamba_predictor(cfg)
+        channelmamba_predictor.fit_offline(np.asarray(h_hist), ns3cfg=ns3cfg)
+        cfg.channelmamba_predictor = channelmamba_predictor
 
     if eval_on_online_segment_only and is_kalman_filter:
         online_loop_slot_indices = slot_indices_all[offline_cycles + 1:]

@@ -1,0 +1,275 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import List, Tuple
+
+import numpy as np
+import torch
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+
+from .models import ChannelMamba
+
+
+@dataclass
+class DMIMOChannelMambaConfig:
+    prev_len: int = 16
+    pred_len: int = 1
+    rb_size: int = 12
+    max_num_rb: int | None = None
+    epochs: int = 20
+    batch_size: int = 128
+    lr: float = 1e-3
+    weight_decay: float = 1e-4
+    seed: int = 1234
+    d_model: int = 256
+    d_state: int = 16
+    d_conv: int = 4
+    expand: int = 2
+    td_headdim: int = 64
+    ngroups: int = 1
+    num_td_layers: int = 2
+    num_bimamba_layers: int = 2
+    num_ffn_layers: int = 1
+    d_ff_ratio: int = 4
+    d_tf: int = 128
+    n_head: int = 4
+    num_transformer_layers: int = 1
+    fusion_type: str = "concat"
+    dropout: float = 0.1
+    ssm_backend: str = "auto"
+    device: str = "cpu"
+    checkpoint_path: str | None = None
+
+
+class DMIMOChannelMambaPredictor:
+    """Offline-trained, online-inference ChannelMamba predictor for dMIMO CSI."""
+
+    def __init__(self, cfg: DMIMOChannelMambaConfig):
+        self.cfg = cfg
+        self.device = torch.device(cfg.device)
+        self.model: ChannelMamba | None = None
+        self.d_in: int | None = None
+        self._loaded_from_checkpoint = False
+
+    @staticmethod
+    def _to_pair_indices(node_idx: int, num_bs_ant: int, num_ue_ant: int) -> np.ndarray:
+        if node_idx == 0:
+            return np.arange(0, num_bs_ant)
+        return np.arange(
+            num_bs_ant + (node_idx - 1) * num_ue_ant,
+            num_bs_ant + node_idx * num_ue_ant,
+        )
+
+    @staticmethod
+    def _ensure_prev_len(features: np.ndarray, prev_len: int) -> np.ndarray:
+        """Ensure time axis has at least prev_len steps by front-padding."""
+
+        m, t_hist, d_in = features.shape
+        if t_hist >= prev_len:
+            return features
+        pad_count = prev_len - t_hist
+        pad = np.repeat(features[:, 0:1, :], pad_count, axis=1)
+        return np.concatenate([pad, features], axis=1).reshape(m, prev_len, d_in)
+
+    def _compress_history_to_features(self, curr_h: np.ndarray) -> Tuple[np.ndarray, int, int, int, int, int]:
+        """
+        Convert CSI history block to ChannelMamba inputs.
+
+        curr_h shape: [T, B, 1, N_r, 1, N_t, N_sym, N_sc]
+        return features shape: [N_r*N_t, T, 2*N_rb]
+        """
+
+        hist = np.asarray(curr_h)
+        t_hist, _, _, n_r, _, n_t, n_sym, n_sc = hist.shape
+        hist = hist[:, 0, 0, :, 0, :, :, :]  # [T, N_r, N_t, N_sym, N_sc]
+        hist_sym_mean = np.mean(hist, axis=3)  # [T, N_r, N_t, N_sc]
+
+        rb_size = int(self.cfg.rb_size)
+        max_num_rb = self.cfg.max_num_rb
+        n_rb_full = n_sc // rb_size
+        n_rb = n_rb_full if max_num_rb is None else min(n_rb_full, int(max_num_rb))
+        if n_rb <= 0:
+            raise ValueError(f"Invalid RB configuration: n_sc={n_sc}, rb_size={rb_size}, max_num_rb={max_num_rb}")
+
+        sc_used = n_rb * rb_size
+        hist_trim = hist_sym_mean[..., :sc_used]
+        rb_vals = hist_trim.reshape(t_hist, n_r, n_t, n_rb, rb_size).mean(axis=-1)  # [T, N_r, N_t, N_rb]
+        feat = np.concatenate([np.real(rb_vals), np.imag(rb_vals)], axis=-1)  # [T, N_r, N_t, 2*N_rb]
+        feat = np.transpose(feat, (1, 2, 0, 3)).reshape(n_r * n_t, t_hist, 2 * n_rb)
+        return feat.astype(np.float32), n_rb, n_sc, n_sym, n_r, n_t
+
+    def _reconstruct_block_from_features(
+        self,
+        pred_features: np.ndarray,
+        n_rb: int,
+        n_sc: int,
+        n_sym: int,
+        n_r: int,
+        n_t: int,
+    ) -> np.ndarray:
+        """Reconstruct full-sc/symbol CSI block from one-step prediction features."""
+
+        rb_size = int(self.cfg.rb_size)
+        pred_features = pred_features.reshape(n_r, n_t, 2 * n_rb)
+        rb_real = pred_features[..., :n_rb]
+        rb_imag = pred_features[..., n_rb:]
+        rb_complex = rb_real + 1j * rb_imag  # [N_r, N_t, N_rb]
+
+        sc_vals = np.repeat(rb_complex, rb_size, axis=-1)  # [N_r, N_t, N_rb*rb_size]
+        if sc_vals.shape[-1] < n_sc:
+            rem = n_sc - sc_vals.shape[-1]
+            tail = np.repeat(sc_vals[..., -1:], rem, axis=-1)
+            sc_vals = np.concatenate([sc_vals, tail], axis=-1)
+        elif sc_vals.shape[-1] > n_sc:
+            sc_vals = sc_vals[..., :n_sc]
+
+        sym_vals = np.repeat(sc_vals[:, :, np.newaxis, :], n_sym, axis=2)  # [N_r, N_t, N_sym, N_sc]
+
+        out = np.zeros((1, 1, n_r, 1, n_t, n_sym, n_sc), dtype=np.complex64)
+        out[0, 0, :, 0, :, :, :] = sym_vals.astype(np.complex64)
+        return out
+
+    def _build_model(self, d_in: int) -> ChannelMamba:
+        model = ChannelMamba(
+            d_in=d_in,
+            prev_len=int(self.cfg.prev_len),
+            pred_len=int(self.cfg.pred_len),
+            d_model=int(self.cfg.d_model),
+            d_state=int(self.cfg.d_state),
+            d_conv=int(self.cfg.d_conv),
+            expand=int(self.cfg.expand),
+            td_headdim=int(self.cfg.td_headdim),
+            ngroups=int(self.cfg.ngroups),
+            num_td_layers=int(self.cfg.num_td_layers),
+            num_bimamba_layers=int(self.cfg.num_bimamba_layers),
+            num_ffn_layers=int(self.cfg.num_ffn_layers),
+            d_ff_ratio=int(self.cfg.d_ff_ratio),
+            d_tf=int(self.cfg.d_tf),
+            n_head=int(self.cfg.n_head),
+            num_transformer_layers=int(self.cfg.num_transformer_layers),
+            fusion_type=str(self.cfg.fusion_type),
+            dropout=float(self.cfg.dropout),
+            ssm_backend=str(self.cfg.ssm_backend),
+        ).to(self.device)
+        return model
+
+    def _maybe_load_checkpoint(self, d_in: int) -> None:
+        ckpt = self.cfg.checkpoint_path
+        if ckpt is None:
+            return
+        if self._loaded_from_checkpoint:
+            return
+        if self.model is None:
+            self.model = self._build_model(d_in)
+        state = torch.load(ckpt, map_location=self.device)
+        state_dict = state.get("model_state_dict", state)
+        self.model.load_state_dict(state_dict)
+        self.model.eval()
+        self._loaded_from_checkpoint = True
+
+    def fit_offline(self, h_freq_csi_history: np.ndarray, ns3cfg, num_bs_ant: int = 4, num_ue_ant: int = 2) -> None:
+        """Fit model from offline slot history. If checkpoint is provided, skip fitting."""
+
+        rng_seed = int(self.cfg.seed)
+        torch.manual_seed(rng_seed)
+        np.random.seed(rng_seed)
+
+        samples_x: List[np.ndarray] = []
+        samples_y: List[np.ndarray] = []
+        prev_len = int(self.cfg.prev_len)
+        pred_len = int(self.cfg.pred_len)
+
+        for tx_node_idx in range(ns3cfg.num_txue_sel + 1):
+            for rx_node_idx in range(ns3cfg.num_rxue_sel + 1):
+                tx_ant_idx = self._to_pair_indices(tx_node_idx, num_bs_ant=num_bs_ant, num_ue_ant=num_ue_ant)
+                rx_ant_idx = self._to_pair_indices(rx_node_idx, num_bs_ant=num_bs_ant, num_ue_ant=num_ue_ant)
+
+                curr_h = h_freq_csi_history[:, :, :, rx_ant_idx, :, ...]
+                curr_h = curr_h[:, :, :, :, :, tx_ant_idx, ...]
+                features, n_rb, _, _, _, _ = self._compress_history_to_features(curr_h)
+
+                d_in = 2 * n_rb
+                if self.d_in is None:
+                    self.d_in = d_in
+                elif self.d_in != d_in:
+                    raise ValueError(f"Inconsistent d_in across links: existing={self.d_in}, new={d_in}")
+
+                for m_idx in range(features.shape[0]):
+                    seq = features[m_idx]  # [T, d_in]
+                    if seq.shape[0] < prev_len + pred_len:
+                        continue
+                    for t_idx in range(prev_len, seq.shape[0] - pred_len + 1):
+                        x = seq[t_idx - prev_len:t_idx]
+                        y = seq[t_idx:t_idx + pred_len]
+                        samples_x.append(x.astype(np.float32))
+                        samples_y.append(y.astype(np.float32))
+
+        if self.d_in is None:
+            raise ValueError("No valid training samples built for ChannelMamba.")
+
+        if self.model is None:
+            self.model = self._build_model(self.d_in)
+        self._maybe_load_checkpoint(self.d_in)
+
+        if self._loaded_from_checkpoint:
+            return
+        if len(samples_x) == 0:
+            raise ValueError("No offline windows were generated for ChannelMamba training.")
+
+        x_tensor = torch.from_numpy(np.stack(samples_x)).to(torch.float32)
+        y_tensor = torch.from_numpy(np.stack(samples_y)).to(torch.float32)
+        dataset = TensorDataset(x_tensor, y_tensor)
+        loader = DataLoader(dataset, batch_size=int(self.cfg.batch_size), shuffle=True)
+
+        optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=float(self.cfg.lr),
+            weight_decay=float(self.cfg.weight_decay),
+        )
+        criterion = nn.MSELoss()
+
+        self.model.train()
+        for epoch_idx in range(int(self.cfg.epochs)):
+            epoch_loss = 0.0
+            num_batches = 0
+            for x_batch, y_batch in loader:
+                x_batch = x_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
+                optimizer.zero_grad()
+                pred = self.model(x_batch)
+                loss = criterion(pred, y_batch)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += float(loss.item())
+                num_batches += 1
+            avg_loss = epoch_loss / max(num_batches, 1)
+            print(f"[channelmamba] offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
+        self.model.eval()
+
+    @torch.no_grad()
+    def predict_all_links(self, h_freq_csi_history: np.ndarray, ns3cfg, num_bs_ant: int = 4, num_ue_ant: int = 2):
+        if self.model is None:
+            raise ValueError("ChannelMamba predictor is not initialized. Run fit_offline first.")
+
+        h_freq_csi = np.zeros(h_freq_csi_history[0, ...].shape, dtype=h_freq_csi_history.dtype)
+        prev_len = int(self.cfg.prev_len)
+
+        for tx_node_idx in range(ns3cfg.num_txue_sel + 1):
+            for rx_node_idx in range(ns3cfg.num_rxue_sel + 1):
+                tx_ant_idx = self._to_pair_indices(tx_node_idx, num_bs_ant=num_bs_ant, num_ue_ant=num_ue_ant)
+                rx_ant_idx = self._to_pair_indices(rx_node_idx, num_bs_ant=num_bs_ant, num_ue_ant=num_ue_ant)
+
+                curr_h = h_freq_csi_history[:, :, :, rx_ant_idx, :, ...]
+                curr_h = curr_h[:, :, :, :, :, tx_ant_idx, ...]
+
+                features, n_rb, n_sc, n_sym, n_r, n_t = self._compress_history_to_features(curr_h)
+                features = self._ensure_prev_len(features, prev_len=prev_len)
+                model_in = torch.from_numpy(features[:, -prev_len:, :]).to(self.device)
+                pred = self.model(model_in).detach().cpu().numpy()[:, 0, :]  # one-step: [M, d_in]
+                tmp = self._reconstruct_block_from_features(pred, n_rb=n_rb, n_sc=n_sc, n_sym=n_sym, n_r=n_r, n_t=n_t)
+
+                rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
+                h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)
+
+        return h_freq_csi
