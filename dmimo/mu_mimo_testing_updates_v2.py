@@ -913,6 +913,41 @@ def sim_mu_mimo_all(
 
         if slot_indices_all.size <= 0:
             raise ValueError("ChannelMamba evaluation requires at least one cycle.")
+        
+        # Reset UE selection. Start with all TX and RX UEs selected.
+        tmp_num_rxue_sel = ns3cfg.num_rxue_sel
+        tmp_num_txue_sel = ns3cfg.num_txue_sel
+        ns3cfg.reset_ue_selection()
+        tx_ue_mask, rx_ue_mask = update_node_selection(cfg, ns3cfg)
+        ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+
+        if not cfg.scheduling:
+            rx_ue_mask = np.zeros(10)
+            tx_ue_mask = np.zeros(10)
+            rx_ue_mask[:tmp_num_rxue_sel] = 1
+            tx_ue_mask[:tmp_num_txue_sel] = 1
+            ns3cfg.update_ue_selection(tx_ue_mask, rx_ue_mask)
+
+            ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
+            scheduled_rx_UEs = np.arange(1, tmp_num_rxue_sel+1)
+            for ue_idx in scheduled_rx_UEs:
+                start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+                end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+                ue_indices.append(list(np.arange(start, end)))
+            cfg.scheduled_rx_ue_indices = np.array(ue_indices)
+            cfg.num_scheduled_ues = cfg.scheduled_rx_ue_indices.shape[0]-2
+            if not cfg.rank_adapt:
+                cfg.num_tx_streams = (cfg.num_scheduled_ues+2) * cfg.ue_ranks[0]
+
+            ue_indices = [[0, 1],[2, 3]] # Assuming gNB was scheduled
+            scheduled_tx_UEs = np.arange(1, tmp_num_txue_sel+1)
+            for ue_idx in scheduled_tx_UEs:
+                start = (ue_idx - 1) * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+                end = ue_idx * ns3cfg.num_ue_ant + ns3cfg.num_bs_ant
+                ue_indices.append(list(np.arange(start, end)))
+            cfg.scheduled_tx_ue_indices = np.array(ue_indices)
+        else:
+            raise Exception ("Scheduling not supported in this version.")
 
         dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
         num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
@@ -943,19 +978,59 @@ def sim_mu_mimo_all(
         lmmse_use_rx_snr_for_nvar = getattr(cfg, "lmmse_use_rx_snr_for_nvar", True)
 
         channelmamba_mode = str(getattr(cfg, "channelmamba_mode", "train")).lower()
-        first_online_slot_idx = slot_indices_all[0]
-        h_hist, _ = rc_predictor.get_csi_history_with_err_var(
-            first_online_slot_idx,
+        channelmamba_prev_len = int(getattr(cfg, "channelmamba_prev_len", 16))
+        channelmamba_pred_len = int(getattr(cfg, "channelmamba_pred_len", 1))
+        if channelmamba_prev_len <= 0 or channelmamba_pred_len <= 0:
+            raise ValueError(
+                f"ChannelMamba requires positive prev_len/pred_len, got prev_len={channelmamba_prev_len}, "
+                f"pred_len={channelmamba_pred_len}."
+            )
+
+        # Build an offline history timeline aligned with simulation cycles:
+        # input slots are the previous `channelmamba_prev_len` delayed CSI estimates and
+        # target is the next delayed-step CSI estimate.
+        # Example (csi_delay=4, prev_len=5, pred_len=1):
+        #   [13,17,21,25,29] -> 33, [17,21,25,29,33] -> 37, ...
+        first_label_slot_idx = int(slot_indices_all[0])
+        last_label_slot_idx = int(slot_indices_all[-1])
+        first_history_slot_idx = first_label_slot_idx - cfg.csi_delay * channelmamba_prev_len
+        last_required_slot_idx = last_label_slot_idx + cfg.csi_delay * (channelmamba_pred_len - 1)
+        channelmamba_slots = np.arange(
+            first_history_slot_idx,
+            last_required_slot_idx + cfg.csi_delay,
             cfg.csi_delay,
-            rg_csi,
-            dmimo_chans,
-            cfo_vals=cfg.random_cfo_vals,
-            sto_vals=cfg.random_sto_vals,
-            estimated_channels_dir=cfg.estimated_channels_dir,
-            freq_cov_mat=freq_cov_mat,
-            lmmse_interpolator=lmmse_interpolator,
-            use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+            dtype=int,
         )
+        if channelmamba_slots.size < (channelmamba_prev_len + channelmamba_pred_len):
+            raise ValueError(
+                "Insufficient ChannelMamba offline timeline slots. "
+                f"Need at least {channelmamba_prev_len + channelmamba_pred_len}, "
+                f"got {channelmamba_slots.size}."
+            )
+
+        old_history_len = int(rc_predictor.history_len)
+        rc_predictor.history_len = 1
+        rc_predictor.reset_csi_history()
+        h_hist_blocks = []
+        for hist_slot_idx in channelmamba_slots:
+            # With history_len=1, querying at first_slot_idx=(hist_slot_idx + csi_delay)
+            # returns exactly the CSI estimate at hist_slot_idx.
+            h_hist_one, _ = rc_predictor.get_csi_history_with_err_var(
+                int(hist_slot_idx + cfg.csi_delay),
+                cfg.csi_delay,
+                rg_csi,
+                dmimo_chans,
+                cfo_vals=cfg.random_cfo_vals,
+                sto_vals=cfg.random_sto_vals,
+                estimated_channels_dir=cfg.estimated_channels_dir,
+                freq_cov_mat=freq_cov_mat,
+                lmmse_interpolator=lmmse_interpolator,
+                use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+            )
+            h_hist_blocks.append(np.asarray(h_hist_one))
+        h_hist = np.concatenate(h_hist_blocks, axis=0)
+        rc_predictor.history_len = old_history_len
+        rc_predictor.reset_csi_history()
 
         channelmamba_predictor = build_channelmamba_predictor(cfg)
         if channelmamba_mode == "eval":
