@@ -40,6 +40,7 @@ class DMIMOChannelMambaConfig:
     ssm_backend: str = "auto"
     device: str = "cpu"
     checkpoint_path: str | None = None
+    freeze_loaded_checkpoint: bool = True
 
 
 class DMIMOChannelMambaPredictor:
@@ -158,7 +159,7 @@ class DMIMOChannelMambaPredictor:
         ckpt = self.cfg.checkpoint_path
         if ckpt is None:
             return
-        if self._loaded_from_checkpoint:
+        if self._loaded_from_checkpoint and bool(self.cfg.freeze_loaded_checkpoint):
             return
         if self.model is None:
             self.model = self._build_model(d_in)
@@ -246,6 +247,9 @@ class DMIMOChannelMambaPredictor:
             avg_loss = epoch_loss / max(num_batches, 1)
             print(f"[channelmamba] offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
         self.model.eval()
+        if self.cfg.checkpoint_path:
+            torch.save({"model_state_dict": self.model.state_dict()}, self.cfg.checkpoint_path)
+            print(f"[channelmamba] saved checkpoint to {self.cfg.checkpoint_path}")
 
     @torch.no_grad()
     def predict_all_links(self, h_freq_csi_history: np.ndarray, ns3cfg, num_bs_ant: int = 4, num_ue_ant: int = 2):

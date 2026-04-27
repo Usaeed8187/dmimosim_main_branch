@@ -98,7 +98,6 @@ csi_prediction = True
 channel_prediction_setting = "channelmamba" # "None", "kalman_filter", "configured_wesn", "channelmamba", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
 channel_prediction_method = "channelmamba" # None, "kalman_filter", "configured_wesn", "channelmamba", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
 wesn_offline_ratio = 0.5  # Fraction of simulation cycles used for offline WESN configuration
-channelmamba_train_ratio = 0.9
 history_len = 8
 window_length = 2
 num_neurons = 16
@@ -121,6 +120,7 @@ print_lmmse_effective_snr = False
 lmmse_use_rx_snr_for_nvar = False
 return_first_slot_only = True
 channelmamba_checkpoint = None
+channelmamba_mode = "train"  # train | eval | auto
 channelmamba_device = "cpu"
 channelmamba_epochs = 20
 channelmamba_batch_size = 128
@@ -157,6 +157,7 @@ def parse_arguments():
     global csi_prediction, channel_prediction_method
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
+    global channelmamba_checkpoint, channelmamba_mode
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -190,6 +191,12 @@ def parse_arguments():
 
         if len(arguments) >= 12:
             rl_evaluation_only = _parse_bool(arguments[11])
+        
+        if len(arguments) >= 13:
+            channelmamba_checkpoint = arguments[12]
+
+        if len(arguments) >= 14:
+            channelmamba_mode = str(arguments[13]).lower()
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -285,7 +292,7 @@ def run_simulation():
     else:
         rc_config.enable_kalman_weight_config = False
     cfg.wesn_offline_ratio = wesn_offline_ratio
-    cfg.channelmamba_train_ratio = channelmamba_train_ratio
+    cfg.channelmamba_mode = channelmamba_mode
     cfg.channelmamba_checkpoint = channelmamba_checkpoint
     cfg.channelmamba_device = channelmamba_device
     cfg.channelmamba_epochs = channelmamba_epochs

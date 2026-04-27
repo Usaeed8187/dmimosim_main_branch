@@ -19,6 +19,7 @@ from channelmamba.dmimo_bridge import DMIMOChannelMambaConfig, DMIMOChannelMamba
 
 
 def build_channelmamba_predictor(cfg) -> DMIMOChannelMambaPredictor:
+    channelmamba_mode = str(getattr(cfg, "channelmamba_mode", "train")).lower()
     cm_cfg = DMIMOChannelMambaConfig(
         prev_len=int(getattr(cfg, "channelmamba_prev_len", 16)),
         pred_len=int(getattr(cfg, "channelmamba_pred_len", 1)),
@@ -47,6 +48,7 @@ def build_channelmamba_predictor(cfg) -> DMIMOChannelMambaPredictor:
         ssm_backend=str(getattr(cfg, "channelmamba_ssm_backend", "auto")),
         device=str(getattr(cfg, "channelmamba_device", "cpu")),
         checkpoint_path=getattr(cfg, "channelmamba_checkpoint", None),
+        freeze_loaded_checkpoint=channelmamba_mode == "eval",
     )
     return DMIMOChannelMambaPredictor(cm_cfg)
 

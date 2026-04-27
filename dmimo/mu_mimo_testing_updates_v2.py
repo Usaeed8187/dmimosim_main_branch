@@ -794,14 +794,13 @@ def sim_mu_mimo_all(
     is_kalman_filter = cfg.csi_prediction and "kalman_filter" in str(cfg.channel_prediction_method)
     is_channelmamba = cfg.csi_prediction and "channelmamba" in str(cfg.channel_prediction_method)
 
-    if is_channelmamba:
-        offline_ratio = float(getattr(cfg, "channelmamba_train_ratio", 0.9))
-    else:
-        offline_ratio = float(getattr(cfg, "wesn_offline_ratio", 0.5))
+    offline_ratio = float(getattr(cfg, "wesn_offline_ratio", 0.5))
     if not (0.0 < offline_ratio <= 1.0):
         raise ValueError(f"offline ratio must be in (0, 1], got {offline_ratio}.")
 
-    if slot_indices_all.size <= 1:
+    if is_channelmamba:
+        offline_cycles = 0
+    elif slot_indices_all.size <= 1:
         offline_cycles = 0
     else:
         offline_cycles = int(np.floor(slot_indices_all.size * offline_ratio))
@@ -912,10 +911,8 @@ def sim_mu_mimo_all(
     if is_channelmamba:
         from dmimo.channel.channelmamba_pred import build_channelmamba_predictor
 
-        if slot_indices_all.size <= 1:
-            raise ValueError("ChannelMamba evaluation requires at least two cycles (offline + online).")
-        if eval_on_online_segment_only:
-            slot_indices = slot_indices_all[offline_cycles:]
+        if slot_indices_all.size <= 0:
+            raise ValueError("ChannelMamba evaluation requires at least one cycle.")
 
         dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
         num_txs_ant = 2 * ns3cfg.num_txue_sel + ns3cfg.num_bs_ant
@@ -945,9 +942,8 @@ def sim_mu_mimo_all(
         lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
         lmmse_use_rx_snr_for_nvar = getattr(cfg, "lmmse_use_rx_snr_for_nvar", True)
 
-        first_online_slot_idx = slot_indices_all[offline_cycles]
-        old_history_len = rc_predictor.history_len
-        rc_predictor.history_len = offline_slot_indices.size
+        channelmamba_mode = str(getattr(cfg, "channelmamba_mode", "train")).lower()
+        first_online_slot_idx = slot_indices_all[0]
         h_hist, _ = rc_predictor.get_csi_history_with_err_var(
             first_online_slot_idx,
             cfg.csi_delay,
@@ -960,9 +956,16 @@ def sim_mu_mimo_all(
             lmmse_interpolator=lmmse_interpolator,
             use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
         )
-        rc_predictor.history_len = old_history_len
 
         channelmamba_predictor = build_channelmamba_predictor(cfg)
+        if channelmamba_mode == "eval":
+            if not cfg.channelmamba_checkpoint:
+                raise ValueError("channelmamba_mode='eval' requires cfg.channelmamba_checkpoint to be set.")
+            print(f"[channelmamba] drop={cfg.drop_idx}: loading checkpoint only from {cfg.channelmamba_checkpoint}")
+        elif channelmamba_mode == "train":
+            print(f"[channelmamba] drop={cfg.drop_idx}: training and optionally saving to {cfg.channelmamba_checkpoint}")
+        else:
+            print(f"[channelmamba] drop={cfg.drop_idx}: auto mode with checkpoint={cfg.channelmamba_checkpoint}")
         channelmamba_predictor.fit_offline(np.asarray(h_hist), ns3cfg=ns3cfg)
         cfg.channelmamba_predictor = channelmamba_predictor
 
