@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import matplotlib.pyplot as plt
+from matplotlib.patches import Ellipse
 import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -181,27 +182,128 @@ def _plot_cdf(
     output_path: Path,
 ) -> None:
     plt.figure(figsize=(9, 5))
+    ax = plt.gca()
 
-    for label, values in nmse_values.items():
+    # Same color for a prediction method across mobilities
+    method_colors = {
+        "Two-mode WESN": "tab:blue",
+        "Configured WESN": "tab:green",
+        "Kalman Filter": "tab:orange",
+    }
+
+    # Paper-friendly mobility labels
+    mobility_display = {
+        "high_mobility": "10 km/h",
+        "higher_mobility": "40 km/h",
+        "highest_mobility": "80 km/h",
+    }
+
+    # Manual ellipse settings so you can control the exact look/placement
+    # Format:
+    # mobility: {
+    #   "xy": (x_center, y_center),
+    #   "width": ...,
+    #   "height": ...,
+    #   "text_xy": (x_text, y_text),
+    # }
+    ellipse_specs = {
+        "high_mobility": {
+            "xy": (0.020, 0.70),
+            "width": 0.030,   # wider than before
+            "height": 0.075,   # flatter / more horizontal
+            "text_xy": (0.029, 0.65),  # bottom-right, outside ellipse
+        },
+        "higher_mobility": {
+            "xy": (0.11, 0.7),
+            "width": 0.075,
+            "height": 0.15,
+            "text_xy": (0.055, 0.8),   # bottom-right, outside ellipse
+        },
+        "highest_mobility": {
+            "xy": (0.235, 0.705),
+            "width": 0.125,
+            "height": 0.16,
+            "text_xy": (0.285, 0.65),   # bottom-right, outside ellipse
+        },
+    }
+
+    for combined_label, values in nmse_values.items():
         if values.size == 0:
             continue
+
+        # Expect labels like: "Kalman Filter (high_mobility)"
+        if " (" in combined_label and combined_label.endswith(")"):
+            method_label, mobility = combined_label.rsplit(" (", 1)
+            mobility = mobility[:-1]
+        else:
+            method_label = combined_label
+            mobility = "high_mobility"
+
+        color = method_colors.get(method_label, None)
+
         to_plot = 10.0 * np.log10(np.maximum(values, 1e-15)) if nmse_in_db else values
         sorted_vals = np.sort(to_plot)
         cdf = np.arange(1, sorted_vals.size + 1, dtype=float) / sorted_vals.size
-        plt.plot(sorted_vals, cdf, linewidth=2.0, label=label)
+
+        # Same linestyle for all curves
+        ax.plot(
+            sorted_vals,
+            cdf,
+            linewidth=2.2,
+            color=color,
+            linestyle="-",
+            label=method_label if mobility == "high_mobility" else None,
+        )
 
     xlabel = "Channel prediction NMSE (dB)" if nmse_in_db else "Channel prediction NMSE"
-    plt.xlabel(xlabel)
-    plt.ylabel("CDF")
-    # plt.title(title)
-    plt.grid(alpha=0.25)
-    plt.legend()
+    ax.set_xlabel(xlabel, fontsize=14)
+    ax.set_ylabel("CDF", fontsize=14)
+    ax.grid(alpha=0.25)
+
+    # Add dashed ellipses and external labels
+    for mobility, spec in ellipse_specs.items():
+        ellipse = Ellipse(
+            xy=spec["xy"],
+            width=spec["width"],
+            height=spec["height"],
+            angle=0.0,
+            fill=False,
+            edgecolor="black",
+            linewidth=1.2,
+            linestyle="--",   # dashed ellipse
+            alpha=0.9,
+        )
+        ax.add_patch(ellipse)
+
+        ax.text(
+            spec["text_xy"][0],
+            spec["text_xy"][1],
+            mobility_display.get(mobility, mobility),
+            ha="left",
+            va="top",
+            fontsize=10,
+        )
+
+    # Only keep prediction-method legend
+    handles, labels = ax.get_legend_handles_labels()
+    unique = {}
+    for h, l in zip(handles, labels):
+        if l and l not in unique:
+            unique[l] = h
+
+    ax.legend(
+        unique.values(),
+        unique.keys(),
+        loc="lower right",
+        frameon=True,
+    )
+
     plt.tight_layout()
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig("{}/chan_pred_nmse_cdf.png".format(output_path), dpi=200)
-    print(f"Saved figure to: {output_path}")
-
+    output_path.mkdir(parents=True, exist_ok=True)
+    save_file = output_path / "chan_pred_nmse_cdf.png"
+    plt.savefig(save_file, dpi=300, bbox_inches="tight")
+    print(f"Saved figure to: {save_file}")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -216,7 +318,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mobilities",
         nargs="+",
-        default=["high_mobility", "higher_mobility"],
+        default=["high_mobility", "higher_mobility", "highest_mobility"],
         help=(
             "One or more mobility folder names (e.g., high_mobility higher_mobility). "
             "If provided, this takes precedence over --mobility."
@@ -295,7 +397,7 @@ def main() -> None:
     mobilities = args.mobilities if args.mobilities else [args.mobility]
 
     scenarios = [
-        Scenario(label="Two-mode WESN", prediction=True, prediction_method="two_mode"),
+        # Scenario(label="Two-mode WESN", prediction=True, prediction_method="two_mode"),
         Scenario(label="Configured WESN", prediction=True, prediction_method="configured_wesn"),
         Scenario(label="Kalman Filter", prediction=True, prediction_method="kalman_filter"),
     ]

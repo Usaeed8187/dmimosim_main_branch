@@ -808,13 +808,13 @@ def main():
         "--esn-ls-reg", "--fb-ls-reg",
         dest="esn_ls_reg",
         type=float,
-        default=1e-6,
+        default=1e-4,
         help="Ridge regularization used by ESN readout solve",
     )
     parser.add_argument("--rx-ant", type=int, default=4)
     parser.add_argument("--tx-ant", type=int, default=4)
     parser.add_argument("--snr-start", type=int, default=0)
-    parser.add_argument("--snr-stop", type=int, default=15)
+    parser.add_argument("--snr-stop", type=int, default=31)
     parser.add_argument("--snr-step", type=int, default=5)
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument(
@@ -892,16 +892,16 @@ def main():
     )
 
     plt.figure(figsize=(8, 5))
-    plt.plot(snr_vals, nmse_ss_vals, marker="o", label="Steady-state Kalman")
-    plt.plot(snr_vals, nmse_full_vals, marker="s", label="Full Kalman")
-    plt.plot(snr_vals, nmse_cfg_vals, marker="^", label="Configured ESN + LS readout")
-    plt.plot(snr_vals, nmse_rand_vals, marker="d", label="Random ESN + LS readout")
-    plt.xlabel("SNR (dB)")
-    plt.ylabel("Channel prediction NMSE")
-    plt.title(
-        "P2P channel prediction NMSE vs SNR\n"
-        f"({args.mobility}, drop={args.drop_idx}, delay={args.feedback_delay}, history={args.history_len}, AR={args.ar_order})"
-    )
+    # plt.plot(snr_vals, nmse_ss_vals, marker="o", label="Steady-state Kalman")
+    plt.plot(snr_vals, nmse_full_vals, marker="s", label="Kalman Filtering")
+    plt.plot(snr_vals, nmse_cfg_vals, marker="^", label="Configured WESN")
+    plt.plot(snr_vals, nmse_rand_vals, marker="d", label="Random WESN")
+    plt.xlabel("SNR (dB)", fontsize=14)
+    plt.ylabel("NMSE", fontsize=14)
+    # plt.title(
+    #     "P2P channel prediction NMSE vs SNR\n"
+    #     f"({args.mobility}, drop={args.drop_idx}, delay={args.feedback_delay}, history={args.history_len}, AR={args.ar_order})"
+    # )
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
