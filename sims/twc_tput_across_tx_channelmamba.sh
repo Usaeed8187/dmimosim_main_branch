@@ -99,8 +99,8 @@ for setting in "${setting_args[@]}"; do
     ((setting_counter++))
     echo "Launching setting ${setting_counter}/${total_settings}: mobility=${mobility}, rx_ues=${rx_ues}, num_txue_sel=${num_txue_sel}, perfect_csi=${perfect_csi}, csi_quantization=${csi_quantization}" >&2
 
-    checkpoint_path="${CHANNELMAMBA_CHECKPOINT_ROOT}/channelmamba_mob_${mobility}_tx_${num_txue_sel}_rx_${rx_ues}_pcsi_${perfect_csi}_cquant_${csi_quantization}.pt"
-    rm -f "${checkpoint_path}"
+    checkpoint_root="${checkpoint_path%.pt}"
+    rm -f "${checkpoint_root}"__tx*_rx*.pt
 
     train_drops_csv=$(IFS=,; echo "${train_drops[*]}")
     train_anchor_drop="${train_drops[0]}"

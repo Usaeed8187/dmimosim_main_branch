@@ -560,17 +560,17 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                 err_var_csi_history=err_var_csi_history,
             )
         elif "channelmamba" in cfg.channel_prediction_method:
-            from dmimo.channel.channelmamba_pred import predict_all_links_with_channelmamba_simple
+            from dmimo.channel.channelmamba_pred import predict_all_links_with_channelmamba_per_pair
 
-            channelmamba_predictor = getattr(cfg, "channelmamba_predictor", None)
-            if channelmamba_predictor is None:
+            channelmamba_predictors = getattr(cfg, "channelmamba_predictors", None)
+            if channelmamba_predictors is None:
                 raise ValueError(
-                    "ChannelMamba predictor not found. "
+                    "ChannelMamba predictors not found. "
                     "Please run offline ChannelMamba training before online slots."
                 )
-            h_freq_csi = predict_all_links_with_channelmamba_simple(
+            h_freq_csi = predict_all_links_with_channelmamba_per_pair(
                 h_freq_csi_history,
-                channelmamba_predictor,
+                channelmamba_predictors,
                 ns3cfg,
             )
 
@@ -909,7 +909,7 @@ def sim_mu_mimo_all(
         )
 
     if is_channelmamba:
-        from dmimo.channel.channelmamba_pred import build_channelmamba_predictor
+        from dmimo.channel.channelmamba_pred import build_channelmamba_predictors_simple
 
         if slot_indices_all.size <= 0:
             raise ValueError("ChannelMamba evaluation requires at least one cycle.")
@@ -1013,14 +1013,7 @@ def sim_mu_mimo_all(
         else:
             train_drop_indices = [str(d) for d in train_drop_indices]
 
-        channelmamba_predictor = build_channelmamba_predictor(cfg)
-        if channelmamba_mode == "eval":
-            if not cfg.channelmamba_checkpoint:
-                raise ValueError("channelmamba_mode='eval' requires cfg.channelmamba_checkpoint to be set.")
-            print(f"[channelmamba] drop={cfg.drop_idx}: loading checkpoint only from {cfg.channelmamba_checkpoint}")
-            channelmamba_predictor.load_checkpoint_only()
-            print(f"[channelmamba] drop={cfg.drop_idx}: skipped offline history extraction in eval mode")
-        elif channelmamba_mode in ("train", "auto"):
+        if channelmamba_mode in ("train", "auto"):
             if channelmamba_mode == "train":
                 print(f"[channelmamba] drop={cfg.drop_idx}: training and optionally saving to {cfg.channelmamba_checkpoint}")
             else:
@@ -1069,10 +1062,24 @@ def sim_mu_mimo_all(
                 raise ValueError(
                     f"ChannelMamba pooled training produced no CSI history blocks for drops={train_drop_indices}."
                 )
-            channelmamba_predictor.fit_offline(pooled_h_hist_per_drop, ns3cfg=ns3cfg)
+            channelmamba_predictors = build_channelmamba_predictors_simple(
+                pooled_h_hist_per_drop,
+                cfg,
+                ns3cfg,
+            )
+        elif channelmamba_mode == "eval":
+            if not cfg.channelmamba_checkpoint:
+                raise ValueError("channelmamba_mode='eval' requires cfg.channelmamba_checkpoint to be set.")
+            print(f"[channelmamba] drop={cfg.drop_idx}: loading pair checkpoints from base {cfg.channelmamba_checkpoint}")
+            channelmamba_predictors = build_channelmamba_predictors_simple(
+                [],
+                cfg,
+                ns3cfg,
+            )
+            print(f"[channelmamba] drop={cfg.drop_idx}: skipped offline history extraction in eval mode")
         else:
             raise ValueError(f"Unsupported channelmamba_mode='{channelmamba_mode}'.")
-        cfg.channelmamba_predictor = channelmamba_predictor
+        cfg.channelmamba_predictors = channelmamba_predictors
 
     if eval_on_online_segment_only and is_kalman_filter:
         online_loop_slot_indices = slot_indices_all[offline_cycles + 1:]

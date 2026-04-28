@@ -339,6 +339,110 @@ class DMIMOChannelMambaPredictor:
             torch.save({"model_state_dict": self.model.state_dict(), "metadata": metadata}, self.cfg.checkpoint_path)
             print(f"[channelmamba] saved checkpoint to {self.cfg.checkpoint_path}")
 
+    def fit_offline_pair(
+        self,
+        h_freq_csi_history_pair: np.ndarray | Sequence[np.ndarray],
+    ) -> None:
+        """Fit a predictor for a single tx/rx node pair using pooled drop histories."""
+
+        rng_seed = int(self.cfg.seed)
+        torch.manual_seed(rng_seed)
+        np.random.seed(rng_seed)
+
+        samples_x: List[np.ndarray] = []
+        samples_y: List[np.ndarray] = []
+        prev_len = int(self.cfg.prev_len)
+        pred_len = int(self.cfg.pred_len)
+
+        if isinstance(h_freq_csi_history_pair, np.ndarray):
+            pair_histories = [h_freq_csi_history_pair]
+        else:
+            pair_histories = [np.asarray(h_hist) for h_hist in h_freq_csi_history_pair]
+
+        for drop_seq_idx, pair_hist in enumerate(pair_histories):
+            features, n_rb, _, _, _, _ = self._compress_history_to_features(pair_hist)
+            d_in = 2 * n_rb
+            if self.d_in is None:
+                self.d_in = d_in
+            elif self.d_in != d_in:
+                raise ValueError(f"Inconsistent d_in across pooled drops: existing={self.d_in}, new={d_in}")
+
+            per_drop_windows = 0
+            for m_idx in range(features.shape[0]):
+                seq = features[m_idx]  # [T, d_in]
+                if seq.shape[0] < prev_len + pred_len:
+                    continue
+                for t_idx in range(prev_len, seq.shape[0] - pred_len + 1):
+                    x = seq[t_idx - prev_len:t_idx]
+                    y = seq[t_idx:t_idx + pred_len]
+                    samples_x.append(x.astype(np.float32))
+                    samples_y.append(y.astype(np.float32))
+                    per_drop_windows += 1
+            print(f"[channelmamba] pair drop-seq-{drop_seq_idx}: generated {per_drop_windows} offline windows")
+
+        if self.d_in is None:
+            raise ValueError("No valid training samples built for ChannelMamba pair training.")
+
+        if self.model is None:
+            self.model = self._build_model(self.d_in)
+        self._maybe_load_checkpoint(self.d_in)
+
+        if self._loaded_from_checkpoint and bool(self.cfg.freeze_loaded_checkpoint):
+            return
+        if len(samples_x) == 0:
+            raise ValueError("No offline windows were generated for ChannelMamba pair training.")
+
+        x_np = np.asarray(np.stack(samples_x), dtype=np.float32, order="C")
+        y_np = np.asarray(np.stack(samples_y), dtype=np.float32, order="C")
+
+        x_tensor = torch.tensor(x_np, dtype=torch.float32)
+        y_tensor = torch.tensor(y_np, dtype=torch.float32)
+
+        dataset = TensorDataset(x_tensor, y_tensor)
+        loader = DataLoader(dataset, batch_size=int(self.cfg.batch_size), shuffle=True)
+
+        optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=float(self.cfg.lr),
+            weight_decay=float(self.cfg.weight_decay),
+        )
+        criterion = nn.MSELoss()
+
+        self.model.train()
+        for epoch_idx in range(int(self.cfg.epochs)):
+            epoch_loss = 0.0
+            num_batches = 0
+            for x_batch, y_batch in loader:
+                x_batch = x_batch.to(self.device)
+                y_batch = y_batch.to(self.device)
+                optimizer.zero_grad()
+                pred = self.model(x_batch)
+                loss = criterion(pred, y_batch)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += float(loss.item())
+                num_batches += 1
+            avg_loss = epoch_loss / max(num_batches, 1)
+            print(f"[channelmamba] pair offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
+        self.model.eval()
+        if self.cfg.checkpoint_path:
+            metadata = dict(self.cfg.checkpoint_metadata or {})
+            metadata["d_in"] = int(self.d_in) if self.d_in is not None else None
+            torch.save({"model_state_dict": self.model.state_dict(), "metadata": metadata}, self.cfg.checkpoint_path)
+            print(f"[channelmamba] saved pair checkpoint to {self.cfg.checkpoint_path}")
+
+    @torch.no_grad()
+    def predict_pair(self, h_freq_csi_history_pair: np.ndarray) -> np.ndarray:
+        if self.model is None:
+            raise ValueError("ChannelMamba pair predictor is not initialized. Run fit_offline_pair first.")
+
+        prev_len = int(self.cfg.prev_len)
+        features, n_rb, n_sc, n_sym, n_r, n_t = self._compress_history_to_features(h_freq_csi_history_pair)
+        features = self._ensure_prev_len(features, prev_len=prev_len)
+        model_in = torch.from_numpy(features[:, -prev_len:, :]).to(self.device)
+        pred = self.model(model_in).detach().cpu().numpy()[:, 0, :]  # one-step: [M, d_in]
+        return self._reconstruct_block_from_features(pred, n_rb=n_rb, n_sc=n_sc, n_sym=n_sym, n_r=n_r, n_t=n_t)
+
     @torch.no_grad()
     def predict_all_links(self, h_freq_csi_history: np.ndarray, ns3cfg, num_bs_ant: int = 4, num_ue_ant: int = 2):
         if self.model is None:
