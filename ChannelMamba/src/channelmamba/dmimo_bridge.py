@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 import os
 import numpy as np
 import torch
@@ -203,7 +203,41 @@ class DMIMOChannelMambaPredictor:
         if saved_metadata:
             print(f"[channelmamba] loaded checkpoint metadata: {saved_metadata}")
 
-    def fit_offline(self, h_freq_csi_history: np.ndarray, ns3cfg, num_bs_ant: int = 4, num_ue_ant: int = 2) -> None:
+    def load_checkpoint_only(self, d_in: int | None = None) -> None:
+        """Load checkpoint weights without running offline fitting."""
+        if d_in is None:
+            ckpt = self.cfg.checkpoint_path
+            if ckpt is None or not os.path.exists(ckpt):
+                raise ValueError(
+                    "ChannelMamba eval mode requires d_in or a valid checkpoint "
+                    f"at '{ckpt}'."
+                )
+            state = torch.load(ckpt, map_location="cpu")
+            metadata = state.get("metadata", {}) if isinstance(state, dict) else {}
+            if "d_in" not in metadata:
+                raise ValueError(
+                    "ChannelMamba checkpoint metadata is missing 'd_in'; "
+                    "cannot initialize eval-only predictor."
+                )
+            d_in = int(metadata["d_in"])
+        if self.model is None:
+            self.model = self._build_model(int(d_in))
+        self.d_in = int(d_in)
+        self._maybe_load_checkpoint(int(d_in))
+        if not self._loaded_from_checkpoint:
+            raise ValueError(
+                "ChannelMamba eval mode requires a valid checkpoint, "
+                f"but none was loaded from '{self.cfg.checkpoint_path}'."
+            )
+        self.model.eval()
+
+    def fit_offline(
+        self,
+        h_freq_csi_history: np.ndarray | Sequence[np.ndarray],
+        ns3cfg,
+        num_bs_ant: int = 4,
+        num_ue_ant: int = 2,
+    ) -> None:
         """Fit model from offline slot history.
 
         Behavior depends on mode:
@@ -220,30 +254,39 @@ class DMIMOChannelMambaPredictor:
         prev_len = int(self.cfg.prev_len)
         pred_len = int(self.cfg.pred_len)
 
-        for tx_node_idx in range(ns3cfg.num_txue_sel + 1):
-            for rx_node_idx in range(ns3cfg.num_rxue_sel + 1):
-                tx_ant_idx = self._to_pair_indices(tx_node_idx, num_bs_ant=num_bs_ant, num_ue_ant=num_ue_ant)
-                rx_ant_idx = self._to_pair_indices(rx_node_idx, num_bs_ant=num_bs_ant, num_ue_ant=num_ue_ant)
+        if isinstance(h_freq_csi_history, np.ndarray):
+            h_freq_csi_histories = [h_freq_csi_history]
+        else:
+            h_freq_csi_histories = [np.asarray(h_hist) for h_hist in h_freq_csi_history]
 
-                curr_h = h_freq_csi_history[:, :, :, rx_ant_idx, :, ...]
-                curr_h = curr_h[:, :, :, :, :, tx_ant_idx, ...]
-                features, n_rb, _, _, _, _ = self._compress_history_to_features(curr_h)
+        for drop_seq_idx, curr_drop_h_hist in enumerate(h_freq_csi_histories):
+            per_drop_windows = 0
+            for tx_node_idx in range(ns3cfg.num_txue_sel + 1):
+                for rx_node_idx in range(ns3cfg.num_rxue_sel + 1):
+                    tx_ant_idx = self._to_pair_indices(tx_node_idx, num_bs_ant=num_bs_ant, num_ue_ant=num_ue_ant)
+                    rx_ant_idx = self._to_pair_indices(rx_node_idx, num_bs_ant=num_bs_ant, num_ue_ant=num_ue_ant)
 
-                d_in = 2 * n_rb
-                if self.d_in is None:
-                    self.d_in = d_in
-                elif self.d_in != d_in:
-                    raise ValueError(f"Inconsistent d_in across links: existing={self.d_in}, new={d_in}")
+                    curr_h = curr_drop_h_hist[:, :, :, rx_ant_idx, :, ...]
+                    curr_h = curr_h[:, :, :, :, :, tx_ant_idx, ...]
+                    features, n_rb, _, _, _, _ = self._compress_history_to_features(curr_h)
 
-                for m_idx in range(features.shape[0]):
-                    seq = features[m_idx]  # [T, d_in]
-                    if seq.shape[0] < prev_len + pred_len:
-                        continue
-                    for t_idx in range(prev_len, seq.shape[0] - pred_len + 1):
-                        x = seq[t_idx - prev_len:t_idx]
-                        y = seq[t_idx:t_idx + pred_len]
-                        samples_x.append(x.astype(np.float32))
-                        samples_y.append(y.astype(np.float32))
+                    d_in = 2 * n_rb
+                    if self.d_in is None:
+                        self.d_in = d_in
+                    elif self.d_in != d_in:
+                        raise ValueError(f"Inconsistent d_in across links: existing={self.d_in}, new={d_in}")
+
+                    for m_idx in range(features.shape[0]):
+                        seq = features[m_idx]  # [T, d_in]
+                        if seq.shape[0] < prev_len + pred_len:
+                            continue
+                        for t_idx in range(prev_len, seq.shape[0] - pred_len + 1):
+                            x = seq[t_idx - prev_len:t_idx]
+                            y = seq[t_idx:t_idx + pred_len]
+                            samples_x.append(x.astype(np.float32))
+                            samples_y.append(y.astype(np.float32))
+                            per_drop_windows += 1
+            print(f"[channelmamba] drop-seq-{drop_seq_idx}: generated {per_drop_windows} offline windows")
 
         if self.d_in is None:
             raise ValueError("No valid training samples built for ChannelMamba.")

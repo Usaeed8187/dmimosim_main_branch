@@ -1013,57 +1013,65 @@ def sim_mu_mimo_all(
         else:
             train_drop_indices = [str(d) for d in train_drop_indices]
 
-        print(f"[channelmamba] drop={cfg.drop_idx}: pooled offline train drops={train_drop_indices}")
-        pooled_h_hist_blocks = []
-        original_ns3_folder = cfg.ns3_folder
-        original_estimated_channels_dir = cfg.estimated_channels_dir
-
-        old_history_len = int(rc_predictor.history_len)
-        try:
-            for train_drop_idx in train_drop_indices:
-                cfg.ns3_folder = f"ns3/channels_{cfg.mobility}_{train_drop_idx}/"
-                cfg.estimated_channels_dir = f"ns3/channel_estimates_{cfg.mobility}_drop_{train_drop_idx}"
-                dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
-                rc_predictor.history_len = 1
-                rc_predictor.reset_csi_history()
-                for hist_slot_idx in channelmamba_slots:
-                    # With history_len=1, querying at first_slot_idx=(hist_slot_idx + csi_delay)
-                    # returns exactly the CSI estimate at hist_slot_idx.
-                    h_hist_one, _ = rc_predictor.get_csi_history_with_err_var(
-                        int(hist_slot_idx + cfg.csi_delay),
-                        cfg.csi_delay,
-                        rg_csi,
-                        dmimo_chans,
-                        cfo_vals=cfg.random_cfo_vals,
-                        sto_vals=cfg.random_sto_vals,
-                        estimated_channels_dir=cfg.estimated_channels_dir,
-                        freq_cov_mat=freq_cov_mat,
-                        lmmse_interpolator=lmmse_interpolator,
-                        use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
-                    )
-                    pooled_h_hist_blocks.append(np.asarray(h_hist_one))
-        finally:
-            cfg.ns3_folder = original_ns3_folder
-            cfg.estimated_channels_dir = original_estimated_channels_dir
-            rc_predictor.history_len = old_history_len
-            rc_predictor.reset_csi_history()
-
-        if len(pooled_h_hist_blocks) == 0:
-            raise ValueError(
-                f"ChannelMamba pooled training produced no CSI history blocks for drops={train_drop_indices}."
-            )
-        h_hist = np.concatenate(pooled_h_hist_blocks, axis=0)
-
         channelmamba_predictor = build_channelmamba_predictor(cfg)
         if channelmamba_mode == "eval":
             if not cfg.channelmamba_checkpoint:
                 raise ValueError("channelmamba_mode='eval' requires cfg.channelmamba_checkpoint to be set.")
             print(f"[channelmamba] drop={cfg.drop_idx}: loading checkpoint only from {cfg.channelmamba_checkpoint}")
-        elif channelmamba_mode == "train":
-            print(f"[channelmamba] drop={cfg.drop_idx}: training and optionally saving to {cfg.channelmamba_checkpoint}")
+            channelmamba_predictor.load_checkpoint_only()
+            print(f"[channelmamba] drop={cfg.drop_idx}: skipped offline history extraction in eval mode")
+        elif channelmamba_mode in ("train", "auto"):
+            if channelmamba_mode == "train":
+                print(f"[channelmamba] drop={cfg.drop_idx}: training and optionally saving to {cfg.channelmamba_checkpoint}")
+            else:
+                print(f"[channelmamba] drop={cfg.drop_idx}: auto mode with checkpoint={cfg.channelmamba_checkpoint}")
+            print(f"[channelmamba] drop={cfg.drop_idx}: pooled offline train drops={train_drop_indices}")
+
+            pooled_h_hist_per_drop = []
+            original_ns3_folder = cfg.ns3_folder
+            original_estimated_channels_dir = cfg.estimated_channels_dir
+
+            old_history_len = int(rc_predictor.history_len)
+            try:
+                for train_drop_idx in train_drop_indices:
+                    cfg.ns3_folder = f"ns3/channels_{cfg.mobility}_{train_drop_idx}/"
+                    cfg.estimated_channels_dir = f"ns3/channel_estimates_{cfg.mobility}_drop_{train_drop_idx}"
+                    dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+                    rc_predictor.history_len = 1
+                    rc_predictor.reset_csi_history()
+                    per_drop_blocks = []
+                    for hist_slot_idx in channelmamba_slots:
+                        # With history_len=1, querying at first_slot_idx=(hist_slot_idx + csi_delay)
+                        # returns exactly the CSI estimate at hist_slot_idx.
+                        h_hist_one, _ = rc_predictor.get_csi_history_with_err_var(
+                            int(hist_slot_idx + cfg.csi_delay),
+                            cfg.csi_delay,
+                            rg_csi,
+                            dmimo_chans,
+                            cfo_vals=cfg.random_cfo_vals,
+                            sto_vals=cfg.random_sto_vals,
+                            estimated_channels_dir=cfg.estimated_channels_dir,
+                            freq_cov_mat=freq_cov_mat,
+                            lmmse_interpolator=lmmse_interpolator,
+                            use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+                        )
+                        per_drop_blocks.append(np.asarray(h_hist_one))
+                    if len(per_drop_blocks) == 0:
+                        continue
+                    pooled_h_hist_per_drop.append(np.concatenate(per_drop_blocks, axis=0))
+            finally:
+                cfg.ns3_folder = original_ns3_folder
+                cfg.estimated_channels_dir = original_estimated_channels_dir
+                rc_predictor.history_len = old_history_len
+                rc_predictor.reset_csi_history()
+
+            if len(pooled_h_hist_per_drop) == 0:
+                raise ValueError(
+                    f"ChannelMamba pooled training produced no CSI history blocks for drops={train_drop_indices}."
+                )
+            channelmamba_predictor.fit_offline(pooled_h_hist_per_drop, ns3cfg=ns3cfg)
         else:
-            print(f"[channelmamba] drop={cfg.drop_idx}: auto mode with checkpoint={cfg.channelmamba_checkpoint}")
-        channelmamba_predictor.fit_offline(np.asarray(h_hist), ns3cfg=ns3cfg)
+            raise ValueError(f"Unsupported channelmamba_mode='{channelmamba_mode}'.")
         cfg.channelmamba_predictor = channelmamba_predictor
 
     if eval_on_online_segment_only and is_kalman_filter:
