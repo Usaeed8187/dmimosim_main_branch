@@ -286,7 +286,7 @@ class DMIMOChannelMambaPredictor:
                             samples_x.append(x.astype(np.float32))
                             samples_y.append(y.astype(np.float32))
                             per_drop_windows += 1
-            print(f"[channelmamba] drop-seq-{drop_seq_idx}: generated {per_drop_windows} offline windows")
+            # print(f"[channelmamba] drop-seq-{drop_seq_idx}: generated {per_drop_windows} offline windows")
 
         if self.d_in is None:
             raise ValueError("No valid training samples built for ChannelMamba.")
@@ -331,7 +331,7 @@ class DMIMOChannelMambaPredictor:
                 epoch_loss += float(loss.item())
                 num_batches += 1
             avg_loss = epoch_loss / max(num_batches, 1)
-            print(f"[channelmamba] offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
+            # print(f"[channelmamba] offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
         self.model.eval()
         if self.cfg.checkpoint_path:
             metadata = dict(self.cfg.checkpoint_metadata or {})
@@ -378,7 +378,7 @@ class DMIMOChannelMambaPredictor:
                     samples_x.append(x.astype(np.float32))
                     samples_y.append(y.astype(np.float32))
                     per_drop_windows += 1
-            print(f"[channelmamba] pair drop-seq-{drop_seq_idx}: generated {per_drop_windows} offline windows")
+            # print(f"[channelmamba] pair drop-seq-{drop_seq_idx}: generated {per_drop_windows} offline windows")
 
         if self.d_in is None:
             raise ValueError("No valid training samples built for ChannelMamba pair training.")
@@ -423,7 +423,7 @@ class DMIMOChannelMambaPredictor:
                 epoch_loss += float(loss.item())
                 num_batches += 1
             avg_loss = epoch_loss / max(num_batches, 1)
-            print(f"[channelmamba] pair offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
+            # print(f"[channelmamba] pair offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
         self.model.eval()
         if self.cfg.checkpoint_path:
             metadata = dict(self.cfg.checkpoint_metadata or {})
