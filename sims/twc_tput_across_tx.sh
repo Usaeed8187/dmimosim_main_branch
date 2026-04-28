@@ -2,16 +2,16 @@
 
 # Array of arguments
 # declare -a mobilities=("low_mobility" "medium_mobility" "high_mobility")
-declare -a mobilities=("highest_mobility")
+declare -a mobilities=("high_mobility" "higher_mobility" "highest_mobility")
 # declare -a drop_idx=("26" "27" "28" "29" "30" "31" "32" "33" "34" "35" "36" "37" "38" "39" "43" "44" "45")
 # declare -a drop_idx=("1")
-declare -a drop_idx=($(seq 6 10))
+declare -a drop_idx=($(seq 1 20))
 declare -a rx_ues_arr=("4")
-declare -a num_txue_sel_arr=("8")
+declare -a num_txue_sel_arr=("2" "4" "6" "8" "10")
 declare -a modulation_orders=("4")
 declare -a code_rates=("1/2")
 declare -a perfect_csi_arr=("False")
-declare -a channel_prediction_settings=("kalman_filter") # "None" "weiner_filter" "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
+declare -a channel_prediction_settings=("channelmamba") # "None" "weiner_filter" "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
 declare -a csi_quantization_arr=("True")
 
 link_adapt="True"
@@ -22,8 +22,6 @@ if [[ "${link_adapt}" == "True" ]]; then
 fi
 
 PARALLEL_JOBS=${PARALLEL_JOBS:-12}
-CHANNELMAMBA_DROP_TRAIN_RATIO=${CHANNELMAMBA_DROP_TRAIN_RATIO:-0.5}
-CHANNELMAMBA_CHECKPOINT_ROOT=${CHANNELMAMBA_CHECKPOINT_ROOT:-results/channelmamba_checkpoints}
 
 generate_args() {
     # Loop through the arrays
@@ -79,92 +77,29 @@ run_scenario() {
     python sims/sim_mu_mimo_testing_updates.py "${args[@]}"
 }
 
-if [[ ${#channel_prediction_settings[@]} -eq 1 && "${channel_prediction_settings[0]}" == "channelmamba" ]]; then
-    if [[ ${#drop_idx[@]} -le 1 ]]; then
-        train_drop_count=${#drop_idx[@]}
-    else
-        train_drop_count=$(python - <<PY
-import math
-n = ${#drop_idx[@]}
-ratio = float("${CHANNELMAMBA_DROP_TRAIN_RATIO}")
-count = int(math.floor(n * ratio))
-count = max(1, min(count, n - 1))
-print(count)
-PY
-)
-    fi
-
-    train_drops=("${drop_idx[@]:0:${train_drop_count}}")
-    test_drops=("${drop_idx[@]:${train_drop_count}}")
-
-    echo "ChannelMamba drop split: train_drops=(${train_drops[*]}), test_drops=(${test_drops[*]}), ratio=${CHANNELMAMBA_DROP_TRAIN_RATIO}" >&2
-
-    mkdir -p "${CHANNELMAMBA_CHECKPOINT_ROOT}"
-    checkpoint_path="${CHANNELMAMBA_CHECKPOINT_ROOT}/channelmamba_mob_${mobilities[0]}_tx_${num_txue_sel_arr[0]}_rx_${rx_ues_arr[0]}.pt"
-    rm -f "${checkpoint_path}"
-
-    # Train stage (sequential): progressively fit on first N% drops and overwrite checkpoint each run.
-    for d in "${train_drops[@]}"; do
-        ((scenario_counter++))
-        echo "Launching ChannelMamba train scenario ${scenario_counter} drop=${d}" >&2
-        run_scenario \
-            "${mobilities[0]}" "${d}" "${rx_ues_arr[0]}" "${modulation_orders[0]}" "${code_rates[0]}" "${num_txue_sel_arr[0]}" \
-            "${perfect_csi_arr[0]}" "channelmamba" "${csi_quantization_arr[0]}" "${link_adapt}" "None" "True" \
-            "${checkpoint_path}" "train"
-        ((completed_jobs++))
-        echo "Completed ${completed_jobs} scenarios" >&2
-    done
-
-    # Eval stage (parallel): load frozen checkpoint for remaining drops.
-    for d in "${test_drops[@]}"; do
-        while (( running_jobs >= PARALLEL_JOBS )); do
-            wait -n
-            ((completed_jobs++))
-            echo "Completed ${completed_jobs} scenarios" >&2
-            ((running_jobs--))
-        done
-
-        ((scenario_counter++))
-        echo "Launching ChannelMamba eval scenario ${scenario_counter} drop=${d}" >&2
-        run_scenario \
-            "${mobilities[0]}" "${d}" "${rx_ues_arr[0]}" "${modulation_orders[0]}" "${code_rates[0]}" "${num_txue_sel_arr[0]}" \
-            "${perfect_csi_arr[0]}" "channelmamba" "${csi_quantization_arr[0]}" "${link_adapt}" "None" "True" \
-            "${checkpoint_path}" "eval" &
-        ((running_jobs++))
-    done
-
-    while (( running_jobs > 0 )); do
-        wait -n
-        ((completed_jobs++))
-        echo "Completed ${completed_jobs} scenarios" >&2
-        ((running_jobs--))
-    done
-else
-    for scenario in "${scenario_args[@]}"; do
-        # Throttle concurrency to PARALLEL_JOBS
-        while (( running_jobs >= PARALLEL_JOBS )); do
-            wait -n
-            ((completed_jobs++))
-            echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
-            ((running_jobs--))
-        done
-
-        ((scenario_counter++))
-        echo "Launching scenario ${scenario_counter}/${total_scenarios}" >&2
-
-        # shellcheck disable=SC2086
-        run_scenario ${scenario} &
-        ((running_jobs++))
-    done
-
-    # Wait for any remaining background jobs
-    while (( running_jobs > 0 )); do
+for scenario in "${scenario_args[@]}"; do
+    # Throttle concurrency to PARALLEL_JOBS
+    while (( running_jobs >= PARALLEL_JOBS )); do
         wait -n
         ((completed_jobs++))
         echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
         ((running_jobs--))
     done
-fi
+
+    ((scenario_counter++))
+    echo "Launching scenario ${scenario_counter}/${total_scenarios}" >&2
+    # shellcheck disable=SC2086
+    run_scenario ${scenario} &
+    ((running_jobs++))
+done
+
+# Wait for any remaining background jobs
+while (( running_jobs > 0 )); do
+    wait -n
+    ((completed_jobs++))
+    echo "Completed ${completed_jobs}/${total_scenarios} scenarios" >&2
+    ((running_jobs--))
+done
 
 echo "All ${completed_jobs} scenarios completed" >&2
 
