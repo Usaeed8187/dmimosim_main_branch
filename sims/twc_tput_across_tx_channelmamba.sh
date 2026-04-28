@@ -23,6 +23,7 @@ fi
 PARALLEL_JOBS=${PARALLEL_JOBS:-12}
 CHANNELMAMBA_DROP_TRAIN_RATIO=${CHANNELMAMBA_DROP_TRAIN_RATIO:-0.5}
 CHANNELMAMBA_CHECKPOINT_ROOT=${CHANNELMAMBA_CHECKPOINT_ROOT:-results/channelmamba_checkpoints}
+failed_jobs=0
 
 split_drops() {
     local total_drops=${#drop_idx[@]}
@@ -98,6 +99,8 @@ for setting in "${setting_args[@]}"; do
 
     ((setting_counter++))
     echo "Launching setting ${setting_counter}/${total_settings}: mobility=${mobility}, rx_ues=${rx_ues}, num_txue_sel=${num_txue_sel}, perfect_csi=${perfect_csi}, csi_quantization=${csi_quantization}" >&2
+    code_rate_sanitized="${code_rate//\//_}"
+    checkpoint_path="${CHANNELMAMBA_CHECKPOINT_ROOT}/cm_${mobility}_rx${rx_ues}_txsel${num_txue_sel}_m${modulation_order}_cr${code_rate_sanitized}_pcsi${perfect_csi}_q${csi_quantization}.pt"
 
     checkpoint_root="${checkpoint_path%.pt}"
     rm -f "${checkpoint_root}"__tx*_rx*.pt
@@ -105,19 +108,27 @@ for setting in "${setting_args[@]}"; do
     train_drops_csv=$(IFS=,; echo "${train_drops[*]}")
     train_anchor_drop="${train_drops[0]}"
     echo "Launching pooled ChannelMamba train for setting ${setting_counter}/${total_settings} with train_drops=(${train_drops[*]})" >&2
-    run_scenario \
+    if ! run_scenario \
         "${mobility}" "${train_anchor_drop}" "${rx_ues}" "${modulation_order}" "${code_rate}" "${num_txue_sel}" \
         "${perfect_csi}" "channelmamba" "${csi_quantization}" "${link_adapt}" "None" "True" \
-        "${checkpoint_path}" "train" "${train_drops_csv}"
+        "${checkpoint_path}" "train" "${train_drops_csv}"; then
+        ((failed_jobs++))
+        echo "FAILED pooled ChannelMamba train for setting ${setting_counter}/${total_settings}" >&2
+        continue
+    fi
     ((completed_jobs++))
     echo "Completed ${completed_jobs} scenarios" >&2
 
     running_jobs=0
     for d in "${test_drops[@]}"; do
         while (( running_jobs >= PARALLEL_JOBS )); do
-            wait -n
-            ((completed_jobs++))
-            echo "Completed ${completed_jobs} scenarios" >&2
+            if wait -n; then
+                ((completed_jobs++))
+                echo "Completed ${completed_jobs} scenarios" >&2
+            else
+                ((failed_jobs++))
+                echo "A ChannelMamba eval scenario failed" >&2
+            fi
             ((running_jobs--))
         done
 
@@ -130,14 +141,18 @@ for setting in "${setting_args[@]}"; do
     done
 
     while (( running_jobs > 0 )); do
-        wait -n
-        ((completed_jobs++))
-        echo "Completed ${completed_jobs} scenarios" >&2
+        if wait -n; then
+            ((completed_jobs++))
+            echo "Completed ${completed_jobs} scenarios" >&2
+        else
+            ((failed_jobs++))
+            echo "A ChannelMamba eval scenario failed" >&2
+        fi
         ((running_jobs--))
     done
 done
 
-echo "All ${completed_jobs} scenarios completed" >&2
+echo "All scenarios finished: completed=${completed_jobs}, failed=${failed_jobs}" >&2
 
 # Reference table
 # Perfect CSI |  Prediction | Quantization | Meaning
