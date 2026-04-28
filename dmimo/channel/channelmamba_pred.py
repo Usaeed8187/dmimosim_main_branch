@@ -46,7 +46,7 @@ def build_channelmamba_predictor(cfg) -> DMIMOChannelMambaPredictor:
         fusion_type=str(getattr(cfg, "channelmamba_fusion_type", "concat")),
         dropout=float(getattr(cfg, "channelmamba_dropout", 0.1)),
         ssm_backend=str(getattr(cfg, "channelmamba_ssm_backend", "auto")),
-        device=str(getattr(cfg, "channelmamba_device", "cpu")),
+        device=str(getattr(cfg, "channelmamba_device", "cuda")),
         checkpoint_path=getattr(cfg, "channelmamba_checkpoint", None),
         freeze_loaded_checkpoint=channelmamba_mode == "eval",
     )

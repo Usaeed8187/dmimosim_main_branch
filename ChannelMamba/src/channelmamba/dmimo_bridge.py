@@ -38,7 +38,7 @@ class DMIMOChannelMambaConfig:
     fusion_type: str = "concat"
     dropout: float = 0.1
     ssm_backend: str = "auto"
-    device: str = "cpu"
+    device: str = "cuda"
     checkpoint_path: str | None = None
     freeze_loaded_checkpoint: bool = True
 
@@ -218,8 +218,12 @@ class DMIMOChannelMambaPredictor:
         if len(samples_x) == 0:
             raise ValueError("No offline windows were generated for ChannelMamba training.")
 
-        x_tensor = torch.from_numpy(np.stack(samples_x)).to(torch.float32)
-        y_tensor = torch.from_numpy(np.stack(samples_y)).to(torch.float32)
+        x_np = np.asarray(np.stack(samples_x), dtype=np.float32, order="C")
+        y_np = np.asarray(np.stack(samples_y), dtype=np.float32, order="C")
+
+        x_tensor = torch.tensor(x_np, dtype=torch.float32)
+        y_tensor = torch.tensor(y_np, dtype=torch.float32)
+
         dataset = TensorDataset(x_tensor, y_tensor)
         loader = DataLoader(dataset, batch_size=int(self.cfg.batch_size), shuffle=True)
 
