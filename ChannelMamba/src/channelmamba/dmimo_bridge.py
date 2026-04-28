@@ -170,7 +170,12 @@ class DMIMOChannelMambaPredictor:
         self._loaded_from_checkpoint = True
 
     def fit_offline(self, h_freq_csi_history: np.ndarray, ns3cfg, num_bs_ant: int = 4, num_ue_ant: int = 2) -> None:
-        """Fit model from offline slot history. If checkpoint is provided, skip fitting."""
+        """Fit model from offline slot history.
+
+        Behavior depends on mode:
+        - eval/frozen mode: load checkpoint and skip fitting.
+        - train mode: if checkpoint exists, warm-start from it and continue fitting.
+        """
 
         rng_seed = int(self.cfg.seed)
         torch.manual_seed(rng_seed)
@@ -213,7 +218,7 @@ class DMIMOChannelMambaPredictor:
             self.model = self._build_model(self.d_in)
         self._maybe_load_checkpoint(self.d_in)
 
-        if self._loaded_from_checkpoint:
+        if self._loaded_from_checkpoint and bool(self.cfg.freeze_loaded_checkpoint):
             return
         if len(samples_x) == 0:
             raise ValueError("No offline windows were generated for ChannelMamba training.")
