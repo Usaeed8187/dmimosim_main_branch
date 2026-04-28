@@ -121,6 +121,7 @@ lmmse_use_rx_snr_for_nvar = False
 return_first_slot_only = True
 channelmamba_checkpoint = None
 channelmamba_mode = "train"  # train | eval | auto
+channelmamba_train_drop_indices = None
 channelmamba_device = "cuda"
 channelmamba_epochs = 20
 channelmamba_batch_size = 128
@@ -157,7 +158,7 @@ def parse_arguments():
     global csi_prediction, channel_prediction_method
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
-    global channelmamba_checkpoint, channelmamba_mode
+    global channelmamba_checkpoint, channelmamba_mode, channelmamba_train_drop_indices
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -197,6 +198,10 @@ def parse_arguments():
 
         if len(arguments) >= 14:
             channelmamba_mode = str(arguments[13]).lower()
+
+        if len(arguments) >= 15:
+            train_drop_tokens = [tok.strip() for tok in str(arguments[14]).split(",") if tok.strip()]
+            channelmamba_train_drop_indices = train_drop_tokens if train_drop_tokens else None
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -244,6 +249,7 @@ def run_simulation():
     cfg.enable_ue_selection = False
     cfg.scheduling = False
     cfg.ns3_folder = "ns3/channels_" + mobility + '_' + drop_idx + '/'
+    cfg.mobility = mobility    
     # cfg.ns3_folder = "ns3/channels/LowMobility/"
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
@@ -294,6 +300,17 @@ def run_simulation():
     cfg.wesn_offline_ratio = wesn_offline_ratio
     cfg.channelmamba_mode = channelmamba_mode
     cfg.channelmamba_checkpoint = channelmamba_checkpoint
+    cfg.channelmamba_train_drop_indices = channelmamba_train_drop_indices
+    cfg.channelmamba_allow_mismatch_reset = False
+    cfg.channelmamba_checkpoint_metadata = {
+        "mobility": mobility,
+        "num_txue_sel": int(num_txue_sel),
+        "num_rxue_sel": int(rx_ues_arr[0]),
+        "prev_len": int(channelmamba_prev_len),
+        "pred_len": int(channelmamba_pred_len),
+        "rb_size": int(channelmamba_rb_size),
+        "max_num_rb": int(channelmamba_max_num_rb),
+    }
     cfg.channelmamba_device = channelmamba_device
     cfg.channelmamba_epochs = channelmamba_epochs
     cfg.channelmamba_batch_size = channelmamba_batch_size

@@ -1007,30 +1007,52 @@ def sim_mu_mimo_all(
                 f"Need at least {channelmamba_prev_len + channelmamba_pred_len}, "
                 f"got {channelmamba_slots.size}."
             )
+        train_drop_indices = getattr(cfg, "channelmamba_train_drop_indices", None)
+        if train_drop_indices is None:
+            train_drop_indices = [str(cfg.drop_idx)]
+        else:
+            train_drop_indices = [str(d) for d in train_drop_indices]
+
+        print(f"[channelmamba] drop={cfg.drop_idx}: pooled offline train drops={train_drop_indices}")
+        pooled_h_hist_blocks = []
+        original_ns3_folder = cfg.ns3_folder
+        original_estimated_channels_dir = cfg.estimated_channels_dir
 
         old_history_len = int(rc_predictor.history_len)
-        rc_predictor.history_len = 1
-        rc_predictor.reset_csi_history()
-        h_hist_blocks = []
-        for hist_slot_idx in channelmamba_slots:
-            # With history_len=1, querying at first_slot_idx=(hist_slot_idx + csi_delay)
-            # returns exactly the CSI estimate at hist_slot_idx.
-            h_hist_one, _ = rc_predictor.get_csi_history_with_err_var(
-                int(hist_slot_idx + cfg.csi_delay),
-                cfg.csi_delay,
-                rg_csi,
-                dmimo_chans,
-                cfo_vals=cfg.random_cfo_vals,
-                sto_vals=cfg.random_sto_vals,
-                estimated_channels_dir=cfg.estimated_channels_dir,
-                freq_cov_mat=freq_cov_mat,
-                lmmse_interpolator=lmmse_interpolator,
-                use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+        try:
+            for train_drop_idx in train_drop_indices:
+                cfg.ns3_folder = f"ns3/channels_{cfg.mobility}_{train_drop_idx}/"
+                cfg.estimated_channels_dir = f"ns3/channel_estimates_{cfg.mobility}_drop_{train_drop_idx}"
+                dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+                rc_predictor.history_len = 1
+                rc_predictor.reset_csi_history()
+                for hist_slot_idx in channelmamba_slots:
+                    # With history_len=1, querying at first_slot_idx=(hist_slot_idx + csi_delay)
+                    # returns exactly the CSI estimate at hist_slot_idx.
+                    h_hist_one, _ = rc_predictor.get_csi_history_with_err_var(
+                        int(hist_slot_idx + cfg.csi_delay),
+                        cfg.csi_delay,
+                        rg_csi,
+                        dmimo_chans,
+                        cfo_vals=cfg.random_cfo_vals,
+                        sto_vals=cfg.random_sto_vals,
+                        estimated_channels_dir=cfg.estimated_channels_dir,
+                        freq_cov_mat=freq_cov_mat,
+                        lmmse_interpolator=lmmse_interpolator,
+                        use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+                    )
+                    pooled_h_hist_blocks.append(np.asarray(h_hist_one))
+        finally:
+            cfg.ns3_folder = original_ns3_folder
+            cfg.estimated_channels_dir = original_estimated_channels_dir
+            rc_predictor.history_len = old_history_len
+            rc_predictor.reset_csi_history()
+
+        if len(pooled_h_hist_blocks) == 0:
+            raise ValueError(
+                f"ChannelMamba pooled training produced no CSI history blocks for drops={train_drop_indices}."
             )
-            h_hist_blocks.append(np.asarray(h_hist_one))
-        h_hist = np.concatenate(h_hist_blocks, axis=0)
-        rc_predictor.history_len = old_history_len
-        rc_predictor.reset_csi_history()
+        h_hist = np.concatenate(pooled_h_hist_blocks, axis=0)
 
         channelmamba_predictor = build_channelmamba_predictor(cfg)
         if channelmamba_mode == "eval":

@@ -49,6 +49,8 @@ def build_channelmamba_predictor(cfg) -> DMIMOChannelMambaPredictor:
         device=str(getattr(cfg, "channelmamba_device", "cuda")),
         checkpoint_path=getattr(cfg, "channelmamba_checkpoint", None),
         freeze_loaded_checkpoint=channelmamba_mode == "eval",
+        checkpoint_metadata=getattr(cfg, "channelmamba_checkpoint_metadata", None),
+        allow_mismatch_reset=bool(getattr(cfg, "channelmamba_allow_mismatch_reset", False)),
     )
     return DMIMOChannelMambaPredictor(cm_cfg)
 

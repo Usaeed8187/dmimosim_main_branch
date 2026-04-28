@@ -102,15 +102,15 @@ for setting in "${setting_args[@]}"; do
     checkpoint_path="${CHANNELMAMBA_CHECKPOINT_ROOT}/channelmamba_mob_${mobility}_tx_${num_txue_sel}_rx_${rx_ues}_pcsi_${perfect_csi}_cquant_${csi_quantization}.pt"
     rm -f "${checkpoint_path}"
 
-    for d in "${train_drops[@]}"; do
-        echo "Launching ChannelMamba train drop=${d} for setting ${setting_counter}/${total_settings}" >&2
-        run_scenario \
-            "${mobility}" "${d}" "${rx_ues}" "${modulation_order}" "${code_rate}" "${num_txue_sel}" \
-            "${perfect_csi}" "channelmamba" "${csi_quantization}" "${link_adapt}" "None" "True" \
-            "${checkpoint_path}" "train"
-        ((completed_jobs++))
-        echo "Completed ${completed_jobs} scenarios" >&2
-    done
+    train_drops_csv=$(IFS=,; echo "${train_drops[*]}")
+    train_anchor_drop="${train_drops[0]}"
+    echo "Launching pooled ChannelMamba train for setting ${setting_counter}/${total_settings} with train_drops=(${train_drops[*]})" >&2
+    run_scenario \
+        "${mobility}" "${train_anchor_drop}" "${rx_ues}" "${modulation_order}" "${code_rate}" "${num_txue_sel}" \
+        "${perfect_csi}" "channelmamba" "${csi_quantization}" "${link_adapt}" "None" "True" \
+        "${checkpoint_path}" "train" "${train_drops_csv}"
+    ((completed_jobs++))
+    echo "Completed ${completed_jobs} scenarios" >&2
 
     running_jobs=0
     for d in "${test_drops[@]}"; do

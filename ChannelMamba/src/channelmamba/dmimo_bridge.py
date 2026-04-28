@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import List, Tuple
-
+import os
 import numpy as np
 import torch
 from torch import nn
@@ -41,6 +41,8 @@ class DMIMOChannelMambaConfig:
     device: str = "cuda"
     checkpoint_path: str | None = None
     freeze_loaded_checkpoint: bool = True
+    checkpoint_metadata: dict | None = None
+    allow_mismatch_reset: bool = False
 
 
 class DMIMOChannelMambaPredictor:
@@ -161,13 +163,45 @@ class DMIMOChannelMambaPredictor:
             return
         if self._loaded_from_checkpoint and bool(self.cfg.freeze_loaded_checkpoint):
             return
+        if not os.path.exists(ckpt):
+            print(f"[channelmamba] checkpoint not found at {ckpt}; starting from scratch")
+            return
         if self.model is None:
             self.model = self._build_model(d_in)
-        state = torch.load(ckpt, map_location=self.device)
+        try:
+            state = torch.load(ckpt, map_location=self.device)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load ChannelMamba checkpoint at '{ckpt}': {exc}") from exc
+        saved_metadata = state.get("metadata", {}) if isinstance(state, dict) else {}
+        expected_metadata = dict(self.cfg.checkpoint_metadata or {})
+        expected_metadata["d_in"] = int(d_in)
+        if expected_metadata:
+            mismatch = []
+            for key, expected_value in expected_metadata.items():
+                saved_value = saved_metadata.get(key)
+                if saved_value != expected_value:
+                    mismatch.append((key, saved_value, expected_value))
+            if mismatch:
+                mismatch_str = ", ".join([f"{k}: saved={sv}, expected={ev}" for k, sv, ev in mismatch])
+                if bool(self.cfg.allow_mismatch_reset):
+                    print(
+                        "[channelmamba] checkpoint metadata mismatch; ignoring checkpoint and starting from scratch: "
+                        f"{mismatch_str}"
+                    )
+                    return
+                raise ValueError(
+                    "ChannelMamba checkpoint metadata mismatch for "
+                    f"'{ckpt}': {mismatch_str}"
+                )
         state_dict = state.get("model_state_dict", state)
-        self.model.load_state_dict(state_dict)
+        try:
+            self.model.load_state_dict(state_dict)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to restore ChannelMamba model weights from '{ckpt}': {exc}") from exc
         self.model.eval()
         self._loaded_from_checkpoint = True
+        if saved_metadata:
+            print(f"[channelmamba] loaded checkpoint metadata: {saved_metadata}")
 
     def fit_offline(self, h_freq_csi_history: np.ndarray, ns3cfg, num_bs_ant: int = 4, num_ue_ant: int = 2) -> None:
         """Fit model from offline slot history.
@@ -257,7 +291,9 @@ class DMIMOChannelMambaPredictor:
             print(f"[channelmamba] offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
         self.model.eval()
         if self.cfg.checkpoint_path:
-            torch.save({"model_state_dict": self.model.state_dict()}, self.cfg.checkpoint_path)
+            metadata = dict(self.cfg.checkpoint_metadata or {})
+            metadata["d_in"] = int(self.d_in) if self.d_in is not None else None
+            torch.save({"model_state_dict": self.model.state_dict(), "metadata": metadata}, self.cfg.checkpoint_path)
             print(f"[channelmamba] saved checkpoint to {self.cfg.checkpoint_path}")
 
     @torch.no_grad()
