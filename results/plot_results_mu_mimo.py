@@ -15,8 +15,8 @@ command-line arguments.  For throughput plots, the script selects, for
 each data point, the MCS that maximizes the *average* throughput across
 all requested drops and prints the maximizing MCS choices.
 
-The script also plots DEQN-based channel prediction results.  By default,
-DEQN outputs are expected directly under::
+The script also plots multiple channel prediction baselines (e.g., DEQN
+variants and ChannelMamba). By default, outputs are expected directly under::
 
     results/channels_multiple_mu_mimo/channels_<mobility>_<drop>
 
@@ -344,18 +344,26 @@ def _default_scenarios(
     include_prediction: bool = True, link_adapt: bool = False
 ) -> List[Scenario]:
     scenarios = [
-        # Scenario(
-        #     perfect_csi=False,
-        #     prediction=False,
-        #     quantization=True,
-        #     label="Outdated CSI",
-        #     link_adapt=link_adapt,
-        # ),
         Scenario(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Two-Mode WESN Prediction",
+            label="ChannelMamba",
+            link_adapt=link_adapt,
+            prediction_method="channelmamba",
+        ),
+        Scenario(
+            perfect_csi=False,
+            prediction=False,
+            quantization=True,
+            label="Outdated CSI",
+            link_adapt=link_adapt,
+        ),
+        Scenario(
+            perfect_csi=False,
+            prediction=True,
+            quantization=True,
+            label="Two-Mode WESN",
             prediction_method="two_mode",
             link_adapt=link_adapt,
         ),
@@ -363,7 +371,7 @@ def _default_scenarios(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Kalman Filter Prediction",
+            label="Kalman Filter",
             link_adapt=link_adapt,
             prediction_method="kalman_filter",
         ),
@@ -500,14 +508,14 @@ def main() -> None:
             "Root directory containing per-drop results."
         ),
     )
-    parser.add_argument("--mobility", default="highest_mobility", help="Mobility string used in the folder names.")
+    parser.add_argument("--mobility", default="higher_mobility", help="Mobility string used in the folder names.")
     parser.add_argument(
         "--drops",
         type=int,
         nargs="+",
         # default=[1],
         # default=[3, 13, 14, 15, 19, 20], # good: 20, 3,  okay: 19, 15, not great: 14, 13
-        default=list(range(1, 21)),
+        default=list(range(1, 11)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(

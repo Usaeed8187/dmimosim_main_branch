@@ -20,7 +20,7 @@ if [[ "${link_adapt}" == "True" ]]; then
     code_rates=("${code_rates[0]}")
 fi
 
-PARALLEL_JOBS=${PARALLEL_JOBS:-12}
+PARALLEL_JOBS=${PARALLEL_JOBS:-4}
 CHANNELMAMBA_DROP_TRAIN_RATIO=${CHANNELMAMBA_DROP_TRAIN_RATIO:-0.5}
 CHANNELMAMBA_CHECKPOINT_ROOT=${CHANNELMAMBA_CHECKPOINT_ROOT:-results/channelmamba_checkpoints}
 failed_jobs=0
