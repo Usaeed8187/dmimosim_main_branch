@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Sequence, Tuple
 import os
+import time
+import multiprocessing
 import numpy as np
 import torch
 from torch import nn
@@ -44,6 +46,11 @@ class DMIMOChannelMambaConfig:
     freeze_loaded_checkpoint: bool = True
     checkpoint_metadata: dict | None = None
     allow_mismatch_reset: bool = False
+    enable_tf32: bool = True
+    dataloader_num_workers: int = 4
+    dataloader_pin_memory: bool = True
+    dataloader_persistent_workers: bool = True
+    dataloader_prefetch_factor: int | None = 2
 
 
 class DMIMOChannelMambaPredictor:
@@ -55,7 +62,39 @@ class DMIMOChannelMambaPredictor:
         self.model: ChannelMamba | None = None
         self.d_in: int | None = None
         self._loaded_from_checkpoint = False
+        self._configure_runtime_backends()
 
+    def _configure_runtime_backends(self) -> None:
+        use_cuda = self.device.type == "cuda"
+        enable_tf32 = bool(getattr(self.cfg, "enable_tf32", True))
+        if use_cuda and enable_tf32:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
+
+    def _build_dataloader(self, dataset: TensorDataset, shuffle: bool = True) -> DataLoader:
+        use_cuda = self.device.type == "cuda"
+        requested_workers = int(getattr(self.cfg, "dataloader_num_workers", 4))
+        requested_workers = max(0, requested_workers)
+        cpu_count = multiprocessing.cpu_count()
+        num_workers = min(requested_workers, cpu_count)
+
+        pin_memory = bool(getattr(self.cfg, "dataloader_pin_memory", True)) and use_cuda
+        persistent_workers = bool(getattr(self.cfg, "dataloader_persistent_workers", True)) and num_workers > 0
+        prefetch_factor = getattr(self.cfg, "dataloader_prefetch_factor", 2)
+
+        dataloader_kwargs = {
+            "batch_size": int(self.cfg.batch_size),
+            "shuffle": shuffle,
+            "num_workers": num_workers,
+            "pin_memory": pin_memory,
+            "persistent_workers": persistent_workers,
+        }
+        if num_workers > 0 and prefetch_factor is not None:
+            dataloader_kwargs["prefetch_factor"] = int(prefetch_factor)
+        return DataLoader(dataset, **dataloader_kwargs)
+        
     @staticmethod
     def _to_pair_indices(node_idx: int, num_bs_ant: int, num_ue_ant: int) -> np.ndarray:
         if node_idx == 0:
@@ -291,7 +330,7 @@ class DMIMOChannelMambaPredictor:
         y_tensor = torch.tensor(y_np, dtype=torch.float32)
 
         dataset = TensorDataset(x_tensor, y_tensor)
-        loader = DataLoader(dataset, batch_size=int(self.cfg.batch_size), shuffle=True)
+        loader = self._build_dataloader(dataset, shuffle=True)
 
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -303,27 +342,37 @@ class DMIMOChannelMambaPredictor:
             T_max=max(1, int(self.cfg.epochs)),
         )
         criterion = nn.MSELoss()
+        use_amp = self.device.type == "cuda"
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
         self.model.train()
         for epoch_idx in range(int(self.cfg.epochs)):
+            epoch_start = time.perf_counter()
             epoch_loss = 0.0
             num_batches = 0
             for x_batch, y_batch in loader:
-                x_batch = x_batch.to(self.device)
-                y_batch = y_batch.to(self.device)
+                x_batch = x_batch.to(self.device, non_blocking=use_amp)
+                y_batch = y_batch.to(self.device, non_blocking=use_amp)
                 optimizer.zero_grad()
-                pred = self.model(x_batch)
-                loss = criterion(pred, y_batch)
-                loss.backward()
+                with torch.amp.autocast("cuda", enabled=use_amp):
+                    pred = self.model(x_batch)
+                    loss = criterion(pred, y_batch)
+                scaler.scale(loss).backward()
                 clip_val = float(getattr(self.cfg, "grad_clip", 0.0) or 0.0)
                 if clip_val > 0:
+                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_val)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 epoch_loss += float(loss.item())
                 num_batches += 1
             avg_loss = epoch_loss / max(num_batches, 1)
             scheduler.step()
-            print(f"[channelmamba] offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
+            epoch_elapsed = time.perf_counter() - epoch_start
+            print(
+                f"[channelmamba] offline epoch={epoch_idx+1}/{self.cfg.epochs}, "
+                f"mse={avg_loss:.6e}, epoch_time_sec={epoch_elapsed:.3f}"
+            )
         self.model.eval()
         if self.cfg.checkpoint_path:
             metadata = dict(self.cfg.checkpoint_metadata or {})
@@ -391,7 +440,7 @@ class DMIMOChannelMambaPredictor:
         y_tensor = torch.tensor(y_np, dtype=torch.float32)
 
         dataset = TensorDataset(x_tensor, y_tensor)
-        loader = DataLoader(dataset, batch_size=int(self.cfg.batch_size), shuffle=True)
+        loader = self._build_dataloader(dataset, shuffle=True)
 
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -403,27 +452,37 @@ class DMIMOChannelMambaPredictor:
             T_max=max(1, int(self.cfg.epochs)),
         )
         criterion = nn.MSELoss()
+        use_amp = self.device.type == "cuda"
+        scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
         self.model.train()
         for epoch_idx in range(int(self.cfg.epochs)):
+            epoch_start = time.perf_counter()
             epoch_loss = 0.0
             num_batches = 0
             for x_batch, y_batch in loader:
-                x_batch = x_batch.to(self.device)
-                y_batch = y_batch.to(self.device)
+                x_batch = x_batch.to(self.device, non_blocking=use_amp)
+                y_batch = y_batch.to(self.device, non_blocking=use_amp)
                 optimizer.zero_grad()
-                pred = self.model(x_batch)
-                loss = criterion(pred, y_batch)
-                loss.backward()
+                with torch.amp.autocast("cuda", enabled=use_amp):
+                    pred = self.model(x_batch)
+                    loss = criterion(pred, y_batch)
+                scaler.scale(loss).backward()
                 clip_val = float(getattr(self.cfg, "grad_clip", 0.0) or 0.0)
                 if clip_val > 0:
+                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_val)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 epoch_loss += float(loss.item())
                 num_batches += 1
             avg_loss = epoch_loss / max(num_batches, 1)
             scheduler.step()
-            print(f"[channelmamba] pair offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
+            epoch_elapsed = time.perf_counter() - epoch_start
+            print(
+                f"[channelmamba] pair offline epoch={epoch_idx+1}/{self.cfg.epochs}, "
+                f"mse={avg_loss:.6e}, epoch_time_sec={epoch_elapsed:.3f}"
+            )
         self.model.eval()
         if self.cfg.checkpoint_path:
             metadata = dict(self.cfg.checkpoint_metadata or {})
