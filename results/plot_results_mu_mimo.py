@@ -508,14 +508,14 @@ def main() -> None:
             "Root directory containing per-drop results."
         ),
     )
-    parser.add_argument("--mobility", default="higher_mobility", help="Mobility string used in the folder names.")
+    parser.add_argument("--mobility", default="high_mobility", help="Mobility string used in the folder names.")
     parser.add_argument(
         "--drops",
         type=int,
         nargs="+",
         # default=[1],
         # default=[3, 13, 14, 15, 19, 20], # good: 20, 3,  okay: 19, 15, not great: 14, 13
-        default=list(range(1, 11)),
+        default=list(range(1, 21)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
