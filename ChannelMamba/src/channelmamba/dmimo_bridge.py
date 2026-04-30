@@ -21,6 +21,7 @@ class DMIMOChannelMambaConfig:
     batch_size: int = 128
     lr: float = 1e-3
     weight_decay: float = 1e-4
+    grad_clip: float = 0.0
     seed: int = 1234
     d_model: int = 256
     d_state: int = 16
@@ -80,7 +81,7 @@ class DMIMOChannelMambaPredictor:
         Convert CSI history block to ChannelMamba inputs.
 
         curr_h shape: [T, B, 1, N_r, 1, N_t, N_sym, N_sc]
-        return features shape: [N_r*N_t, T, 2*N_rb]
+        return features shape: [1, T, 2*N_r*N_t*N_rb]
         """
 
         hist = np.asarray(curr_h)
@@ -98,8 +99,11 @@ class DMIMOChannelMambaPredictor:
         sc_used = n_rb * rb_size
         hist_trim = hist_sym_mean[..., :sc_used]
         rb_vals = hist_trim.reshape(t_hist, n_r, n_t, n_rb, rb_size).mean(axis=-1)  # [T, N_r, N_t, N_rb]
-        feat = np.concatenate([np.real(rb_vals), np.imag(rb_vals)], axis=-1)  # [T, N_r, N_t, 2*N_rb]
-        feat = np.transpose(feat, (1, 2, 0, 3)).reshape(n_r * n_t, t_hist, 2 * n_rb)
+        feat_real = np.real(rb_vals)
+        feat_imag = np.imag(rb_vals)
+        feat = np.concatenate([feat_real, feat_imag], axis=-1)  # [T, N_r, N_t, 2*N_rb]
+        feat = feat.reshape(t_hist, 2 * n_r * n_t * n_rb)  # [T, 2*N_r*N_t*N_rb]
+        feat = feat[np.newaxis, ...]  # [1, T, 2*N_r*N_t*N_rb]
         return feat.astype(np.float32), n_rb, n_sc, n_sym, n_r, n_t
 
     def _reconstruct_block_from_features(
@@ -114,9 +118,9 @@ class DMIMOChannelMambaPredictor:
         """Reconstruct full-sc/symbol CSI block from one-step prediction features."""
 
         rb_size = int(self.cfg.rb_size)
-        pred_features = pred_features.reshape(n_r, n_t, 2 * n_rb)
-        rb_real = pred_features[..., :n_rb]
-        rb_imag = pred_features[..., n_rb:]
+        pred_features = pred_features.reshape(2, n_r, n_t, n_rb)
+        rb_real = pred_features[0]
+        rb_imag = pred_features[1]
         rb_complex = rb_real + 1j * rb_imag  # [N_r, N_t, N_rb]
 
         sc_vals = np.repeat(rb_complex, rb_size, axis=-1)  # [N_r, N_t, N_rb*rb_size]
@@ -268,9 +272,9 @@ class DMIMOChannelMambaPredictor:
 
                     curr_h = curr_drop_h_hist[:, :, :, rx_ant_idx, :, ...]
                     curr_h = curr_h[:, :, :, :, :, tx_ant_idx, ...]
-                    features, n_rb, _, _, _, _ = self._compress_history_to_features(curr_h)
+                    features, n_rb, n_sc, n_sym, n_r, n_t = self._compress_history_to_features(curr_h)
 
-                    d_in = 2 * n_rb
+                    d_in = 2 * n_rb * n_r * n_t
                     if self.d_in is None:
                         self.d_in = d_in
                     elif self.d_in != d_in:
@@ -314,6 +318,10 @@ class DMIMOChannelMambaPredictor:
             lr=float(self.cfg.lr),
             weight_decay=float(self.cfg.weight_decay),
         )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, int(self.cfg.epochs)),
+        )
         criterion = nn.MSELoss()
 
         self.model.train()
@@ -327,11 +335,15 @@ class DMIMOChannelMambaPredictor:
                 pred = self.model(x_batch)
                 loss = criterion(pred, y_batch)
                 loss.backward()
+                clip_val = float(getattr(self.cfg, "grad_clip", 0.0) or 0.0)
+                if clip_val > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_val)
                 optimizer.step()
                 epoch_loss += float(loss.item())
                 num_batches += 1
             avg_loss = epoch_loss / max(num_batches, 1)
-            # print(f"[channelmamba] offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
+            scheduler.step()
+            print(f"[channelmamba] offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
         self.model.eval()
         if self.cfg.checkpoint_path:
             metadata = dict(self.cfg.checkpoint_metadata or {})
@@ -360,8 +372,8 @@ class DMIMOChannelMambaPredictor:
             pair_histories = [np.asarray(h_hist) for h_hist in h_freq_csi_history_pair]
 
         for drop_seq_idx, pair_hist in enumerate(pair_histories):
-            features, n_rb, _, _, _, _ = self._compress_history_to_features(pair_hist)
-            d_in = 2 * n_rb
+            features, n_rb, _, _, n_r, n_t = self._compress_history_to_features(pair_hist)
+            d_in = 2 * n_rb * n_r * n_t
             if self.d_in is None:
                 self.d_in = d_in
             elif self.d_in != d_in:
@@ -406,6 +418,10 @@ class DMIMOChannelMambaPredictor:
             lr=float(self.cfg.lr),
             weight_decay=float(self.cfg.weight_decay),
         )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=max(1, int(self.cfg.epochs)),
+        )
         criterion = nn.MSELoss()
 
         self.model.train()
@@ -419,11 +435,15 @@ class DMIMOChannelMambaPredictor:
                 pred = self.model(x_batch)
                 loss = criterion(pred, y_batch)
                 loss.backward()
+                clip_val = float(getattr(self.cfg, "grad_clip", 0.0) or 0.0)
+                if clip_val > 0:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_val)
                 optimizer.step()
                 epoch_loss += float(loss.item())
                 num_batches += 1
             avg_loss = epoch_loss / max(num_batches, 1)
-            # print(f"[channelmamba] pair offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
+            scheduler.step()
+            print(f"[channelmamba] pair offline epoch={epoch_idx+1}/{self.cfg.epochs}, mse={avg_loss:.6e}")
         self.model.eval()
         if self.cfg.checkpoint_path:
             metadata = dict(self.cfg.checkpoint_metadata or {})

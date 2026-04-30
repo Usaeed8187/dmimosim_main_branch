@@ -22,7 +22,7 @@ from channelmamba.dmimo_bridge import DMIMOChannelMambaConfig, DMIMOChannelMamba
 def build_channelmamba_predictor(cfg) -> DMIMOChannelMambaPredictor:
     channelmamba_mode = str(getattr(cfg, "channelmamba_mode", "train")).lower()
     cm_cfg = DMIMOChannelMambaConfig(
-        prev_len=int(getattr(cfg, "channelmamba_prev_len", 16)),
+        prev_len=int(getattr(cfg, "channelmamba_prev_len", 8)),
         pred_len=int(getattr(cfg, "channelmamba_pred_len", 1)),
         rb_size=int(getattr(cfg, "channelmamba_rb_size", 12)),
         max_num_rb=getattr(cfg, "channelmamba_max_num_rb", None),
@@ -30,6 +30,7 @@ def build_channelmamba_predictor(cfg) -> DMIMOChannelMambaPredictor:
         batch_size=int(getattr(cfg, "channelmamba_batch_size", 128)),
         lr=float(getattr(cfg, "channelmamba_lr", 1e-3)),
         weight_decay=float(getattr(cfg, "channelmamba_weight_decay", 1e-4)),
+        grad_clip=float(getattr(cfg, "channelmamba_grad_clip", 0.0)),
         seed=int(getattr(cfg, "channelmamba_seed", 1234)),
         d_model=int(getattr(cfg, "channelmamba_d_model", 256)),
         d_state=int(getattr(cfg, "channelmamba_d_state", 16)),
@@ -117,7 +118,7 @@ def build_channelmamba_predictors_simple(
             pair_metadata["num_rx_ant"] = int(len(rx_ant_idx))
 
             predictor_cfg = DMIMOChannelMambaConfig(
-                prev_len=int(getattr(cfg, "channelmamba_prev_len", 16)),
+                prev_len=int(getattr(cfg, "channelmamba_prev_len", 8)),
                 pred_len=int(getattr(cfg, "channelmamba_pred_len", 1)),
                 rb_size=int(getattr(cfg, "channelmamba_rb_size", 12)),
                 max_num_rb=getattr(cfg, "channelmamba_max_num_rb", None),
@@ -125,6 +126,7 @@ def build_channelmamba_predictors_simple(
                 batch_size=int(getattr(cfg, "channelmamba_batch_size", 128)),
                 lr=float(getattr(cfg, "channelmamba_lr", 1e-3)),
                 weight_decay=float(getattr(cfg, "channelmamba_weight_decay", 1e-4)),
+                grad_clip=float(getattr(cfg, "channelmamba_grad_clip", 0.0)),
                 seed=int(getattr(cfg, "channelmamba_seed", 1234)),
                 d_model=int(getattr(cfg, "channelmamba_d_model", 256)),
                 d_state=int(getattr(cfg, "channelmamba_d_state", 16)),
