@@ -15,6 +15,21 @@ sys.path.append(dmimo_root)
 
 from dmimo.channel.kalman_filter_pred import kalman_filter_pred
 
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+    "mathtext.fontset": "stix",
+    "font.size": 11,
+    "axes.labelsize": 14,
+    "xtick.labelsize": 11,
+    "ytick.labelsize": 11,
+    "legend.fontsize": 11,
+    "axes.linewidth": 1.0,
+    "lines.linewidth": 2.0,
+    "lines.markersize": 6.0,
+    "savefig.dpi": 300,
+})
+
 
 def discover_slot_files(folder: Path) -> list[tuple[int, Path]]:
     pat = re.compile(r"dmimochans_(\d+)\.npz$")
@@ -891,22 +906,56 @@ def main():
         out_path.stem + f"_activation_{args.esn_activation}_{args.mobility}" + out_path.suffix
     )
 
-    plt.figure(figsize=(8, 5))
-    # plt.plot(snr_vals, nmse_ss_vals, marker="o", label="Steady-state Kalman")
-    plt.plot(snr_vals, nmse_full_vals, marker="s", label="Kalman Filtering")
-    plt.plot(snr_vals, nmse_cfg_vals, marker="^", label="Configured WESN")
-    plt.plot(snr_vals, nmse_rand_vals, marker="d", label="Random WESN")
-    plt.xlabel("SNR (dB)", fontsize=14)
-    plt.ylabel("NMSE", fontsize=14)
-    # plt.title(
-    #     "P2P channel prediction NMSE vs SNR\n"
-    #     f"({args.mobility}, drop={args.drop_idx}, delay={args.feedback_delay}, history={args.history_len}, AR={args.ar_order})"
-    # )
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    # plt.ylim(bottom=0, top=1.0)
-    plt.savefig(out_path, dpi=200)
+    fig, ax = plt.subplots(figsize=(5.6, 3.8))
+
+    ax.plot(
+        snr_vals,
+        nmse_full_vals,
+        marker="s",
+        color="tab:orange",
+        linewidth=2.0,
+        markersize=6.0,
+        markerfacecolor="white",
+        markeredgewidth=1.2,
+        label="Kalman Filter",
+    )
+    ax.plot(
+        snr_vals,
+        nmse_cfg_vals,
+        marker="^",
+        color="tab:green",
+        linewidth=2.0,
+        markersize=6.0,
+        markerfacecolor="white",
+        markeredgewidth=1.2,
+        label="Configured WESN",
+    )
+    ax.plot(
+        snr_vals,
+        nmse_rand_vals,
+        marker="d",
+        color="0.45",
+        linewidth=2.0,
+        markersize=6.0,
+        markerfacecolor="white",
+        markeredgewidth=1.2,
+        label="Random WESN",
+    )
+
+    ax.set_xlabel("SNR (dB)")
+    ax.set_ylabel("NMSE")
+
+    ax.grid(True, which="major", linestyle="-", linewidth=0.35, alpha=0.25)
+    ax.minorticks_on()
+    ax.tick_params(direction="in", top=True, right=True, length=5)
+    ax.tick_params(which="minor", direction="in", top=True, right=True, length=2.5)
+
+    ax.legend(frameon=False, loc="upper right", handlelength=1.8)
+    fig.tight_layout(pad=0.2)
+
+    fig.savefig(out_path.with_suffix(".pdf"), bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".png"), dpi=300, bbox_inches="tight")
+    fig.savefig(out_path.with_suffix(".svg"), bbox_inches="tight")
     print(f"Saved plot to: {out_path}")
 
     np.savez(

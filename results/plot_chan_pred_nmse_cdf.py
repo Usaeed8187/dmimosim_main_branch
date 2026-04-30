@@ -25,6 +25,20 @@ import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+    "mathtext.fontset": "stix",
+    "font.size": 11,
+    "axes.labelsize": 14,
+    "xtick.labelsize": 11,
+    "ytick.labelsize": 11,
+    "legend.fontsize": 11,
+    "axes.linewidth": 1.0,
+    "lines.linewidth": 2.0,
+    "lines.markersize": 6.0,
+    "savefig.dpi": 300,
+})
 
 @dataclass(frozen=True)
 class Scenario:
@@ -175,92 +189,98 @@ def _apply_outlier_filter(
         filtered[label] = updated
     return filtered
 
+def _save_cdf_figure(fig, output_path: Path, name: str) -> None:
+    output_path.mkdir(parents=True, exist_ok=True)
+    base = output_path / name
+    fig.savefig(base.with_suffix(".pdf"), bbox_inches="tight")
+    fig.savefig(base.with_suffix(".png"), dpi=300, bbox_inches="tight")
+    fig.savefig(base.with_suffix(".svg"), bbox_inches="tight")
+    print(f"Saved figure to: {base.with_suffix('.pdf')}")
+
+
+def _parse_combined_label(combined_label: str) -> tuple[str, str]:
+    if " (" in combined_label and combined_label.endswith(")"):
+        method_label, mobility = combined_label.rsplit(" (", 1)
+        mobility = mobility[:-1]
+    else:
+        method_label = combined_label
+        mobility = "high_mobility"
+    return method_label, mobility
+
+
 def _plot_cdf(
     nmse_values: Dict[str, np.ndarray],
     nmse_in_db: bool,
     title: str,
     output_path: Path,
 ) -> None:
-    plt.figure(figsize=(9, 5))
-    ax = plt.gca()
-
-    # Same color for a prediction method across mobilities
     method_colors = {
         "Two-mode WESN": "tab:blue",
+        "Two-Mode WESN": "tab:blue",
         "Configured WESN": "tab:green",
         "Kalman Filter": "tab:orange",
     }
 
-    # Paper-friendly mobility labels
     mobility_display = {
         "high_mobility": "10 km/h",
         "higher_mobility": "40 km/h",
         "highest_mobility": "80 km/h",
     }
 
-    # Manual ellipse settings so you can control the exact look/placement
-    # Format:
-    # mobility: {
-    #   "xy": (x_center, y_center),
-    #   "width": ...,
-    #   "height": ...,
-    #   "text_xy": (x_text, y_text),
-    # }
-    ellipse_specs = {
-        "high_mobility": {
-            "xy": (0.020, 0.70),
-            "width": 0.030,   # wider than before
-            "height": 0.075,   # flatter / more horizontal
-            "text_xy": (0.029, 0.65),  # bottom-right, outside ellipse
-        },
-        "higher_mobility": {
-            "xy": (0.11, 0.7),
-            "width": 0.075,
-            "height": 0.15,
-            "text_xy": (0.055, 0.8),   # bottom-right, outside ellipse
-        },
-        "highest_mobility": {
-            "xy": (0.235, 0.705),
-            "width": 0.125,
-            "height": 0.16,
-            "text_xy": (0.285, 0.65),   # bottom-right, outside ellipse
-        },
+    mobility_styles = {
+        "high_mobility": ("-", "10 km/h"),
+        "higher_mobility": ("--", "40 km/h"),
+        "highest_mobility": (":", "80 km/h"),
     }
+
+    xlabel = "Channel prediction NMSE (dB)" if nmse_in_db else "Channel prediction NMSE"
+
+    # ------------------------------------------------------------------
+    # Version 1: Original ellipse-style figure
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(5.6, 3.8))
 
     for combined_label, values in nmse_values.items():
         if values.size == 0:
             continue
 
-        # Expect labels like: "Kalman Filter (high_mobility)"
-        if " (" in combined_label and combined_label.endswith(")"):
-            method_label, mobility = combined_label.rsplit(" (", 1)
-            mobility = mobility[:-1]
-        else:
-            method_label = combined_label
-            mobility = "high_mobility"
-
+        method_label, mobility = _parse_combined_label(combined_label)
         color = method_colors.get(method_label, None)
 
         to_plot = 10.0 * np.log10(np.maximum(values, 1e-15)) if nmse_in_db else values
         sorted_vals = np.sort(to_plot)
         cdf = np.arange(1, sorted_vals.size + 1, dtype=float) / sorted_vals.size
 
-        # Same linestyle for all curves
         ax.plot(
             sorted_vals,
             cdf,
-            linewidth=2.2,
+            linewidth=2.0,
             color=color,
             linestyle="-",
             label=method_label if mobility == "high_mobility" else None,
         )
 
-    xlabel = "Channel prediction NMSE (dB)" if nmse_in_db else "Channel prediction NMSE"
-    ax.set_xlabel(xlabel, fontsize=14)
-    ax.set_ylabel("CDF", fontsize=14)
-    ax.grid(alpha=0.25)
+    ellipse_specs = {
+        "high_mobility": {
+            "xy": (0.020, 0.70),
+            "width": 0.030,
+            "height": 0.075,
+            "text_xy": (0.024, 0.65),
+        },
+        "higher_mobility": {
+            "xy": (0.11, 0.70),
+            "width": 0.075,
+            "height": 0.15,
+            "text_xy": (0.055, 0.825),
+        },
+        "highest_mobility": {
+            "xy": (0.235, 0.705),
+            "width": 0.125,
+            "height": 0.16,
+            "text_xy": (0.285, 0.65),
+        },
+    }
 
-    # Add dashed ellipses and external labels
     for mobility, spec in ellipse_specs.items():
         ellipse = Ellipse(
             xy=spec["xy"],
@@ -270,7 +290,7 @@ def _plot_cdf(
             fill=False,
             edgecolor="black",
             linewidth=1.2,
-            linestyle="--",   # dashed ellipse
+            linestyle="--",
             alpha=0.9,
         )
         ax.add_patch(ellipse)
@@ -284,7 +304,13 @@ def _plot_cdf(
             fontsize=10,
         )
 
-    # Only keep prediction-method legend
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("CDF")
+    ax.grid(True, which="major", linestyle="-", linewidth=0.35, alpha=0.25)
+    ax.minorticks_on()
+    ax.tick_params(direction="in", top=True, right=True, length=5)
+    ax.tick_params(which="minor", direction="in", top=True, right=True, length=2.5)
+
     handles, labels = ax.get_legend_handles_labels()
     unique = {}
     for h, l in zip(handles, labels):
@@ -294,16 +320,62 @@ def _plot_cdf(
     ax.legend(
         unique.values(),
         unique.keys(),
+        frameon=False,
         loc="lower right",
-        frameon=True,
+        handlelength=2.0,
+        fontsize=10,
     )
 
-    plt.tight_layout()
+    fig.tight_layout(pad=0.2)
+    _save_cdf_figure(fig, output_path, "chan_pred_nmse_cdf_ellipse")
 
-    output_path.mkdir(parents=True, exist_ok=True)
-    save_file = output_path / "chan_pred_nmse_cdf.png"
-    plt.savefig(save_file, dpi=300, bbox_inches="tight")
-    print(f"Saved figure to: {save_file}")
+    # ------------------------------------------------------------------
+    # Version 2: Line-style mobility figure
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(5.6, 3.8))
+
+    plotted_labels = set()
+
+    for combined_label, values in nmse_values.items():
+        if values.size == 0:
+            continue
+
+        method_label, mobility = _parse_combined_label(combined_label)
+        linestyle, mobility_label = mobility_styles.get(mobility, ("-", mobility))
+        color = method_colors.get(method_label, None)
+
+        to_plot = 10.0 * np.log10(np.maximum(values, 1e-15)) if nmse_in_db else values
+        sorted_vals = np.sort(to_plot)
+        cdf = np.arange(1, sorted_vals.size + 1, dtype=float) / sorted_vals.size
+
+        legend_label = f"{method_label}, {mobility_label}"
+
+        ax.plot(
+            sorted_vals,
+            cdf,
+            linewidth=2.0,
+            color=color,
+            linestyle=linestyle,
+            label=legend_label if legend_label not in plotted_labels else None,
+        )
+        plotted_labels.add(legend_label)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("CDF")
+    ax.grid(True, which="major", linestyle="-", linewidth=0.35, alpha=0.25)
+    ax.minorticks_on()
+    ax.tick_params(direction="in", top=True, right=True, length=5)
+    ax.tick_params(which="minor", direction="in", top=True, right=True, length=2.5)
+
+    ax.legend(
+        frameon=False,
+        loc="lower right",
+        handlelength=2.0,
+        fontsize=10,
+    )
+
+    fig.tight_layout(pad=0.2)
+    _save_cdf_figure(fig, output_path, "chan_pred_nmse_cdf_linestyle")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)

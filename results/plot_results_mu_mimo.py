@@ -404,7 +404,51 @@ def _default_scenarios(
     return [scenario for scenario in scenarios if not scenario.prediction]
 
 # Different marker styles for different curves
-MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">"]
+plt.rcParams.update({
+    "font.family": "serif",
+    "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
+    "mathtext.fontset": "stix",
+    "font.size": 11,
+    "axes.labelsize": 14,
+    "xtick.labelsize": 11,
+    "ytick.labelsize": 11,
+    "legend.fontsize": 11,
+    "axes.linewidth": 1.0,
+    "lines.linewidth": 2.0,
+    "lines.markersize": 6.0,
+    "savefig.dpi": 300,
+})
+
+STYLE = {
+    "Two-Mode WESN": {
+        "color": "tab:blue",
+        "marker": "o",
+        "label": "Two-Mode WESN",
+    },
+    "Kalman Filter": {
+        "color": "tab:orange",
+        "marker": "s",
+        "label": "Kalman Filter",
+    },
+    "Configured WESN": {
+        "color": "tab:green",
+        "marker": "^",
+        "label": "Configured WESN",
+    },
+    "ChannelMamba": {
+        "color": "tab:red",
+        "marker": "D",
+        "label": "ChannelMamba",
+    },
+    "Outdated CSI": {
+        "color": "0.45",
+        "marker": "x",
+        "label": "Outdated CSI",
+    },
+}
+
+def _style_for_label(label: str) -> dict:
+    return STYLE.get(label, {"marker": "o", "label": label})
 
 ################################################################################
 # Plotting helpers
@@ -412,56 +456,98 @@ MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*", "<", ">"]
 
 def _save_figure_multi_format(output_path: str) -> None:
     """
-    Save the current matplotlib figure in multiple formats.
-    Keeps the existing PNG and additionally saves SVG and EPS.
+    Save paper-ready vector figures plus a PNG preview.
+    Prefer PDF for LaTeX/IEEE papers.
     """
     base, _ = os.path.splitext(output_path)
 
-    plt.savefig(base + ".png", dpi=300)   # raster (existing behavior)
-    plt.savefig(base + ".svg")            # vector (best for papers)
-    plt.savefig(base + ".eps")            # vector (IEEE-compatible)
-
-    # print(f"Saved: {base}.png")
-    # print(f"Saved: {base}.svg")
-    # print(f"Saved: {base}.eps")
+    plt.savefig(base + ".pdf", bbox_inches="tight")
+    plt.savefig(base + ".png", dpi=300, bbox_inches="tight")
+    plt.savefig(base + ".svg", bbox_inches="tight")
 
 def plot_metric(
     x_values: Sequence[int],
-    series: Sequence[Tuple[str, Sequence[float]]],    xlabel: str,
+    series: Sequence[Tuple[str, Sequence[float]]],
+    xlabel: str,
     ylabel: str,
     title: str,
     output_path: str,
 ) -> None:
-    plt.figure()
-    for idx, (label, y_values) in enumerate(series):
-        marker = MARKERS[idx % len(MARKERS)]
-        plt.plot(x_values, y_values, marker=marker, label=label)
-    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
-    plt.xlabel(xlabel, fontsize=14)
-    plt.ylabel(ylabel, fontsize=14)
-    # plt.title(title)
-    plt.legend()
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=(5.6, 3.8))
+
+    for label, y_values in series:
+        st = _style_for_label(label)
+        ax.plot(
+            x_values,
+            y_values,
+            marker=st["marker"],
+            color=st.get("color", None),
+            linewidth=2.0,
+            markersize=6.0,
+            markerfacecolor="white",
+            markeredgewidth=1.2,
+            label=st["label"],
+        )
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, which="major", linestyle="-", linewidth=0.35, alpha=0.25)
+    ax.minorticks_on()
+    ax.tick_params(direction="in", top=True, right=True, length=5)
+    ax.tick_params(which="minor", direction="in", top=True, right=True, length=2.5)
+
+    ax.legend(
+        frameon=False,
+        loc="upper left",
+        fontsize=10,
+        handlelength=1.8,
+        borderaxespad=0.2,
+    )
+    fig.tight_layout(pad=0.2)
+
     _save_figure_multi_format(output_path)
     print(f"Saved: {output_path}")
 
 def semilogy_metric(
     x_values: Sequence[int],
-    series: Sequence[Tuple[str, Sequence[float]]],    xlabel: str,
+    series: Sequence[Tuple[str, Sequence[float]]],
+    xlabel: str,
     ylabel: str,
     title: str,
     output_path: str,
 ) -> None:
-    plt.figure()
-    for idx, (label, y_values) in enumerate(series):
-        marker = MARKERS[idx % len(MARKERS)]
-        plt.semilogy(x_values, y_values, marker=marker, label=label)
-    plt.grid(True, which="both", linestyle="--", linewidth=0.5)
-    plt.xlabel(xlabel, fontsize=14)
-    plt.ylabel(ylabel, fontsize=14)
-    # plt.title(title)
-    plt.legend()
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=(5.6, 3.8))
+
+    for label, y_values in series:
+        st = _style_for_label(label)
+        ax.semilogy(
+            x_values,
+            y_values,
+            marker=st["marker"],
+            color=st.get("color", None),
+            linewidth=2.0,
+            markersize=6.0,
+            markerfacecolor="white",
+            markeredgewidth=1.2,
+            label=st["label"],
+        )
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.grid(True, which="both", linestyle="-", linewidth=0.35, alpha=0.25)
+    ax.minorticks_on()
+    ax.tick_params(direction="in", top=True, right=True, length=5)
+    ax.tick_params(which="minor", direction="in", top=True, right=True, length=2.5)
+
+    ax.legend(
+        frameon=False,
+        loc="upper left",
+        fontsize=10,
+        handlelength=1.8,
+        borderaxespad=0.2,
+    )
+    fig.tight_layout(pad=0.2)
+
     _save_figure_multi_format(output_path)
     print(f"Saved: {output_path}")
 
@@ -508,14 +594,14 @@ def main() -> None:
             "Root directory containing per-drop results."
         ),
     )
-    parser.add_argument("--mobility", default="highest_mobility", help="Mobility string used in the folder names.")
+    parser.add_argument("--mobility", default="high_mobility", help="Mobility string used in the folder names.")
     parser.add_argument(
         "--drops",
         type=int,
         nargs="+",
         # default=[1],
         # default=[3, 13, 14, 15, 19, 20], # good: 20, 3,  okay: 19, 15, not great: 14, 13
-        default=list(range(1, 21)),
+        default=list(range(1, 12)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
