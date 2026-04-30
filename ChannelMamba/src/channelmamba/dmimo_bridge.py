@@ -51,6 +51,8 @@ class DMIMOChannelMambaConfig:
     dataloader_pin_memory: bool = True
     dataloader_persistent_workers: bool = True
     dataloader_prefetch_factor: int | None = 2
+    torch_compile: bool = False
+    torch_compile_mode: str | None = None
 
 
 class DMIMOChannelMambaPredictor:
@@ -178,6 +180,14 @@ class DMIMOChannelMambaPredictor:
             dropout=float(self.cfg.dropout),
             ssm_backend=str(self.cfg.ssm_backend),
         ).to(self.device)
+        compile_enabled = bool(getattr(self.cfg, "torch_compile", False))
+        if compile_enabled and hasattr(torch, "compile"):
+            compile_mode = getattr(self.cfg, "torch_compile_mode", None)
+            try:
+                model = torch.compile(model, mode=compile_mode)
+                print(f"[channelmamba] torch.compile enabled (mode={compile_mode!r})")
+            except Exception as exc:
+                print(f"[channelmamba] torch.compile unavailable; falling back to eager mode: {exc}")
         return model
 
     def _maybe_load_checkpoint(self, d_in: int) -> None:

@@ -130,6 +130,8 @@ channelmamba_dataloader_num_workers = 8
 channelmamba_dataloader_pin_memory = True
 channelmamba_dataloader_persistent_workers = True
 channelmamba_dataloader_prefetch_factor = 2
+channelmamba_torch_compile = False
+channelmamba_torch_compile_mode = None
 channelmamba_prev_len = history_len
 channelmamba_pred_len = 1
 channelmamba_lr = 1e-4
@@ -334,6 +336,8 @@ def run_simulation():
     cfg.channelmamba_dataloader_pin_memory = channelmamba_dataloader_pin_memory
     cfg.channelmamba_dataloader_persistent_workers = channelmamba_dataloader_persistent_workers
     cfg.channelmamba_dataloader_prefetch_factor = channelmamba_dataloader_prefetch_factor
+    cfg.channelmamba_torch_compile = channelmamba_torch_compile
+    cfg.channelmamba_torch_compile_mode = channelmamba_torch_compile_mode
     cfg.channelmamba_prev_len = channelmamba_prev_len
     cfg.channelmamba_pred_len = channelmamba_pred_len
     cfg.channelmamba_lr = channelmamba_lr
