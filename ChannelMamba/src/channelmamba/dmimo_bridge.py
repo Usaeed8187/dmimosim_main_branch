@@ -5,6 +5,7 @@ from typing import List, Sequence, Tuple
 import os
 import time
 import multiprocessing
+from contextlib import contextmanager
 import numpy as np
 import torch
 from torch import nn
@@ -54,6 +55,14 @@ class DMIMOChannelMambaConfig:
     torch_compile: bool = False
     torch_compile_mode: str | None = None
 
+@contextmanager
+def _timed_section(name: str):
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        print(f"[channelmamba][timing] {name}: {elapsed:.3f}s")
 
 class DMIMOChannelMambaPredictor:
     """Offline-trained, online-inference ChannelMamba predictor for dMIMO CSI."""
@@ -333,14 +342,17 @@ class DMIMOChannelMambaPredictor:
         if len(samples_x) == 0:
             raise ValueError("No offline windows were generated for ChannelMamba training.")
 
-        x_np = np.asarray(np.stack(samples_x), dtype=np.float32, order="C")
-        y_np = np.asarray(np.stack(samples_y), dtype=np.float32, order="C")
+        with _timed_section("fit_offline_pair.numpy_stack"):
+            x_np = np.asarray(np.stack(samples_x), dtype=np.float32, order="C")
+            y_np = np.asarray(np.stack(samples_y), dtype=np.float32, order="C")
 
-        x_tensor = torch.tensor(x_np, dtype=torch.float32)
-        y_tensor = torch.tensor(y_np, dtype=torch.float32)
+        with _timed_section("fit_offline_pair.tensorize_dataset"):
+            x_tensor = torch.tensor(x_np, dtype=torch.float32)
+            y_tensor = torch.tensor(y_np, dtype=torch.float32)
+            dataset = TensorDataset(x_tensor, y_tensor)
 
-        dataset = TensorDataset(x_tensor, y_tensor)
-        loader = self._build_dataloader(dataset, shuffle=True)
+        with _timed_section("fit_offline_pair.build_dataloader"):
+            loader = self._build_dataloader(dataset, shuffle=True)
 
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -360,19 +372,40 @@ class DMIMOChannelMambaPredictor:
             epoch_start = time.perf_counter()
             epoch_loss = 0.0
             num_batches = 0
+            transfer_time = 0.0
+            forward_time = 0.0
+            backward_time = 0.0
+            optim_time = 0.0
             for x_batch, y_batch in loader:
+                t0 = time.perf_counter()
                 x_batch = x_batch.to(self.device, non_blocking=use_amp)
                 y_batch = y_batch.to(self.device, non_blocking=use_amp)
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                transfer_time += time.perf_counter() - t0
                 optimizer.zero_grad()
+                t1 = time.perf_counter()
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     pred = self.model(x_batch)
                     loss = criterion(pred, y_batch)
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                forward_time += time.perf_counter() - t1
+
+                t2 = time.perf_counter()
                 scaler.scale(loss).backward()
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                backward_time += time.perf_counter() - t2
                 clip_val = float(getattr(self.cfg, "grad_clip", 0.0) or 0.0)
                 if clip_val > 0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_val)
+                t3 = time.perf_counter()
                 scaler.step(optimizer)
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                optim_time += time.perf_counter() - t3
                 scaler.update()
                 epoch_loss += float(loss.item())
                 num_batches += 1
@@ -405,31 +438,33 @@ class DMIMOChannelMambaPredictor:
         prev_len = int(self.cfg.prev_len)
         pred_len = int(self.cfg.pred_len)
 
-        if isinstance(h_freq_csi_history_pair, np.ndarray):
-            pair_histories = [h_freq_csi_history_pair]
-        else:
-            pair_histories = [np.asarray(h_hist) for h_hist in h_freq_csi_history_pair]
+        with _timed_section("fit_offline_pair.prepare_histories"):
+            if isinstance(h_freq_csi_history_pair, np.ndarray):
+                pair_histories = [h_freq_csi_history_pair]
+            else:
+                pair_histories = [np.asarray(h_hist) for h_hist in h_freq_csi_history_pair]
 
-        for drop_seq_idx, pair_hist in enumerate(pair_histories):
-            features, _n_sc_meta, _, _, n_r, n_t = self._compress_history_to_features(pair_hist)
-            d_in = 2 * n_r * n_t
-            if self.d_in is None:
-                self.d_in = d_in
-            elif self.d_in != d_in:
-                raise ValueError(f"Inconsistent d_in across pooled drops: existing={self.d_in}, new={d_in}")
+        with _timed_section("fit_offline_pair.build_windows"):
+            for drop_seq_idx, pair_hist in enumerate(pair_histories):
+                features, _n_sc_meta, _, _, n_r, n_t = self._compress_history_to_features(pair_hist)
+                d_in = 2 * n_r * n_t
+                if self.d_in is None:
+                    self.d_in = d_in
+                elif self.d_in != d_in:
+                    raise ValueError(f"Inconsistent d_in across pooled drops: existing={self.d_in}, new={d_in}")
 
-            per_drop_windows = 0
-            for m_idx in range(features.shape[0]):
-                seq = features[m_idx]  # [T, d_in]
-                if seq.shape[0] < prev_len + pred_len:
-                    continue
-                for t_idx in range(prev_len, seq.shape[0] - pred_len + 1):
-                    x = seq[t_idx - prev_len:t_idx]
-                    y = seq[t_idx:t_idx + pred_len]
-                    samples_x.append(x.astype(np.float32))
-                    samples_y.append(y.astype(np.float32))
-                    per_drop_windows += 1
-            # print(f"[channelmamba] pair drop-seq-{drop_seq_idx}: generated {per_drop_windows} offline windows")
+                per_drop_windows = 0
+                for m_idx in range(features.shape[0]):
+                    seq = features[m_idx]  # [T, d_in]
+                    if seq.shape[0] < prev_len + pred_len:
+                        continue
+                    for t_idx in range(prev_len, seq.shape[0] - pred_len + 1):
+                        x = seq[t_idx - prev_len:t_idx]
+                        y = seq[t_idx:t_idx + pred_len]
+                        samples_x.append(x.astype(np.float32))
+                        samples_y.append(y.astype(np.float32))
+                        per_drop_windows += 1
+                # print(f"[channelmamba] pair drop-seq-{drop_seq_idx}: generated {per_drop_windows} offline windows")
 
         if self.d_in is None:
             raise ValueError("No valid training samples built for ChannelMamba pair training.")
@@ -443,14 +478,17 @@ class DMIMOChannelMambaPredictor:
         if len(samples_x) == 0:
             raise ValueError("No offline windows were generated for ChannelMamba pair training.")
 
-        x_np = np.asarray(np.stack(samples_x), dtype=np.float32, order="C")
-        y_np = np.asarray(np.stack(samples_y), dtype=np.float32, order="C")
+        with _timed_section("fit_offline_pair.numpy_stack"):
+            x_np = np.asarray(np.stack(samples_x), dtype=np.float32, order="C")
+            y_np = np.asarray(np.stack(samples_y), dtype=np.float32, order="C")
 
-        x_tensor = torch.tensor(x_np, dtype=torch.float32)
-        y_tensor = torch.tensor(y_np, dtype=torch.float32)
+        with _timed_section("fit_offline_pair.tensorize_dataset"):
+            x_tensor = torch.tensor(x_np, dtype=torch.float32)
+            y_tensor = torch.tensor(y_np, dtype=torch.float32)
+            dataset = TensorDataset(x_tensor, y_tensor)
 
-        dataset = TensorDataset(x_tensor, y_tensor)
-        loader = self._build_dataloader(dataset, shuffle=True)
+        with _timed_section("fit_offline_pair.build_dataloader"):
+            loader = self._build_dataloader(dataset, shuffle=True)
 
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -470,20 +508,42 @@ class DMIMOChannelMambaPredictor:
             epoch_start = time.perf_counter()
             epoch_loss = 0.0
             num_batches = 0
+            transfer_time = 0.0
+            forward_time = 0.0
+            backward_time = 0.0
+            optim_time = 0.0
             for x_batch, y_batch in loader:
+                t0 = time.perf_counter()
                 x_batch = x_batch.to(self.device, non_blocking=use_amp)
                 y_batch = y_batch.to(self.device, non_blocking=use_amp)
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                transfer_time += time.perf_counter() - t0
+
                 optimizer.zero_grad()
+                t1 = time.perf_counter()
                 with torch.amp.autocast("cuda", enabled=use_amp):
                     pred = self.model(x_batch)
                     loss = criterion(pred, y_batch)
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                forward_time += time.perf_counter() - t1
+
+                t2 = time.perf_counter()
                 scaler.scale(loss).backward()
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                backward_time += time.perf_counter() - t2
                 clip_val = float(getattr(self.cfg, "grad_clip", 0.0) or 0.0)
                 if clip_val > 0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=clip_val)
+                t3 = time.perf_counter()
                 scaler.step(optimizer)
                 scaler.update()
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize(self.device)
+                optim_time += time.perf_counter() - t3
                 epoch_loss += float(loss.item())
                 num_batches += 1
             avg_loss = epoch_loss / max(num_batches, 1)
@@ -491,7 +551,9 @@ class DMIMOChannelMambaPredictor:
             epoch_elapsed = time.perf_counter() - epoch_start
             print(
                 f"[channelmamba] pair offline epoch={epoch_idx+1}/{self.cfg.epochs}, "
-                f"mse={avg_loss:.6e}, epoch_time_sec={epoch_elapsed:.3f}"
+                f"mse={avg_loss:.6e}, epoch_time_sec={epoch_elapsed:.3f}, "
+                f"transfer_sec={transfer_time:.3f}, forward_sec={forward_time:.3f}, "
+                f"backward_sec={backward_time:.3f}, optim_sec={optim_time:.3f}"
             )
         self.model.eval()
         if self.cfg.checkpoint_path:
@@ -506,10 +568,23 @@ class DMIMOChannelMambaPredictor:
             raise ValueError("ChannelMamba pair predictor is not initialized. Run fit_offline_pair first.")
 
         prev_len = int(self.cfg.prev_len)
+        t_pre = time.perf_counter()
         features, _n_sc_meta, n_sc, n_sym, n_r, n_t = self._compress_history_to_features(h_freq_csi_history_pair)
         features = self._ensure_prev_len(features, prev_len=prev_len)
+        t_h2d = time.perf_counter()
         model_in = torch.from_numpy(features[:, -prev_len:, :]).to(self.device)
-        pred = self.model(model_in).detach().cpu().numpy()[:, 0, :]  # one-step: [M, d_in]
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        t_fwd = time.perf_counter()
+        pred = self.model(model_in)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+        pred = pred.detach().cpu().numpy()[:, 0, :]  # one-step: [M, d_in]
+        t_post = time.perf_counter()
+        print(
+            f"[channelmamba][timing] predict_pair prep_sec={t_h2d - t_pre:.3f}, "
+            f"h2d_sec={t_fwd - t_h2d:.3f}, forward_d2h_sec={t_post - t_fwd:.3f}"
+        )
         return self._reconstruct_block_from_features(pred, n_sc=n_sc, n_sym=n_sym, n_r=n_r, n_t=n_t)
 
     @torch.no_grad()
