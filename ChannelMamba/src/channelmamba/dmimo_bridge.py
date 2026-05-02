@@ -131,40 +131,52 @@ class DMIMOChannelMambaPredictor:
         Convert CSI history block to ChannelMamba inputs.
 
         curr_h shape: [T, B, 1, N_r, 1, N_t, N_sym, N_sc]
-        return features shape: [N_sym*N_sc, T, 2*N_r*N_t] ((sym, sc) are parallel streams)
+        return features shape: [N_sym*N_rb, T, 2*N_r*N_t] where N_rb = ceil(N_sc/rb_size)
         """
 
         hist = np.asarray(curr_h)
         t_hist, _, _, n_r, _, n_t, n_sym, n_sc = hist.shape
         hist = hist[:, 0, 0, :, 0, :, :, :]  # [T, N_r, N_t, N_sym, N_sc]
 
-        feat_real = np.real(hist)
-        feat_imag = np.imag(hist)
-        # Keep (sym, sc) as the stream axis to maximize sample multiplicity while vectorizing antennas.
-        stream_feat = np.stack([feat_real, feat_imag], axis=3)  # [T, N_r, N_t, 2, N_sym, N_sc]
-        feat = stream_feat.transpose(4, 5, 0, 1, 2, 3).reshape(n_sym * n_sc, t_hist, 2 * n_r * n_t)
-        return feat.astype(np.float32), n_sc, n_sc, n_sym, n_r, n_t
+        rb_size = max(1, int(getattr(self.cfg, "rb_size", 12)))
+        n_rb = (n_sc + rb_size - 1) // rb_size
+        rb_hist = np.zeros((t_hist, n_r, n_t, n_sym, n_rb), dtype=np.complex64)
+        for rb_idx in range(n_rb):
+            sc_start = rb_idx * rb_size
+            sc_end = min((rb_idx + 1) * rb_size, n_sc)
+            rb_hist[..., rb_idx] = np.mean(hist[..., sc_start:sc_end], axis=-1)
+
+        feat_real = np.real(rb_hist)
+        feat_imag = np.imag(rb_hist)
+        stream_feat = np.stack([feat_real, feat_imag], axis=3)  # [T, N_r, N_t, 2, N_sym, N_rb]
+        feat = stream_feat.transpose(4, 5, 0, 1, 2, 3).reshape(n_sym * n_rb, t_hist, 2 * n_r * n_t)
+        return feat.astype(np.float32), n_rb, n_sc, n_sym, n_r, n_t
     
     def _reconstruct_block_from_features(
         self,
         pred_features: np.ndarray,
         n_sc: int,
+        n_rb: int,
         n_sym: int,
         n_r: int,
         n_t: int,
     ) -> np.ndarray:
-        """Reconstruct full-sc/symbol CSI block from one-step prediction features."""
+        """Reconstruct full-sc/symbol CSI block from RB-aggregated one-step prediction features."""
 
-        # Inverse of _compress_history_to_features() stream layout:
-        # [N_sym*N_sc, T, 2*N_r*N_t] -> one-step [N_sym*N_sc, 2*N_r*N_t].
-        # Stream order is (sym, sc). Restore per-stream antenna vectors and map back.
-        pred_features = pred_features.reshape(n_sym, n_sc, n_r, n_t, 2)
-        sym_sc_real = pred_features[..., 0].transpose(2, 3, 0, 1)  # [N_r, N_t, N_sym, N_sc]
-        sym_sc_imag = pred_features[..., 1].transpose(2, 3, 0, 1)
-        sym_vals = sym_sc_real + 1j * sym_sc_imag
+        rb_size = max(1, int(getattr(self.cfg, "rb_size", 12)))
+        pred_features = pred_features.reshape(n_sym, n_rb, n_r, n_t, 2)
+        sym_rb_real = pred_features[..., 0].transpose(2, 3, 0, 1)  # [N_r, N_t, N_sym, N_rb]
+        sym_rb_imag = pred_features[..., 1].transpose(2, 3, 0, 1)
+        sym_rb_vals = sym_rb_real + 1j * sym_rb_imag
+
+        sym_sc_vals = np.zeros((n_r, n_t, n_sym, n_sc), dtype=np.complex64)
+        for rb_idx in range(n_rb):
+            sc_start = rb_idx * rb_size
+            sc_end = min((rb_idx + 1) * rb_size, n_sc)
+            sym_sc_vals[..., sc_start:sc_end] = sym_rb_vals[..., rb_idx:rb_idx+1]
 
         out = np.zeros((1, 1, n_r, 1, n_t, n_sym, n_sc), dtype=np.complex64)
-        out[0, 0, :, 0, :, :, :] = sym_vals.astype(np.complex64)
+        out[0, 0, :, 0, :, :, :] = sym_sc_vals
         return out
 
     def _build_model(self, d_in: int) -> ChannelMamba:
@@ -585,7 +597,7 @@ class DMIMOChannelMambaPredictor:
             f"[channelmamba][timing] predict_pair prep_sec={t_h2d - t_pre:.3f}, "
             f"h2d_sec={t_fwd - t_h2d:.3f}, forward_d2h_sec={t_post - t_fwd:.3f}"
         )
-        return self._reconstruct_block_from_features(pred, n_sc=n_sc, n_sym=n_sym, n_r=n_r, n_t=n_t)
+        return self._reconstruct_block_from_features(pred, n_sc=n_sc, n_rb=_n_sc_meta, n_sym=n_sym, n_r=n_r, n_t=n_t)
 
     @torch.no_grad()
     def predict_all_links(self, h_freq_csi_history: np.ndarray, ns3cfg, num_bs_ant: int = 4, num_ue_ant: int = 2):
@@ -607,7 +619,7 @@ class DMIMOChannelMambaPredictor:
                 features = self._ensure_prev_len(features, prev_len=prev_len)
                 model_in = torch.from_numpy(features[:, -prev_len:, :]).to(self.device)
                 pred = self.model(model_in).detach().cpu().numpy()[:, 0, :]  # one-step: [M, d_in]
-                tmp = self._reconstruct_block_from_features(pred, n_sc=n_sc, n_sym=n_sym, n_r=n_r, n_t=n_t)
+                tmp = self._reconstruct_block_from_features(pred, n_sc=n_sc, n_rb=_n_sc_meta, n_sym=n_sym, n_r=n_r, n_t=n_t)
 
                 rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
                 h_freq_csi[:, :, rx_idx, :, tx_idx, :, :] = tmp.transpose(2, 4, 0, 1, 3, 5, 6)

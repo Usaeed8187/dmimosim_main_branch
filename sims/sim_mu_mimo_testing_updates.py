@@ -122,6 +122,7 @@ return_first_slot_only = True
 channelmamba_checkpoint = None
 channelmamba_mode = "train"  # train | eval | auto
 channelmamba_train_drop_indices = None
+start_slot_idx_override = None
 channelmamba_device = "cuda"
 channelmamba_enable_tf32 = True
 channelmamba_epochs = 10
@@ -176,6 +177,7 @@ def parse_arguments():
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
     global channelmamba_checkpoint, channelmamba_mode, channelmamba_train_drop_indices
+    global start_slot_idx_override
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -219,6 +221,9 @@ def parse_arguments():
         if len(arguments) >= 15:
             train_drop_tokens = [tok.strip() for tok in str(arguments[14]).split(",") if tok.strip()]
             channelmamba_train_drop_indices = train_drop_tokens if train_drop_tokens else None
+        
+        if len(arguments) >= 16:
+            start_slot_idx_override = int(arguments[15])
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -248,6 +253,7 @@ def parse_arguments():
 # Main function
 def run_simulation():
     global mobility, drop_idx, rx_ues_arr
+    global start_slot_idx_override
     parse_arguments()
 
     # Simulation settings
@@ -255,6 +261,8 @@ def run_simulation():
     cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
     cfg.total_slots = 100       # total number of slots in ns-3 channels
     cfg.start_slot_idx = 33     # starting slots (must be greater than csi_delay + 5)
+    if start_slot_idx_override is not None:
+        cfg.start_slot_idx = int(start_slot_idx_override)
     cfg.csi_delay = 4           # feedback delay in number of subframe
     cfg.perfect_csi = perfect_csi
     cfg.rank_adapt = False      # enable/disable rank adaptation
