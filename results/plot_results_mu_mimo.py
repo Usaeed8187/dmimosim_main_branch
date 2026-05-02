@@ -447,11 +447,13 @@ STYLE = {
     "ChannelMamba (Seen envs)": {
         "color": "tab:red",
         "marker": "D",
+        "linestyle": "--",
         "label": "ChannelMamba (Seen envs)",
     },
     "ChannelMamba (All envs)": {
-        "color": "tab:pink",
+        "color": "tab:red",
         "marker": "d",
+        "linestyle": "-",
         "label": "ChannelMamba (All envs)",
     },
     "Outdated CSI": {
@@ -496,6 +498,7 @@ def plot_metric(
             y_values,
             marker=st["marker"],
             color=st.get("color", None),
+            linestyle=st.get("linestyle", "-"),
             linewidth=2.0,
             markersize=6.0,
             markerfacecolor="white",
@@ -539,6 +542,7 @@ def semilogy_metric(
             y_values,
             marker=st["marker"],
             color=st.get("color", None),
+            linestyle=st.get("linestyle", "-"),
             linewidth=2.0,
             markersize=6.0,
             markerfacecolor="white",
@@ -608,7 +612,7 @@ def main() -> None:
             "Root directory containing per-drop results."
         ),
     )
-    parser.add_argument("--mobility", default="high_mobility", help="Mobility string used in the folder names.")
+    parser.add_argument("--mobility", default="higher_mobility", help="Mobility string used in the folder names.")
     parser.add_argument(
         "--drops",
         type=int,
