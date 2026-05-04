@@ -444,17 +444,17 @@ STYLE = {
         "marker": "D",
         "label": "ChannelMamba",
     },
-    "ChannelMamba (Seen envs)": {
+    "ChannelMamba (TP)": {
         "color": "tab:red",
         "marker": "D",
         "linestyle": "--",
-        "label": "ChannelMamba (Seen envs)",
+        "label": "ChannelMamba (TP)",
     },
-    "ChannelMamba (All envs)": {
+    "ChannelMamba (SP)": {
         "color": "tab:red",
         "marker": "d",
         "linestyle": "-",
-        "label": "ChannelMamba (All envs)",
+        "label": "ChannelMamba (SP)",
     },
     "Outdated CSI": {
         "color": "0.45",
@@ -508,6 +508,7 @@ def plot_metric(
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
+    ax.set_ylim(top=27)
     ax.grid(True, which="major", linestyle="-", linewidth=0.35, alpha=0.25)
     ax.minorticks_on()
     ax.tick_params(direction="in", top=True, right=True, length=5)
@@ -516,7 +517,8 @@ def plot_metric(
     ax.legend(
         frameon=False,
         loc="upper left",
-        fontsize=10,
+        ncol=2,
+        fontsize=9,
         handlelength=1.8,
         borderaxespad=0.2,
     )
@@ -612,7 +614,7 @@ def main() -> None:
             "Root directory containing per-drop results."
         ),
     )
-    parser.add_argument("--mobility", default="higher_mobility", help="Mobility string used in the folder names.")
+    parser.add_argument("--mobility", default="highest_mobility", help="Mobility string used in the folder names.")
     parser.add_argument(
         "--drops",
         type=int,
@@ -803,8 +805,8 @@ def main() -> None:
         coded_ber_tx_series.append((scenario.label, coded_scenario_values))
     if channelmamba_scenario is not None:
         for curve_label, cm_agg in (
-            ("ChannelMamba (Seen envs)", channelmamba_seen_agg),
-            ("ChannelMamba (All envs)", channelmamba_all_agg),
+            ("ChannelMamba (TP)", channelmamba_seen_agg),
+            ("ChannelMamba (SP)", channelmamba_all_agg),
         ):
             scenario_values = []
             coded_scenario_values = []
@@ -866,8 +868,8 @@ def main() -> None:
 
     if channelmamba_scenario is not None:
         for curve_label, cm_agg in (
-            ("ChannelMamba (Seen envs)", channelmamba_seen_agg),
-            ("ChannelMamba (All envs)", channelmamba_all_agg),
+            ("ChannelMamba (TP)", channelmamba_seen_agg),
+            ("ChannelMamba (SP)", channelmamba_all_agg),
         ):
             scenario_values = []
             coded_scenario_values = []
@@ -930,8 +932,8 @@ def main() -> None:
 
     if channelmamba_scenario is not None:
         for curve_label, cm_agg in (
-            ("ChannelMamba (Seen envs)", channelmamba_seen_agg),
-            ("ChannelMamba (All envs)", channelmamba_all_agg),
+            ("ChannelMamba (TP)", channelmamba_seen_agg),
+            ("ChannelMamba (SP)", channelmamba_all_agg),
         ):
             scenario_thr = []
             for tx in cfg.tx_ues:
@@ -981,8 +983,8 @@ def main() -> None:
 
     if channelmamba_scenario is not None:
         for curve_label, cm_agg in (
-            ("ChannelMamba (Seen envs)", channelmamba_seen_agg),
-            ("ChannelMamba (All envs)", channelmamba_all_agg),
+            ("ChannelMamba (TP)", channelmamba_seen_agg),
+            ("ChannelMamba (SP)", channelmamba_all_agg),
         ):
             scenario_thr = []
             for rx in cfg.rx_ues:

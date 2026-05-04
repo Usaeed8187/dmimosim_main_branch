@@ -4,7 +4,7 @@
 # checkpoints produced by pooled training from twc_tput_across_tx_channelmamba.sh.
 
 # Defaults aligned with sims/twc_tput_across_tx_channelmamba.sh
-declare -a mobilities=("higher_mobility" "highest_mobility")
+declare -a mobilities=("highest_mobility")
 declare -a drop_idx=($(seq 1 20))
 
 declare -a rx_ues_arr=("4")
