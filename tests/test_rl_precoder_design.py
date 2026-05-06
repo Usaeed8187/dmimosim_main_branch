@@ -33,8 +33,8 @@ class RLConfig:
     lr_kappa: float = 1e-4
     lr_alpha: float = 2e-3
     batch_size: int = 50
-    rho_gamma: float = 0.7
-    max_resamples: int = 8
+    rho_gamma: float = 0.5
+    max_resamples: int = 16
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
     return (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)) / np.sqrt(2.0)
@@ -232,8 +232,11 @@ def run_hybrid_rl(cfg: SimConfig, rl_cfg: RLConfig, channels: np.ndarray, zf_bas
         mu_phi = np.zeros((k, d))
         kappa_phi = np.zeros(k)
         c_k = np.zeros(k)
+        # beta_zf_t = rl_cfg.beta_zf * (1.0 - (t / (cfg.num_slots - 1)))
+        # beta_zf_t = rl_cfg.beta_zf * np.exp(- (t / 2000))
+        beta_zf_t = 0
         for ku in range(k):
-            h[ku] = rl_cfg.beta_zf * mu_zf[ku] + w_mu[ku] @ z_aug
+            h[ku] = beta_zf_t * mu_zf[ku] + w_mu[ku] @ z_aug
             h_n = np.linalg.norm(h[ku])
             mu_phi[ku] = h[ku] / max(h_n, 1e-12)
             c_k[ku] = u_kappa[ku] @ z_aug
@@ -362,7 +365,7 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
     learned_policy_prob_trace = output_dir / "hybrid_rl_learned_policy_probability_trace.npy"
     domain_knowledge_prob_trace = output_dir / "hybrid_rl_domain_knowledge_probability_trace.npy"
 
-    w_len = 10000
+    w_len = 1000
     zf_tput_avg = np.convolve(zf_tput, np.ones(w_len) / w_len, mode='valid')
     rl_tput_avg = np.convolve(rl_tput, np.ones(w_len) / w_len, mode='valid')
     reward_avg = np.convolve(rl_results["reward"], np.ones(w_len) / w_len, mode='valid')
@@ -486,7 +489,7 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF + hybrid RL precoder testbench")
-    parser.add_argument("--num-slots", type=int, default=100000)
+    parser.add_argument("--num-slots", type=int, default=10000)
     parser.add_argument("--snr-db", type=float, default=15.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
