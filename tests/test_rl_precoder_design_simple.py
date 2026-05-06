@@ -6,7 +6,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-
+import torch
 
 @dataclass
 class SimConfig:
@@ -137,8 +137,42 @@ def run_random_vmf_baseline(cfg: SimConfig, channels: np.ndarray, rng: np.random
     print()
     return {"throughput": throughput}
 
+def _sample_weight_vmf(dim: int, kappa: float, rng: np.random.Generator) -> float:
+    b = (-2.0 * kappa + np.sqrt(4.0 * kappa**2 + (dim - 1) ** 2)) / (dim - 1)
+    x0 = (1.0 - b) / (1.0 + b)
+    c = kappa * x0 + (dim - 1) * np.log(1.0 - x0**2)
+    while True:
+        z = rng.beta((dim - 1) / 2.0, (dim - 1) / 2.0)
+        w = (1.0 - (1.0 + b) * z) / (1.0 - (1.0 - b) * z)
+        u = rng.uniform(0.0, 1.0)
+        if kappa * w + (dim - 1) * np.log(1.0 - x0 * w) - c >= np.log(u):
+            return float(w)
+
 def sample_vmf(mu: np.ndarray, kappa: float, rng: np.random.Generator) -> np.ndarray:
-    return unit_norm(kappa * mu + rng.standard_normal(mu.shape))
+    dim = mu.size
+    mu = unit_norm(mu)
+    if kappa < 1e-8:
+        return unit_norm(rng.standard_normal(dim))
+
+    w = _sample_weight_vmf(dim, kappa, rng)
+    v = unit_norm(rng.standard_normal(dim - 1))
+    orth = np.concatenate(([w], np.sqrt(max(1.0 - w * w, 0.0)) * v))
+
+    e1 = np.zeros(dim, dtype=np.float64)
+    e1[0] = 1.0
+    if np.allclose(mu, e1):
+        return orth
+    if np.allclose(mu, -e1):
+        orth[0] *= -1.0
+        return orth
+
+    u = unit_norm(e1 - mu)
+    return orth - 2.0 * np.dot(u, orth) * u
+
+
+def vmf_log_prob_torch(x: torch.Tensor, mu: torch.Tensor, kappa: torch.Tensor) -> torch.Tensor:
+    # Constant term omitted since it does not affect policy gradients.
+    return kappa * torch.sum(mu * x)
 
 
 def run_single_policy_rl(cfg: SimConfig, rl_cfg: RLConfig, channels: np.ndarray, zf_baseline: dict[str, np.ndarray], rng: np.random.Generator) -> dict[str, np.ndarray]:
@@ -175,10 +209,23 @@ def run_single_policy_rl(cfg: SimConfig, rl_cfg: RLConfig, channels: np.ndarray,
         throughput[t] = rate
         reward_trace[t] = reward
 
-        # very simple REINFORCE-like nudges
+        # REINFORCE update using PyTorch autograd and vMF log-probability.
+        y_t = torch.tensor(y, dtype=torch.float64)
         for ku in range(k):
-            w_mu[ku] += rl_cfg.lr_mu * reward * np.outer(x_sample[ku] - mu[ku], y)
-            w_kappa[ku] += rl_cfg.lr_kappa * reward * (np.dot(mu[ku], x_sample[ku]) - 0.5) * y
+            w_mu_t = torch.tensor(w_mu[ku], dtype=torch.float64, requires_grad=True)
+            w_kappa_t = torch.tensor(w_kappa[ku], dtype=torch.float64, requires_grad=True)
+            x_t = torch.tensor(x_sample[ku], dtype=torch.float64)
+
+            mu_t = w_mu_t @ y_t
+            mu_t = mu_t / torch.clamp(torch.linalg.norm(mu_t), min=1e-12)
+            kappa_t = torch.nn.functional.softplus(torch.dot(w_kappa_t, y_t)) + rl_cfg.kappa_min
+            log_prob = vmf_log_prob_torch(x_t, mu_t, kappa_t)
+            loss = -reward * log_prob
+            loss.backward()
+
+            with torch.no_grad():
+                w_mu[ku] -= rl_cfg.lr_mu * w_mu_t.grad.detach().numpy()
+                w_kappa[ku] -= rl_cfg.lr_kappa * w_kappa_t.grad.detach().numpy()
 
     print()
     return {"throughput": throughput, "reward": reward_trace}
