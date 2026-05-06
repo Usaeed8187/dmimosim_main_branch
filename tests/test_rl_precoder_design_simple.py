@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+
 @dataclass
 class SimConfig:
     num_tx_antennas: int = 4
@@ -24,8 +25,12 @@ class SimConfig:
 @dataclass
 class RLConfig:
     lr_mu: float = 3e-3
-    lr_kappa: float = 1e-3
-    kappa_min: float = 1e-3
+    fixed_kappa: float = 10.0
+    reward_baseline_beta: float = 0.99
+    advantage_clip: float = 1.0
+    grad_clip_norm: float = 1.0
+    init_scale_mu: float = 1e-2
+    batch_size: int = 64
 
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
@@ -46,7 +51,9 @@ def normalize_columns_equal_power(precoder: np.ndarray, total_tx_power: float) -
     return out
 
 
-def build_zf_precoder_from_pmi(full_vk_list: list[np.ndarray], streams_per_user: int, total_tx_power: float) -> np.ndarray:
+def build_zf_precoder_from_pmi(
+    full_vk_list: list[np.ndarray], streams_per_user: int, total_tx_power: float
+) -> np.ndarray:
     selected_rows = []
     for vk in full_vk_list:
         selected_rows.append(vk[:, :streams_per_user].conj().T)
@@ -54,9 +61,12 @@ def build_zf_precoder_from_pmi(full_vk_list: list[np.ndarray], streams_per_user:
     return normalize_columns_equal_power(np.linalg.pinv(z_matrix), total_tx_power)
 
 
-def compute_slot_sum_rate(user_channels: np.ndarray, precoder: np.ndarray, noise_power: float) -> tuple[float, np.ndarray]:
+def compute_slot_sum_rate(
+    user_channels: np.ndarray, precoder: np.ndarray, noise_power: float
+) -> tuple[float, np.ndarray]:
     num_users = user_channels.shape[0]
     sinr = np.zeros(num_users, dtype=np.float64)
+
     for k in range(num_users):
         hk = user_channels[k]
         signal_vec = hk @ precoder[:, k]
@@ -68,6 +78,7 @@ def compute_slot_sum_rate(user_channels: np.ndarray, precoder: np.ndarray, noise
             if j != k:
                 interference += np.abs(np.vdot(uk, hk @ precoder[:, j])) ** 2
         sinr[k] = desired / (interference + noise_power)
+
     return float(np.sum(np.log2(1.0 + sinr))), sinr
 
 
@@ -83,11 +94,18 @@ def pmi_features_from_channels(user_channels: np.ndarray) -> tuple[np.ndarray, l
 
 
 def simulate_channels(cfg: SimConfig, rng: np.random.Generator) -> np.ndarray:
-    channels = np.zeros((cfg.num_slots, cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas), dtype=np.complex128)
-    h_prev = complex_gaussian((cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas), rng)
+    channels = np.zeros(
+        (cfg.num_slots, cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas),
+        dtype=np.complex128,
+    )
+    h_prev = complex_gaussian(
+        (cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas), rng
+    )
     for t in range(cfg.num_slots):
         innovation = complex_gaussian(h_prev.shape, rng)
-        h_prev = cfg.temporal_correlation * h_prev + np.sqrt(1 - cfg.temporal_correlation**2) * innovation
+        h_prev = cfg.temporal_correlation * h_prev + np.sqrt(
+            1.0 - cfg.temporal_correlation**2
+        ) * innovation
         channels[t] = h_prev
     return channels
 
@@ -95,19 +113,29 @@ def simulate_channels(cfg: SimConfig, rng: np.random.Generator) -> np.ndarray:
 def run_zf_baseline(cfg: SimConfig, channels: np.ndarray) -> dict[str, np.ndarray]:
     noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
+    sinr_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
+    precoders = np.zeros(
+        (cfg.num_slots, cfg.num_tx_antennas, cfg.num_users), dtype=np.complex128
+    )
     pmi_features = []
+
     for t in range(cfg.num_slots):
         print(f"ZF Slot {t + 1} / {cfg.num_slots}", end="\r")
         feat, vk_list = pmi_features_from_channels(channels[t])
         pmi_features.append(feat)
-        p_zf = build_zf_precoder_from_pmi(vk_list, cfg.streams_per_user, cfg.total_tx_power)
-        throughput[t], _ = compute_slot_sum_rate(channels[t], p_zf, noise_power)
+        p_zf = build_zf_precoder_from_pmi(
+            vk_list, cfg.streams_per_user, cfg.total_tx_power
+        )
+        throughput[t], sinr_trace[t] = compute_slot_sum_rate(channels[t], p_zf, noise_power)
+        precoders[t] = p_zf
+
     print()
-    return {"throughput": throughput, "pmi_features": np.stack(pmi_features, axis=0)}
-
-
-def softplus(x: np.ndarray) -> np.ndarray:
-    return np.log1p(np.exp(-np.abs(x))) + np.maximum(x, 0)
+    return {
+        "throughput": throughput,
+        "sinr": sinr_trace,
+        "precoders": precoders,
+        "pmi_features": np.stack(pmi_features, axis=0),
+    }
 
 
 def unit_norm(x: np.ndarray) -> np.ndarray:
@@ -118,35 +146,29 @@ def real_to_complex_beam(x: np.ndarray, total_tx_power: float, num_users: int) -
     nt = x.size // 2
     return np.sqrt(total_tx_power / num_users) * (x[:nt] + 1j * x[nt:])
 
-def run_random_vmf_baseline(cfg: SimConfig, channels: np.ndarray, rng: np.random.Generator) -> dict[str, np.ndarray]:
-    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
-    throughput = np.zeros(cfg.num_slots, dtype=np.float64)
-    k = cfg.num_users
-    d = 2 * cfg.num_tx_antennas
 
-    for t in range(cfg.num_slots):
-        print(f"Random vMF Slot {t + 1} / {cfg.num_slots}", end="\r")
-        beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
-        for ku in range(k):
-            mu = unit_norm(rng.standard_normal(d))
-            kappa = float(rng.uniform(1e-3, 10.0))
-            x_sample = sample_vmf(mu, kappa, rng)
-            beams[:, ku] = real_to_complex_beam(x_sample, cfg.total_tx_power, k)
-        throughput[t], _ = compute_slot_sum_rate(channels[t], beams, noise_power)
+def beam_similarity(p_a: np.ndarray, p_b: np.ndarray) -> np.ndarray:
+    sims = []
+    for k in range(p_a.shape[1]):
+        num = np.abs(np.vdot(p_a[:, k], p_b[:, k]))
+        den = np.linalg.norm(p_a[:, k]) * np.linalg.norm(p_b[:, k])
+        sims.append(num / max(den, 1e-12))
+    return np.array(sims, dtype=np.float64)
 
-    print()
-    return {"throughput": throughput}
 
 def _sample_weight_vmf(dim: int, kappa: float, rng: np.random.Generator) -> float:
+    # Wood (1994)-style rejection sampler for the scalar projection along the mean.
     b = (-2.0 * kappa + np.sqrt(4.0 * kappa**2 + (dim - 1) ** 2)) / (dim - 1)
     x0 = (1.0 - b) / (1.0 + b)
     c = kappa * x0 + (dim - 1) * np.log(1.0 - x0**2)
+
     while True:
         z = rng.beta((dim - 1) / 2.0, (dim - 1) / 2.0)
         w = (1.0 - (1.0 + b) * z) / (1.0 - (1.0 - b) * z)
         u = rng.uniform(0.0, 1.0)
         if kappa * w + (dim - 1) * np.log(1.0 - x0 * w) - c >= np.log(u):
             return float(w)
+
 
 def sample_vmf(mu: np.ndarray, kappa: float, rng: np.random.Generator) -> np.ndarray:
     dim = mu.size
@@ -166,69 +188,174 @@ def sample_vmf(mu: np.ndarray, kappa: float, rng: np.random.Generator) -> np.nda
         orth[0] *= -1.0
         return orth
 
+    # Householder rotation taking e1 to mu.
     u = unit_norm(e1 - mu)
     return orth - 2.0 * np.dot(u, orth) * u
 
 
-def vmf_log_prob_torch(x: torch.Tensor, mu: torch.Tensor, kappa: torch.Tensor) -> torch.Tensor:
-    # Constant term omitted since it does not affect policy gradients.
-    return kappa * torch.sum(mu * x)
+def run_random_vmf_baseline(
+    cfg: SimConfig, channels: np.ndarray, rng: np.random.Generator, fixed_kappa: float
+) -> dict[str, np.ndarray]:
+    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    throughput = np.zeros(cfg.num_slots, dtype=np.float64)
+    k = cfg.num_users
+    d = 2 * cfg.num_tx_antennas
+
+    for t in range(cfg.num_slots):
+        print(f"Random vMF Slot {t + 1} / {cfg.num_slots}", end="\r")
+        beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
+        for ku in range(k):
+            mu = unit_norm(rng.standard_normal(d))
+            x_sample = sample_vmf(mu, fixed_kappa, rng)
+            beams[:, ku] = real_to_complex_beam(x_sample, cfg.total_tx_power, k)
+        throughput[t], _ = compute_slot_sum_rate(channels[t], beams, noise_power)
+
+    print()
+    return {"throughput": throughput}
 
 
-def run_single_policy_rl(cfg: SimConfig, rl_cfg: RLConfig, channels: np.ndarray, zf_baseline: dict[str, np.ndarray], rng: np.random.Generator) -> dict[str, np.ndarray]:
+def vmf_log_prob_fixed_kappa_torch(
+    x: torch.Tensor, mu: torch.Tensor, fixed_kappa: float
+) -> torch.Tensor:
+    """vMF log probability up to a constant when kappa is fixed.
+
+    log p(x | mu, kappa) = log C_d(kappa) + kappa * mu^T x.
+    Since kappa is fixed here, log C_d(kappa) is constant w.r.t. trainable parameters.
+    """
+    return fixed_kappa * torch.sum(mu * x, dim=-1)
+
+
+def run_single_policy_rl(
+    cfg: SimConfig,
+    rl_cfg: RLConfig,
+    channels: np.ndarray,
+    zf_baseline: dict[str, np.ndarray],
+    rng: np.random.Generator,
+) -> dict[str, np.ndarray]:
     noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
     feat_dim = zf_baseline["pmi_features"].shape[1]
     k = cfg.num_users
     d = 2 * cfg.num_tx_antennas
 
-    # Single learned policy, random init (no DK dependency in parameterization).
-    w_mu = 1e-2 * rng.standard_normal((k, d, feat_dim))
-    w_kappa = 1e-2 * rng.standard_normal((k, feat_dim))
+    # Persistent PyTorch parameter and optimizer.
+    w_mu_init = rl_cfg.init_scale_mu * rng.standard_normal((k, d, feat_dim))
+    w_mu = torch.nn.Parameter(torch.tensor(w_mu_init, dtype=torch.float64))
+    optimizer = torch.optim.Adam([w_mu], lr=rl_cfg.lr_mu)
 
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     reward_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    advantage_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    baseline_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    kappa_trace = np.full((cfg.num_slots, k), rl_cfg.fixed_kappa, dtype=np.float64)
+    beat_zf_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    beam_similarity_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    grad_norm_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    loss_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+
+    reward_baseline = 0.0
+    batch_y: list[np.ndarray] = []
+    batch_x: list[np.ndarray] = []
+    batch_adv: list[float] = []
+    batch_indices: list[int] = []
+
+    def flush_batch() -> None:
+        nonlocal batch_y, batch_x, batch_adv, batch_indices
+        if not batch_y:
+            return
+
+        y_batch = torch.tensor(np.stack(batch_y, axis=0), dtype=torch.float64)
+        x_batch = torch.tensor(np.stack(batch_x, axis=0), dtype=torch.float64)
+        adv_batch = torch.tensor(np.array(batch_adv), dtype=torch.float64)
+
+        # Recompute current policy log-probabilities for the sampled actions.
+        # Shape: logits/mu = [B, K, D]
+        logits = torch.einsum("kdf,bf->bkd", w_mu, y_batch)
+        mu = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
+
+        per_user_log_prob = vmf_log_prob_fixed_kappa_torch(
+            x_batch, mu, rl_cfg.fixed_kappa
+        )
+        joint_log_prob = torch.sum(per_user_log_prob, dim=1)
+        loss = -torch.mean(adv_batch * joint_log_prob)
+
+        optimizer.zero_grad()
+        loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_([w_mu], rl_cfg.grad_clip_norm)
+        optimizer.step()
+
+        loss_value = float(loss.detach().cpu().item())
+        grad_norm_value = float(grad_norm.detach().cpu().item())
+        for idx in batch_indices:
+            loss_trace[idx] = loss_value
+            grad_norm_trace[idx] = grad_norm_value
+
+        batch_y = []
+        batch_x = []
+        batch_adv = []
+        batch_indices = []
 
     for t in range(cfg.num_slots):
         print(f"RL Slot {t + 1} / {cfg.num_slots}", end="\r")
         y = zf_baseline["pmi_features"][t]
+
+        # Sample action from the current policy. Sampling is non-differentiable; REINFORCE
+        # uses the sampled action's log-probability during the batch update below.
+        y_t = torch.tensor(y, dtype=torch.float64)
+        with torch.no_grad():
+            logits = torch.einsum("kdf,f->kd", w_mu, y_t)
+            mu_t = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
+            mu_np = mu_t.detach().cpu().numpy()
+
         beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
-
-        mu = np.zeros((k, d), dtype=np.float64)
-        kappa = np.zeros(k, dtype=np.float64)
         x_sample = np.zeros((k, d), dtype=np.float64)
-
         for ku in range(k):
-            mu[ku] = unit_norm(w_mu[ku] @ y)
-            kappa[ku] = float(softplus(np.array([w_kappa[ku] @ y]))[0] + rl_cfg.kappa_min)
-            x_sample[ku] = sample_vmf(mu[ku], kappa[ku], rng)
+            x_sample[ku] = sample_vmf(mu_np[ku], rl_cfg.fixed_kappa, rng)
             beams[:, ku] = real_to_complex_beam(x_sample[ku], cfg.total_tx_power, k)
 
         rate, _ = compute_slot_sum_rate(channels[t], beams, noise_power)
         reward = rate - zf_baseline["throughput"][t]
 
+        advantage = reward - reward_baseline
+        if rl_cfg.advantage_clip > 0:
+            advantage = float(
+                np.clip(advantage, -rl_cfg.advantage_clip, rl_cfg.advantage_clip)
+            )
+
+        # Update running baseline after computing the advantage for this action.
+        reward_baseline = (
+            rl_cfg.reward_baseline_beta * reward_baseline
+            + (1.0 - rl_cfg.reward_baseline_beta) * reward
+        )
+
         throughput[t] = rate
         reward_trace[t] = reward
+        advantage_trace[t] = advantage
+        baseline_trace[t] = reward_baseline
+        beat_zf_trace[t] = 1.0 if rate > zf_baseline["throughput"][t] else 0.0
+        beam_similarity_trace[t] = beam_similarity(beams, zf_baseline["precoders"][t])
 
-        # REINFORCE update using PyTorch autograd and vMF log-probability.
-        y_t = torch.tensor(y, dtype=torch.float64)
-        for ku in range(k):
-            w_mu_t = torch.tensor(w_mu[ku], dtype=torch.float64, requires_grad=True)
-            w_kappa_t = torch.tensor(w_kappa[ku], dtype=torch.float64, requires_grad=True)
-            x_t = torch.tensor(x_sample[ku], dtype=torch.float64)
+        batch_y.append(y)
+        batch_x.append(x_sample)
+        batch_adv.append(advantage)
+        batch_indices.append(t)
 
-            mu_t = w_mu_t @ y_t
-            mu_t = mu_t / torch.clamp(torch.linalg.norm(mu_t), min=1e-12)
-            kappa_t = torch.nn.functional.softplus(torch.dot(w_kappa_t, y_t)) + rl_cfg.kappa_min
-            log_prob = vmf_log_prob_torch(x_t, mu_t, kappa_t)
-            loss = -reward * log_prob
-            loss.backward()
+        if len(batch_y) >= rl_cfg.batch_size:
+            flush_batch()
 
-            with torch.no_grad():
-                w_mu[ku] -= rl_cfg.lr_mu * w_mu_t.grad.detach().numpy()
-                w_kappa[ku] -= rl_cfg.lr_kappa * w_kappa_t.grad.detach().numpy()
-
+    flush_batch()
     print()
-    return {"throughput": throughput, "reward": reward_trace}
+
+    return {
+        "throughput": throughput,
+        "reward": reward_trace,
+        "advantage": advantage_trace,
+        "reward_baseline": baseline_trace,
+        "kappa": kappa_trace,
+        "beat_zf": beat_zf_trace,
+        "beam_similarity_to_zf": beam_similarity_trace,
+        "grad_norm": grad_norm_trace,
+        "loss": loss_trace,
+    }
 
 
 def moving_average(trace: np.ndarray, window_len: int) -> np.ndarray:
@@ -238,11 +365,26 @@ def moving_average(trace: np.ndarray, window_len: int) -> np.ndarray:
     return np.convolve(trace, kernel, mode="valid")
 
 
-def save_plots(zf_throughput: np.ndarray, random_vmf_throughput: np.ndarray, rl_throughput: np.ndarray, reward: np.ndarray, output_dir: Path, window_len: int) -> None:
+def save_plots(
+    zf_throughput: np.ndarray,
+    random_vmf_throughput: np.ndarray,
+    rl_results: dict[str, np.ndarray],
+    output_dir: Path,
+    window_len: int,
+) -> None:
+    rl_throughput = rl_results["throughput"]
+    reward = rl_results["reward"]
+    beat_zf = rl_results["beat_zf"]
+    sim_to_zf = rl_results["beam_similarity_to_zf"].mean(axis=1)
+    grad_norm = rl_results["grad_norm"]
+
     zf_avg = moving_average(zf_throughput, window_len)
     random_vmf_avg = moving_average(random_vmf_throughput, window_len)
     rl_avg = moving_average(rl_throughput, window_len)
     reward_avg = moving_average(reward, window_len)
+    beat_zf_avg = moving_average(beat_zf, window_len)
+    sim_avg = moving_average(sim_to_zf, window_len)
+    grad_norm_avg = moving_average(grad_norm, window_len)
 
     x_tput = np.arange(1, zf_avg.size + 1)
     x_reward = np.arange(1, reward_avg.size + 1)
@@ -270,29 +412,86 @@ def save_plots(zf_throughput: np.ndarray, random_vmf_throughput: np.ndarray, rl_
     fig2.savefig(output_dir / "single_policy_rl_reward_across_time.png", dpi=150)
     plt.close(fig2)
 
+    fig3, ax3 = plt.subplots(figsize=(8, 4.5))
+    ax3.plot(np.arange(1, beat_zf_avg.size + 1), beat_zf_avg, lw=1.5)
+    ax3.set_title("Fraction of Slots Where RL Beats ZF")
+    ax3.set_xlabel("Slot index")
+    ax3.set_ylabel("Moving-average fraction")
+    ax3.set_ylim(0.0, 1.0)
+    ax3.grid(True, alpha=0.35)
+    fig3.tight_layout()
+    fig3.savefig(output_dir / "single_policy_rl_fraction_beats_zf.png", dpi=150)
+    plt.close(fig3)
+
+    fig4, ax4 = plt.subplots(figsize=(8, 4.5))
+    ax4.plot(np.arange(1, sim_avg.size + 1), sim_avg, lw=1.5)
+    ax4.set_title("Mean Beam Similarity to ZF")
+    ax4.set_xlabel("Slot index")
+    ax4.set_ylabel("Cosine similarity")
+    ax4.set_ylim(0.0, 1.0)
+    ax4.grid(True, alpha=0.35)
+    fig4.tight_layout()
+    fig4.savefig(output_dir / "single_policy_rl_beam_similarity_to_zf.png", dpi=150)
+    plt.close(fig4)
+
+    fig5, ax5 = plt.subplots(figsize=(8, 4.5))
+    ax5.plot(np.arange(1, grad_norm_avg.size + 1), grad_norm_avg, lw=1.5)
+    ax5.set_title("Policy Gradient Norm Across Time")
+    ax5.set_xlabel("Slot index")
+    ax5.set_ylabel("Gradient norm")
+    ax5.grid(True, alpha=0.35)
+    fig5.tight_layout()
+    fig5.savefig(output_dir / "single_policy_rl_grad_norm.png", dpi=150)
+    plt.close(fig5)
+
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + single-policy RL")
+    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched single-policy RL")
     parser.add_argument("--num-slots", type=int, default=100000)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", type=Path, default=Path("results/simple_rl_precoder_design"))
-    parser.add_argument("--window-len", type=int, default=10000)
+    parser.add_argument("--window-len", type=int, default=1000)
+
+    # RL/training knobs.
+    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--lr-mu", type=float, default=3e-2)
+    parser.add_argument("--fixed-kappa", type=float, default=10.0)
+    parser.add_argument("--reward-baseline-beta", type=float, default=0.99)
+    parser.add_argument("--advantage-clip", type=float, default=1.0)
+    parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--init-scale-mu", type=float, default=1e-2)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    cfg = SimConfig(num_slots=args.num_slots, snr_db=args.snr_db, temporal_correlation=args.rho, seed=args.seed)
-    rl_cfg = RLConfig()
+    cfg = SimConfig(
+        num_slots=args.num_slots,
+        snr_db=args.snr_db,
+        temporal_correlation=args.rho,
+        seed=args.seed,
+    )
+    rl_cfg = RLConfig(
+        lr_mu=args.lr_mu,
+        fixed_kappa=args.fixed_kappa,
+        reward_baseline_beta=args.reward_baseline_beta,
+        advantage_clip=args.advantage_clip,
+        grad_clip_norm=args.grad_clip_norm,
+        init_scale_mu=args.init_scale_mu,
+        batch_size=args.batch_size,
+    )
 
     rng = np.random.default_rng(cfg.seed)
+    torch.manual_seed(cfg.seed)
+
     channels = simulate_channels(cfg, rng)
 
-    # keep DK as comparison baseline only
     zf_results = run_zf_baseline(cfg, channels)
-    random_vmf_results = run_random_vmf_baseline(cfg, channels, rng)
+    random_vmf_results = run_random_vmf_baseline(
+        cfg, channels, rng, fixed_kappa=rl_cfg.fixed_kappa
+    )
     rl_results = run_single_policy_rl(cfg, rl_cfg, channels, zf_results, rng)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -300,12 +499,18 @@ def main() -> None:
     np.save(args.output_dir / "random_vmf_baseline_throughput_trace.npy", random_vmf_results["throughput"])
     np.save(args.output_dir / "single_policy_rl_throughput_trace.npy", rl_results["throughput"])
     np.save(args.output_dir / "single_policy_rl_reward_trace.npy", rl_results["reward"])
+    np.save(args.output_dir / "single_policy_rl_advantage_trace.npy", rl_results["advantage"])
+    np.save(args.output_dir / "single_policy_rl_reward_baseline_trace.npy", rl_results["reward_baseline"])
+    np.save(args.output_dir / "single_policy_rl_kappa_trace.npy", rl_results["kappa"])
+    np.save(args.output_dir / "single_policy_rl_fraction_beats_zf_trace.npy", rl_results["beat_zf"])
+    np.save(args.output_dir / "single_policy_rl_beam_similarity_to_zf_trace.npy", rl_results["beam_similarity_to_zf"])
+    np.save(args.output_dir / "single_policy_rl_grad_norm_trace.npy", rl_results["grad_norm"])
+    np.save(args.output_dir / "single_policy_rl_loss_trace.npy", rl_results["loss"])
 
     save_plots(
         zf_throughput=zf_results["throughput"],
         random_vmf_throughput=random_vmf_results["throughput"],
-        rl_throughput=rl_results["throughput"],
-        reward=rl_results["reward"],
+        rl_results=rl_results,
         output_dir=args.output_dir,
         window_len=args.window_len,
     )
@@ -315,6 +520,9 @@ def main() -> None:
     print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Single-policy RL throughput   : {rl_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Single-policy RL reward       : {rl_results['reward'].mean():.4f}")
+    print(f"RL beats ZF fraction          : {rl_results['beat_zf'].mean():.4f}")
+    print(f"Mean beam similarity to ZF    : {rl_results['beam_similarity_to_zf'].mean():.4f}")
+    print(f"Mean grad norm                : {rl_results['grad_norm'].mean():.4f}")
 
 
 if __name__ == "__main__":
