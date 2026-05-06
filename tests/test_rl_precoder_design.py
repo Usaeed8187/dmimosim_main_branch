@@ -1,25 +1,3 @@
-"""Simple MU-MIMO ZF + hybrid RL precoder testbench (no dMIMO pipeline dependencies).
-
-Scenario:
-- N_t = 4 BS antennas
-- K = 2 users
-- N_r = 2 antennas per user
-- 1 stream per user
-
-What this script does:
-1) Simulate temporally correlated channels.
-2) Run a pure ZF policy using ideal PMI (full V_k from SVD) and record throughput.
-3) Run a hybrid contextual-bandit RL policy inspired by the provided LaTeX derivation:
-   - State: PMI feedback features
-   - Action: precoder sampled from a complex Gaussian learned policy
-   - DK branch: ZF-centered narrow Gaussian
-   - Mixture policy weight p = sigmoid(alpha)
-   - Hard constraint: total transmit-power (Frobenius) normalization for precoders
-   - Soft constraint: leakage penalty (no other penalties)
-   - Reward: throughput gain above ZF baseline (minus leakage penalty)
-4) Save plots/traces to disk.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -48,20 +26,31 @@ class RLConfig:
     reservoir_size: int = 64
     spectral_radius: float = 0.8
     input_scale: float = 0.15
-    sigma_eps: float = 1e-4
-    sigma_dk2: float = 1e-3
-    lr_mu: float = 8e-4
-    lr_sigma: float = 2e-4
-    lr_alpha: float = 5e-3
-    leakage_penalty_weight: float = 0.10
+    beta_zf: float = 2.0
+    kappa_min: float = 1e-3
+    kappa_dk: float = 50.0
+    lr_mu: float = 3e-4
+    lr_kappa: float = 1e-4
+    lr_alpha: float = 2e-3
     batch_size: int = 50
-    reward_ema_beta: float = 0.98
-    advantage_clip: float = 5.0
-    advantage_eps: float = 1e-6
+    rho_gamma: float = 0.7
+    max_resamples: int = 8
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
     return (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)) / np.sqrt(2.0)
 
+def normalize_columns_equal_power(precoder: np.ndarray, total_tx_power: float) -> np.ndarray:
+    k = precoder.shape[1]
+    p_col = total_tx_power / k
+    out = np.zeros_like(precoder)
+    for i in range(k):
+        col = precoder[:, i]
+        nrm = np.linalg.norm(col)
+        if nrm < 1e-12:
+            col = np.ones_like(col) / np.sqrt(col.size)
+            nrm = np.linalg.norm(col)
+        out[:, i] = np.sqrt(p_col) * (col / nrm)
+    return out
 
 def split_tanh(x: np.ndarray) -> np.ndarray:
     return np.tanh(np.real(x)) + 1j * np.tanh(np.imag(x))
@@ -83,7 +72,6 @@ def normalize_precoder_frobenius(precoder: np.ndarray, total_tx_power: float) ->
 
 
 def build_zf_precoder_from_pmi(full_vk_list: list[np.ndarray], streams_per_user: int, total_tx_power: float) -> np.ndarray:
-    """Build ZF precoder from user PMI matrices V_k."""
     selected_rows = []
     for vk in full_vk_list:
         vk_dom = vk[:, :streams_per_user]
@@ -91,11 +79,10 @@ def build_zf_precoder_from_pmi(full_vk_list: list[np.ndarray], streams_per_user:
 
     z_matrix = np.vstack(selected_rows)
     precoder = np.linalg.pinv(z_matrix)
-    return normalize_precoder_frobenius(precoder, total_tx_power=total_tx_power)
+    return normalize_columns_equal_power(precoder, total_tx_power)
 
 
 def compute_slot_sum_rate(user_channels: np.ndarray, precoder: np.ndarray, noise_power: float) -> tuple[float, np.ndarray]:
-    """Compute per-user SINR and slot sum-rate with one stream/user."""
     num_users = user_channels.shape[0]
     sinr = np.zeros(num_users, dtype=np.float64)
 
@@ -115,21 +102,7 @@ def compute_slot_sum_rate(user_channels: np.ndarray, precoder: np.ndarray, noise
 
     return float(np.sum(np.log2(1.0 + sinr))), sinr
 
-
-def compute_leakage(user_channels: np.ndarray, precoder: np.ndarray) -> float:
-    """Inter-user leakage penalty: sum_k sum_{j!=k} ||H_k p_j||^2."""
-    num_users = user_channels.shape[0]
-    leakage = 0.0
-    for k in range(num_users):
-        hk = user_channels[k]
-        for j in range(num_users):
-            if j != k:
-                leakage += np.linalg.norm(hk @ precoder[:, j]) ** 2
-    return float(leakage)
-
-
 def pmi_features_from_channels(user_channels: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
-    """Return PMI feature vector and full V_k list."""
     vk_list: list[np.ndarray] = []
     feature_parts = []
     for k in range(user_channels.shape[0]):
@@ -144,11 +117,7 @@ def pmi_features_from_channels(user_channels: np.ndarray) -> tuple[np.ndarray, l
 
 
 def simulate_channels(cfg: SimConfig, rng: np.random.Generator) -> np.ndarray:
-    """Generate channels for all slots: [T, K, N_r, N_t]."""
-    channels = np.zeros(
-        (cfg.num_slots, cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas),
-        dtype=np.complex128,
-    )
+    channels = np.zeros((cfg.num_slots, cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas), dtype=np.complex128)
 
     h_prev = complex_gaussian((cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas), rng)
     for t in range(cfg.num_slots):
@@ -180,45 +149,41 @@ def run_zf_baseline(cfg: SimConfig, channels: np.ndarray) -> dict[str, np.ndarra
         sinr_traces[t] = sinr
         precoders[t] = p_zf
 
-    return {
-        "throughput": throughput,
-        "sinr": sinr_traces,
-        "precoders": precoders,
-        "pmi_features": np.stack(pmi_features, axis=0),
-    }
+    return {"throughput": throughput, "sinr": sinr_traces, "precoders": precoders, "pmi_features": np.stack(pmi_features, axis=0)}
 
 
-def complex_diag_logpdf(x: np.ndarray, mu: np.ndarray, var: np.ndarray) -> float:
-    """Log-pdf of proper complex diagonal Gaussian CN(mu, diag(var))."""
-    quad = np.sum((np.abs(x - mu) ** 2) / var)
-    logdet = np.sum(np.log(var))
-    n = x.size
-    return float(-n * np.log(np.pi) - logdet - quad)
+def real_to_complex_beam(x: np.ndarray, total_tx_power: float, num_users: int) -> np.ndarray:
+    nt = x.size // 2
+    return np.sqrt(total_tx_power / num_users) * (x[:nt] + 1j * x[nt:])
+
+def complex_to_real_unit(p: np.ndarray, total_tx_power: float, num_users: int) -> np.ndarray:
+    scale = np.sqrt(total_tx_power / num_users)
+    x = np.concatenate([np.real(p), np.imag(p)], axis=0) / max(scale, 1e-12)
+    n = np.linalg.norm(x)
+    return x / max(n, 1e-12)
 
 
-def sample_complex_gaussian(mu: np.ndarray, var: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    noise = complex_gaussian(mu.shape, rng)
-    return mu + np.sqrt(var) * noise
+def sample_vmf(mu: np.ndarray, kappa: float, rng: np.random.Generator) -> np.ndarray:
+    z = rng.standard_normal(mu.shape)
+    y = kappa * mu + z
+    n = np.linalg.norm(y)
+    return y / max(n, 1e-12)
 
 
-def run_hybrid_rl(
-    cfg: SimConfig,
-    rl_cfg: RLConfig,
-    channels: np.ndarray,
-    zf_baseline: dict[str, np.ndarray],
-    rng: np.random.Generator,
-) -> dict[str, np.ndarray]:
-    """Online hybrid policy-gradient training with DK Gaussian branch."""
-    if cfg.streams_per_user != 1:
-        raise ValueError("This simple RL example supports streams_per_user=1 only.")
+def log_c_approx(d: int, kappa: float) -> float:
+    return (d / 2.0 - 1.0) * np.log(max(kappa, 1e-12)) - (d / 2.0) * np.log(2 * np.pi) - kappa
 
+
+def log_vmf(x: np.ndarray, mu: np.ndarray, kappa: float) -> float:
+    return float(log_c_approx(x.size, kappa) + kappa * np.dot(mu, x))
+
+
+def run_hybrid_rl(cfg: SimConfig, rl_cfg: RLConfig, channels: np.ndarray, zf_baseline: dict[str, np.ndarray], rng: np.random.Generator) -> dict[str, np.ndarray]:
     noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
-    num_streams = cfg.num_users * cfg.streams_per_user
-
-    # State/action dimensions.
     pmi_dim = zf_baseline["pmi_features"].shape[1]
-    action_dim = cfg.num_tx_antennas * num_streams
     nz = rl_cfg.reservoir_size
+    k = cfg.num_users
+    d = 2 * cfg.num_tx_antennas
 
     # Fixed ESN reservoir.
     win = rl_cfg.input_scale * complex_gaussian((nz, pmi_dim), rng)
@@ -227,24 +192,24 @@ def run_hybrid_rl(
     wres = (rl_cfg.spectral_radius / max(np.max(np.abs(eigvals)), 1e-12)) * wres
 
     # Trainable readout parameters.
-    w_mu = 0.05 * complex_gaussian((action_dim, nz), rng)
-    u_sigma = 0.01 * rng.standard_normal((action_dim, 2 * nz))
-    alpha = 1  # starts with moderate DK reuse and can adapt
+    w_mu = 1e-3 * rng.standard_normal((k, d, 2 * nz))
+    u_kappa = 1e-3 * rng.standard_normal((k, 2 * nz))
+    alpha = 1.0
 
     z_state = np.zeros(nz, dtype=np.complex128)
 
-    throughput = np.zeros(cfg.num_slots, dtype=np.float64)
-    reward_trace = np.zeros(cfg.num_slots, dtype=np.float64)
-    p_trace = np.zeros(cfg.num_slots, dtype=np.float64)
-    leak_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    throughput = np.zeros(cfg.num_slots)
+    reward_trace = np.zeros(cfg.num_slots)
+    p_trace = np.zeros(cfg.num_slots)
+    acceptance_trace = np.zeros(cfg.num_slots)
+    fallback_trace = np.zeros(cfg.num_slots)
+    attempts_trace = np.zeros(cfg.num_slots)
+    sinr_ratio_trace = np.zeros((cfg.num_slots, k))
 
-    dk_var = rl_cfg.sigma_dk2 * np.ones(action_dim, dtype=np.float64)
-    batch_size = max(int(rl_cfg.batch_size), 1)
-
-    batch_grad_w_mu = np.zeros_like(w_mu)
-    batch_grad_u_sigma = np.zeros_like(u_sigma)
-    batch_grad_alpha = 0.0
-    batch_count = 0
+    bg_w_mu = np.zeros_like(w_mu)
+    bg_u_kappa = np.zeros_like(u_kappa)
+    bg_alpha = 0.0
+    bcount = 0
 
     for t in range(cfg.num_slots):
 
@@ -255,109 +220,137 @@ def run_hybrid_rl(
         z_state = split_tanh(win @ y + wres @ z_state)
 
         # Learned Gaussian policy parameters.
-        mu = w_mu @ z_state
-        z_aug = np.concatenate([np.real(z_state), np.imag(z_state)], axis=0)
-        ell = u_sigma @ z_aug
-        sigma2 = softplus(ell) + rl_cfg.sigma_eps
+        z_aug = np.concatenate([np.real(z_state), np.imag(z_state)])
+        p_zf = normalize_columns_equal_power(zf_baseline["precoders"][t], cfg.total_tx_power)
+        _, sinr_zf = compute_slot_sum_rate(channels[t], p_zf, noise_power)
 
-        # DK branch centered at ZF precoder of this slot.
-        dk_mu = zf_baseline["precoders"][t].reshape(-1)
+        mu_zf = np.zeros((k, d))
+        for ku in range(k):
+            mu_zf[ku] = complex_to_real_unit(p_zf[:, ku], cfg.total_tx_power, k)
 
-        # Mixture policy parameter p.
-        p = float(sigmoid(alpha))
-        p = np.clip(p, 1e-6, 1 - 1e-6)
+        h = np.zeros((k, d))
+        mu_phi = np.zeros((k, d))
+        kappa_phi = np.zeros(k)
+        c_k = np.zeros(k)
+        for ku in range(k):
+            h[ku] = rl_cfg.beta_zf * mu_zf[ku] + w_mu[ku] @ z_aug
+            h_n = np.linalg.norm(h[ku])
+            mu_phi[ku] = h[ku] / max(h_n, 1e-12)
+            c_k[ku] = u_kappa[ku] @ z_aug
+            kappa_phi[ku] = float(softplus(np.array([c_k[ku]]))[0] + rl_cfg.kappa_min)
 
-        # Sample action from mixture of two complex Gaussians.
-        if rng.random() < p:
-            action_vec_raw = sample_complex_gaussian(mu, sigma2, rng)
-        else:
-            action_vec_raw = sample_complex_gaussian(dk_mu, dk_var, rng)
-
-        # Hard constraint: total transmit power normalization.
-        action_precoder = action_vec_raw.reshape(cfg.num_tx_antennas, num_streams)
-        action_precoder = normalize_precoder_frobenius(action_precoder, cfg.total_tx_power)
-
-        # Environment throughput and leakage.
-        rate_rl, _ = compute_slot_sum_rate(channels[t], action_precoder, noise_power)
-        leakage = compute_leakage(channels[t], action_precoder)
-        reward = (rate_rl - zf_baseline["throughput"][t]) - rl_cfg.leakage_penalty_weight * leakage
-
-        # Use the normalized action for policy-gradient likelihood as well.
-        action_vec = action_precoder.reshape(-1)
-
-        # Mixture log-density terms.
-        log_pi_phi = complex_diag_logpdf(action_vec, mu, sigma2)
-        log_pi_dk = complex_diag_logpdf(action_vec, dk_mu, dk_var)
-
-        log_num_phi = np.log(p) + log_pi_phi
-        log_num_dk = np.log(1 - p) + log_pi_dk
-        m = max(log_num_phi, log_num_dk)
-        log_pi_theta = m + np.log(np.exp(log_num_phi - m) + np.exp(log_num_dk - m))
-
-        # Responsibility weight w_t = p*pi_phi / pi_theta.
-        w_t = np.exp(log_num_phi - log_pi_theta)
-
-        # ----- Policy gradients from the LaTeX derivation -----
-        err = action_vec - mu
-        inv_sigma2 = 1.0 / sigma2
-
-        # d/dW_mu* log pi_theta = w_t * Sigma^-1 (a-mu) z^H
-        grad_w_mu_log = w_t * np.outer(inv_sigma2 * err, np.conj(z_state))
-
-        # d/dU_sigma log pi_theta = w_t * delta * z_aug^T
-        abs_err2 = np.abs(err) ** 2
-        delta = ((-inv_sigma2) + (abs_err2 * (inv_sigma2**2))) * sigmoid(ell)
-        grad_u_sigma_log = w_t * np.outer(delta, z_aug)
-
-        # d/dalpha log pi_theta = p(1-p) * (pi_phi - pi_dk)/pi_theta
-        # Numerically stable equivalent:
-        # (pi_phi/pi_theta) = w_t/p, (pi_dk/pi_theta) = (1-w_t)/(1-p)
-        dlog_dp = (w_t / p) - ((1 - w_t) / (1 - p))
-        grad_alpha_log = p * (1 - p) * dlog_dp
-
-        # Reward-weighted policy-gradient contributions (advantage = reward).
-        grad_w_mu_contrib = reward * grad_w_mu_log
-        grad_u_sigma_contrib = reward * grad_u_sigma_log
-        grad_alpha_contrib = reward * grad_alpha_log
-
-        batch_grad_w_mu += grad_w_mu_contrib
-        batch_grad_u_sigma += grad_u_sigma_contrib
-        batch_grad_alpha += grad_alpha_contrib
-        batch_count += 1
-
-        # Apply averaged batch update every B slots.
-        if batch_count == batch_size:
-            scale = 1.0 / batch_count
-            w_mu += rl_cfg.lr_mu * scale * batch_grad_w_mu
-            u_sigma += rl_cfg.lr_sigma * scale * batch_grad_u_sigma
-            alpha += rl_cfg.lr_alpha * scale * batch_grad_alpha
-
-            batch_grad_w_mu.fill(0.0)
-            batch_grad_u_sigma.fill(0.0)
-            batch_grad_alpha = 0.0
-            batch_count = 0
-        throughput[t] = rate_rl
-        reward_trace[t] = reward
+        p = float(np.clip(sigmoid(alpha), 1e-6, 1 - 1e-6))
         p_trace[t] = p
-        leak_trace[t] = leakage
 
-    # Flush last partial batch.
-    if batch_count > 0:
-        scale = 1.0 / batch_count
-        w_mu += rl_cfg.lr_mu * scale * batch_grad_w_mu
-        u_sigma += rl_cfg.lr_sigma * scale * batch_grad_u_sigma
-        alpha += rl_cfg.lr_alpha * scale * batch_grad_alpha
+        accepted = False
+        chosen = None
+        chosen_x = None
+        chosen_from_phi = False
+        for m in range(1, rl_cfg.max_resamples + 1):
+            from_phi = rng.random() < p
+            xs = np.zeros((k, d))
+            for ku in range(k):
+                if from_phi:
+                    xs[ku] = sample_vmf(mu_phi[ku], kappa_phi[ku], rng)
+                else:
+                    xs[ku] = sample_vmf(mu_zf[ku], rl_cfg.kappa_dk, rng)
+
+            p_cand = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
+            for ku in range(k):
+                p_cand[:, ku] = real_to_complex_beam(xs[ku], cfg.total_tx_power, k)
+
+            _, sinr_cand = compute_slot_sum_rate(channels[t], p_cand, noise_power)
+            ratios = sinr_cand / np.maximum(sinr_zf, 1e-12)
+            if np.all(sinr_cand >= rl_cfg.rho_gamma * sinr_zf):
+                accepted = True
+                chosen = p_cand
+                chosen_x = xs
+                chosen_from_phi = from_phi
+                attempts_trace[t] = m
+                sinr_ratio_trace[t] = ratios
+                break
+
+        if not accepted:
+            chosen = p_zf
+            attempts_trace[t] = rl_cfg.max_resamples
+            fallback_trace[t] = 1.0
+            _, sinr_exec = compute_slot_sum_rate(channels[t], chosen, noise_power)
+            sinr_ratio_trace[t] = sinr_exec / np.maximum(sinr_zf, 1e-12)
+
+        rate_exec, _ = compute_slot_sum_rate(channels[t], chosen, noise_power)
+        reward = rate_exec - zf_baseline["throughput"][t]
+        throughput[t] = rate_exec
+        reward_trace[t] = reward
+        acceptance_trace[t] = 1.0 if accepted else 0.0
+
+        if accepted and reward != 0.0:
+            log_pi_phi = 0.0
+            log_pi_dk = 0.0
+            for ku in range(k):
+                xk = chosen_x[ku]
+                log_pi_phi += log_vmf(xk, mu_phi[ku], kappa_phi[ku])
+                log_pi_dk += log_vmf(xk, mu_zf[ku], rl_cfg.kappa_dk)
+
+            lphi = np.log(p) + log_pi_phi
+            ldk = np.log(1 - p) + log_pi_dk
+            m = max(lphi, ldk)
+            log_q = m + np.log(np.exp(lphi - m) + np.exp(ldk - m))
+            w_t = np.exp(lphi - log_q)
+
+            for ku in range(k):
+                xk = chosen_x[ku]
+                hk = h[ku]
+                mu_k = mu_phi[ku]
+                hk_norm = np.linalg.norm(hk)
+                proj = np.eye(d) - np.outer(mu_k, mu_k)
+                grad_h = (kappa_phi[ku] / max(hk_norm, 1e-12)) * (proj @ xk)
+                bg_w_mu[ku] += reward * w_t * np.outer(grad_h, z_aug)
+
+                a_d = 1.0 - (d - 1) / max(2.0 * kappa_phi[ku], 1e-6)
+                grad_c = ((mu_k @ xk) - a_d) * sigmoid(c_k[ku])
+                bg_u_kappa[ku] += reward * w_t * grad_c * z_aug
+
+            bg_alpha += reward * (w_t - p)
+            bcount += 1
+
+        if bcount == rl_cfg.batch_size:
+            s = 1.0 / bcount
+            w_mu += rl_cfg.lr_mu * s * bg_w_mu
+            u_kappa += rl_cfg.lr_kappa * s * bg_u_kappa
+            alpha += rl_cfg.lr_alpha * s * bg_alpha
+            bg_w_mu.fill(0.0)
+            bg_u_kappa.fill(0.0)
+            bg_alpha = 0.0
+            bcount = 0
+
+    if bcount > 0:
+        s = 1.0 / bcount
+        w_mu += rl_cfg.lr_mu * s * bg_w_mu
+        u_kappa += rl_cfg.lr_kappa * s * bg_u_kappa
+        alpha += rl_cfg.lr_alpha * s * bg_alpha
 
     return {
         "throughput": throughput,
         "reward": reward_trace,
         "p_trace": p_trace,
-        "leakage": leak_trace,
+        "acceptance": acceptance_trace,
+        "fallback": fallback_trace,
+        "attempts": attempts_trace,
+        "sinr_ratio": sinr_ratio_trace,
     }
 
 
 def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.ndarray], output_dir: Path) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    np.save(output_dir / "zf_throughput_trace.npy", zf_results["throughput"])
+    np.save(output_dir / "hybrid_rl_throughput_trace.npy", rl_results["throughput"])
+    np.save(output_dir / "hybrid_rl_reward_trace.npy", rl_results["reward"])
+    np.save(output_dir / "hybrid_rl_learned_policy_probability_trace.npy", rl_results["p_trace"])
+    np.save(output_dir / "hybrid_rl_acceptance_trace.npy", rl_results["acceptance"])
+    np.save(output_dir / "hybrid_rl_fallback_trace.npy", rl_results["fallback"])
+    np.save(output_dir / "hybrid_rl_attempts_trace.npy", rl_results["attempts"])
+    np.save(output_dir / "hybrid_rl_sinr_ratio_trace.npy", rl_results["sinr_ratio"])
 
     zf_tput = zf_results["throughput"]
     rl_tput = rl_results["throughput"]
@@ -369,15 +362,7 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
     learned_policy_prob_trace = output_dir / "hybrid_rl_learned_policy_probability_trace.npy"
     domain_knowledge_prob_trace = output_dir / "hybrid_rl_domain_knowledge_probability_trace.npy"
 
-
-    np.save(zf_trace, zf_tput)
-    np.save(rl_trace, rl_tput)
-    np.save(reward_trace, rl_results["reward"])
-    np.save(learned_policy_prob_trace, rl_results["p_trace"])
-    np.save(domain_knowledge_prob_trace, 1.0 - rl_results["p_trace"])
-
-
-    w_len = 1000
+    w_len = 10000
     zf_tput_avg = np.convolve(zf_tput, np.ones(w_len) / w_len, mode='valid')
     rl_tput_avg = np.convolve(rl_tput, np.ones(w_len) / w_len, mode='valid')
     reward_avg = np.convolve(rl_results["reward"], np.ones(w_len) / w_len, mode='valid')
@@ -452,31 +437,20 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF + hybrid RL precoder testbench")
-    parser.add_argument("--num-slots", type=int, default=100000, help="Number of simulated time slots")
-    parser.add_argument("--snr-db", type=float, default=15.0, help="SNR in dB")
-    parser.add_argument("--rho", type=float, default=0.95, help="Temporal channel correlation coefficient")
-    parser.add_argument("--seed", type=int, default=7, help="Random seed")
-    parser.add_argument("--reservoir-size", type=int, default=64, help="Fixed ESN reservoir size")
-    parser.add_argument("--leakage-weight", type=float, default=0.00, help="Leakage penalty weight in RL reward")
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("results/simple_zf_hybrid_rl_testbench"),
-        help="Directory to save traces and plots",
-    )
+    parser.add_argument("--num-slots", type=int, default=100000)
+    parser.add_argument("--snr-db", type=float, default=15.0)
+    parser.add_argument("--rho", type=float, default=0.95)
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--reservoir-size", type=int, default=64)
+    parser.add_argument("--output-dir", type=Path, default=Path("results/simple_zf_hybrid_rl_testbench"))
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
 
-    cfg = SimConfig(
-        num_slots=args.num_slots,
-        snr_db=args.snr_db,
-        temporal_correlation=args.rho,
-        seed=args.seed,
-    )
-    rl_cfg = RLConfig(reservoir_size=args.reservoir_size, leakage_penalty_weight=args.leakage_weight)
+    cfg = SimConfig(num_slots=args.num_slots, snr_db=args.snr_db, temporal_correlation=args.rho, seed=args.seed)
+    rl_cfg = RLConfig(reservoir_size=args.reservoir_size)
 
     rng = np.random.default_rng(cfg.seed)
     channels = simulate_channels(cfg, rng)
@@ -496,6 +470,7 @@ def main() -> None:
     print("Saved artifacts:")
     for name, path in out.items():
         print(f"  - {name}: {path}")
+    save_results(zf_results, rl_results, args.output_dir)
 
 
 if __name__ == "__main__":
