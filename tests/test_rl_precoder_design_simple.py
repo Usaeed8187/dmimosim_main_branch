@@ -118,6 +118,24 @@ def real_to_complex_beam(x: np.ndarray, total_tx_power: float, num_users: int) -
     nt = x.size // 2
     return np.sqrt(total_tx_power / num_users) * (x[:nt] + 1j * x[nt:])
 
+def run_random_vmf_baseline(cfg: SimConfig, channels: np.ndarray, rng: np.random.Generator) -> dict[str, np.ndarray]:
+    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    throughput = np.zeros(cfg.num_slots, dtype=np.float64)
+    k = cfg.num_users
+    d = 2 * cfg.num_tx_antennas
+
+    for t in range(cfg.num_slots):
+        print(f"Random vMF Slot {t + 1} / {cfg.num_slots}", end="\r")
+        beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
+        for ku in range(k):
+            mu = unit_norm(rng.standard_normal(d))
+            kappa = float(rng.uniform(1e-3, 10.0))
+            x_sample = sample_vmf(mu, kappa, rng)
+            beams[:, ku] = real_to_complex_beam(x_sample, cfg.total_tx_power, k)
+        throughput[t], _ = compute_slot_sum_rate(channels[t], beams, noise_power)
+
+    print()
+    return {"throughput": throughput}
 
 def sample_vmf(mu: np.ndarray, kappa: float, rng: np.random.Generator) -> np.ndarray:
     return unit_norm(kappa * mu + rng.standard_normal(mu.shape))
@@ -173,8 +191,9 @@ def moving_average(trace: np.ndarray, window_len: int) -> np.ndarray:
     return np.convolve(trace, kernel, mode="valid")
 
 
-def save_plots(zf_throughput: np.ndarray, rl_throughput: np.ndarray, reward: np.ndarray, output_dir: Path, window_len: int) -> None:
+def save_plots(zf_throughput: np.ndarray, random_vmf_throughput: np.ndarray, rl_throughput: np.ndarray, reward: np.ndarray, output_dir: Path, window_len: int) -> None:
     zf_avg = moving_average(zf_throughput, window_len)
+    random_vmf_avg = moving_average(random_vmf_throughput, window_len)
     rl_avg = moving_average(rl_throughput, window_len)
     reward_avg = moving_average(reward, window_len)
 
@@ -183,6 +202,7 @@ def save_plots(zf_throughput: np.ndarray, rl_throughput: np.ndarray, reward: np.
 
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
     ax1.plot(x_tput, zf_avg, lw=1.5, label="ZF baseline")
+    ax1.plot(x_tput, random_vmf_avg, lw=1.5, label="Random vMF baseline")
     ax1.plot(x_tput, rl_avg, lw=1.5, label="Single-policy RL")
     ax1.set_title("Throughput Across Time")
     ax1.set_xlabel("Slot index")
@@ -225,15 +245,18 @@ def main() -> None:
 
     # keep DK as comparison baseline only
     zf_results = run_zf_baseline(cfg, channels)
+    random_vmf_results = run_random_vmf_baseline(cfg, channels, rng)
     rl_results = run_single_policy_rl(cfg, rl_cfg, channels, zf_results, rng)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.output_dir / "zf_throughput_trace.npy", zf_results["throughput"])
+    np.save(args.output_dir / "random_vmf_baseline_throughput_trace.npy", random_vmf_results["throughput"])
     np.save(args.output_dir / "single_policy_rl_throughput_trace.npy", rl_results["throughput"])
     np.save(args.output_dir / "single_policy_rl_reward_trace.npy", rl_results["reward"])
 
     save_plots(
         zf_throughput=zf_results["throughput"],
+        random_vmf_throughput=random_vmf_results["throughput"],
         rl_throughput=rl_results["throughput"],
         reward=rl_results["reward"],
         output_dir=args.output_dir,
@@ -242,6 +265,7 @@ def main() -> None:
 
     print("Simple RL precoder design run finished.")
     print(f"ZF average throughput         : {zf_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Single-policy RL throughput   : {rl_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Single-policy RL reward       : {rl_results['reward'].mean():.4f}")
 
