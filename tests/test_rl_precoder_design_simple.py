@@ -24,13 +24,16 @@ class SimConfig:
 
 @dataclass
 class RLConfig:
-    lr_mu: float = 3e-3
+    lr_out: float = 3e-2
     fixed_kappa: float = 10.0
     reward_baseline_beta: float = 0.99
     advantage_clip: float = 1.0
     grad_clip_norm: float = 1.0
-    init_scale_mu: float = 1e-2
-    batch_size: int = 64
+    init_scale_out: float = 1e-2
+    batch_size: int = 512
+    reservoir_size: int = 128
+    spectral_radius: float = 0.8
+    input_scale: float = 0.15
 
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
@@ -157,7 +160,6 @@ def beam_similarity(p_a: np.ndarray, p_b: np.ndarray) -> np.ndarray:
 
 
 def _sample_weight_vmf(dim: int, kappa: float, rng: np.random.Generator) -> float:
-    # Wood (1994)-style rejection sampler for the scalar projection along the mean.
     b = (-2.0 * kappa + np.sqrt(4.0 * kappa**2 + (dim - 1) ** 2)) / (dim - 1)
     x0 = (1.0 - b) / (1.0 + b)
     c = kappa * x0 + (dim - 1) * np.log(1.0 - x0**2)
@@ -188,7 +190,6 @@ def sample_vmf(mu: np.ndarray, kappa: float, rng: np.random.Generator) -> np.nda
         orth[0] *= -1.0
         return orth
 
-    # Householder rotation taking e1 to mu.
     u = unit_norm(e1 - mu)
     return orth - 2.0 * np.dot(u, orth) * u
 
@@ -214,18 +215,54 @@ def run_random_vmf_baseline(
     return {"throughput": throughput}
 
 
+def split_tanh_np(x: np.ndarray) -> np.ndarray:
+    return np.tanh(np.real(x)) + 1j * np.tanh(np.imag(x))
+
+
+def make_fixed_esn(
+    feat_dim: int, reservoir_size: int, spectral_radius: float, input_scale: float, rng: np.random.Generator
+) -> tuple[np.ndarray, np.ndarray]:
+    w_in = input_scale * complex_gaussian((reservoir_size, feat_dim), rng)
+    w_res = complex_gaussian((reservoir_size, reservoir_size), rng)
+    eigvals = np.linalg.eigvals(w_res)
+    w_res = (spectral_radius / max(np.max(np.abs(eigvals)), 1e-12)) * w_res
+    return w_in, w_res
+
+
+def compute_esn_states(pmi_features: np.ndarray, rl_cfg: RLConfig, rng: np.random.Generator) -> np.ndarray:
+    """Compute fixed ESN states from all-UE PMI features.
+
+    The ESN is fixed. Only W_out is trained by the RL algorithm.
+    State feature used by W_out is [Re{z_t}, Im{z_t}, 1].
+    """
+    num_slots, feat_dim = pmi_features.shape
+    nz = rl_cfg.reservoir_size
+    w_in, w_res = make_fixed_esn(
+        feat_dim=feat_dim,
+        reservoir_size=nz,
+        spectral_radius=rl_cfg.spectral_radius,
+        input_scale=rl_cfg.input_scale,
+        rng=rng,
+    )
+
+    z = np.zeros(nz, dtype=np.complex128)
+    states = np.zeros((num_slots, 2 * nz + 1), dtype=np.float64)
+    for t in range(num_slots):
+        y = pmi_features[t]
+        z = split_tanh_np(w_in @ y + w_res @ z)
+        states[t, :-1] = np.concatenate([np.real(z), np.imag(z)])
+        states[t, -1] = 1.0
+    return states
+
+
 def vmf_log_prob_fixed_kappa_torch(
     x: torch.Tensor, mu: torch.Tensor, fixed_kappa: float
 ) -> torch.Tensor:
-    """vMF log probability up to a constant when kappa is fixed.
-
-    log p(x | mu, kappa) = log C_d(kappa) + kappa * mu^T x.
-    Since kappa is fixed here, log C_d(kappa) is constant w.r.t. trainable parameters.
-    """
+    """vMF log probability up to a constant when kappa is fixed."""
     return fixed_kappa * torch.sum(mu * x, dim=-1)
 
 
-def run_single_policy_rl(
+def run_esn_policy_rl(
     cfg: SimConfig,
     rl_cfg: RLConfig,
     channels: np.ndarray,
@@ -233,14 +270,18 @@ def run_single_policy_rl(
     rng: np.random.Generator,
 ) -> dict[str, np.ndarray]:
     noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
-    feat_dim = zf_baseline["pmi_features"].shape[1]
     k = cfg.num_users
     d = 2 * cfg.num_tx_antennas
 
-    # Persistent PyTorch parameter and optimizer.
-    w_mu_init = rl_cfg.init_scale_mu * rng.standard_normal((k, d, feat_dim))
-    w_mu = torch.nn.Parameter(torch.tensor(w_mu_init, dtype=torch.float64))
-    optimizer = torch.optim.Adam([w_mu], lr=rl_cfg.lr_mu)
+    # Shared ESN state generated from the PMI feedback of all UEs.
+    esn_states = compute_esn_states(zf_baseline["pmi_features"], rl_cfg, rng)
+    state_dim = esn_states.shape[1]
+
+    # W_out maps shared ESN state to all UE vMF mean logits, shape [K, D, N_z_aug].
+    # This is the only trainable policy parameter in this fixed-reservoir ESN setup.
+    w_out_init = rl_cfg.init_scale_out * rng.standard_normal((k, d, state_dim))
+    w_out = torch.nn.Parameter(torch.tensor(w_out_init, dtype=torch.float64))
+    optimizer = torch.optim.Adam([w_out], lr=rl_cfg.lr_out)
 
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     reward_trace = np.zeros(cfg.num_slots, dtype=np.float64)
@@ -252,35 +293,33 @@ def run_single_policy_rl(
     grad_norm_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     loss_trace = np.zeros(cfg.num_slots, dtype=np.float64)
 
-    reward_baseline = 0.0
-    batch_y: list[np.ndarray] = []
+    reward_baseline: float | None = None
+    batch_s: list[np.ndarray] = []
     batch_x: list[np.ndarray] = []
     batch_adv: list[float] = []
     batch_indices: list[int] = []
 
     def flush_batch() -> None:
-        nonlocal batch_y, batch_x, batch_adv, batch_indices
-        if not batch_y:
+        nonlocal batch_s, batch_x, batch_adv, batch_indices
+        if not batch_s:
             return
 
-        y_batch = torch.tensor(np.stack(batch_y, axis=0), dtype=torch.float64)
+        s_batch = torch.tensor(np.stack(batch_s, axis=0), dtype=torch.float64)
         x_batch = torch.tensor(np.stack(batch_x, axis=0), dtype=torch.float64)
         adv_batch = torch.tensor(np.array(batch_adv), dtype=torch.float64)
 
-        # Recompute current policy log-probabilities for the sampled actions.
-        # Shape: logits/mu = [B, K, D]
-        logits = torch.einsum("kdf,bf->bkd", w_mu, y_batch)
+        # Recompute log probabilities under the current W_out for REINFORCE.
+        # logits/mu shape: [B, K, D]
+        logits = torch.einsum("kdn,bn->bkd", w_out, s_batch)
         mu = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
 
-        per_user_log_prob = vmf_log_prob_fixed_kappa_torch(
-            x_batch, mu, rl_cfg.fixed_kappa
-        )
+        per_user_log_prob = vmf_log_prob_fixed_kappa_torch(x_batch, mu, rl_cfg.fixed_kappa)
         joint_log_prob = torch.sum(per_user_log_prob, dim=1)
         loss = -torch.mean(adv_batch * joint_log_prob)
 
         optimizer.zero_grad()
         loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_([w_mu], rl_cfg.grad_clip_norm)
+        grad_norm = torch.nn.utils.clip_grad_norm_([w_out], rl_cfg.grad_clip_norm)
         optimizer.step()
 
         loss_value = float(loss.detach().cpu().item())
@@ -289,20 +328,19 @@ def run_single_policy_rl(
             loss_trace[idx] = loss_value
             grad_norm_trace[idx] = grad_norm_value
 
-        batch_y = []
+        batch_s = []
         batch_x = []
         batch_adv = []
         batch_indices = []
 
     for t in range(cfg.num_slots):
-        print(f"RL Slot {t + 1} / {cfg.num_slots}", end="\r")
-        y = zf_baseline["pmi_features"][t]
+        print(f"ESN-RL Slot {t + 1} / {cfg.num_slots}", end="\r")
+        s = esn_states[t]
 
-        # Sample action from the current policy. Sampling is non-differentiable; REINFORCE
-        # uses the sampled action's log-probability during the batch update below.
-        y_t = torch.tensor(y, dtype=torch.float64)
+        # All users' vMF means are produced from the same shared ESN state.
+        s_t = torch.tensor(s, dtype=torch.float64)
         with torch.no_grad():
-            logits = torch.einsum("kdf,f->kd", w_mu, y_t)
+            logits = torch.einsum("kdn,n->kd", w_out, s_t)
             mu_t = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
             mu_np = mu_t.detach().cpu().numpy()
 
@@ -315,13 +353,12 @@ def run_single_policy_rl(
         rate, _ = compute_slot_sum_rate(channels[t], beams, noise_power)
         reward = rate - zf_baseline["throughput"][t]
 
+        if reward_baseline is None:
+            reward_baseline = reward
         advantage = reward - reward_baseline
         if rl_cfg.advantage_clip > 0:
-            advantage = float(
-                np.clip(advantage, -rl_cfg.advantage_clip, rl_cfg.advantage_clip)
-            )
+            advantage = float(np.clip(advantage, -rl_cfg.advantage_clip, rl_cfg.advantage_clip))
 
-        # Update running baseline after computing the advantage for this action.
         reward_baseline = (
             rl_cfg.reward_baseline_beta * reward_baseline
             + (1.0 - rl_cfg.reward_baseline_beta) * reward
@@ -334,12 +371,12 @@ def run_single_policy_rl(
         beat_zf_trace[t] = 1.0 if rate > zf_baseline["throughput"][t] else 0.0
         beam_similarity_trace[t] = beam_similarity(beams, zf_baseline["precoders"][t])
 
-        batch_y.append(y)
+        batch_s.append(s)
         batch_x.append(x_sample)
         batch_adv.append(advantage)
         batch_indices.append(t)
 
-        if len(batch_y) >= rl_cfg.batch_size:
+        if len(batch_s) >= rl_cfg.batch_size:
             flush_batch()
 
     flush_batch()
@@ -355,6 +392,7 @@ def run_single_policy_rl(
         "beam_similarity_to_zf": beam_similarity_trace,
         "grad_norm": grad_norm_trace,
         "loss": loss_trace,
+        "esn_states": esn_states,
     }
 
 
@@ -392,35 +430,35 @@ def save_plots(
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
     ax1.plot(x_tput, zf_avg, lw=1.5, label="ZF baseline")
     ax1.plot(x_tput, random_vmf_avg, lw=1.5, label="Random vMF baseline")
-    ax1.plot(x_tput, rl_avg, lw=1.5, label="Single-policy RL")
+    ax1.plot(x_tput, rl_avg, lw=1.5, label="ESN-vMF RL")
     ax1.set_title("Throughput Across Time")
     ax1.set_xlabel("Slot index")
     ax1.set_ylabel("Sum-rate [bits/s/Hz]")
     ax1.grid(True, alpha=0.35)
     ax1.legend(loc="best")
     fig1.tight_layout()
-    fig1.savefig(output_dir / "throughput_across_time_zf_vs_single_policy_rl.png", dpi=150)
+    fig1.savefig(output_dir / "throughput_across_time_zf_vs_esn_vmf_rl.png", dpi=150)
     plt.close(fig1)
 
     fig2, ax2 = plt.subplots(figsize=(8, 4.5))
     ax2.plot(x_reward, reward_avg, lw=1.5)
-    ax2.set_title("Single-policy RL Reward Across Time")
+    ax2.set_title("ESN-vMF RL Reward Across Time")
     ax2.set_xlabel("Slot index")
     ax2.set_ylabel("Reward vs ZF")
     ax2.grid(True, alpha=0.35)
     fig2.tight_layout()
-    fig2.savefig(output_dir / "single_policy_rl_reward_across_time.png", dpi=150)
+    fig2.savefig(output_dir / "esn_vmf_rl_reward_across_time.png", dpi=150)
     plt.close(fig2)
 
     fig3, ax3 = plt.subplots(figsize=(8, 4.5))
     ax3.plot(np.arange(1, beat_zf_avg.size + 1), beat_zf_avg, lw=1.5)
-    ax3.set_title("Fraction of Slots Where RL Beats ZF")
+    ax3.set_title("Fraction of Slots Where ESN-vMF RL Beats ZF")
     ax3.set_xlabel("Slot index")
     ax3.set_ylabel("Moving-average fraction")
     ax3.set_ylim(0.0, 1.0)
     ax3.grid(True, alpha=0.35)
     fig3.tight_layout()
-    fig3.savefig(output_dir / "single_policy_rl_fraction_beats_zf.png", dpi=150)
+    fig3.savefig(output_dir / "esn_vmf_rl_fraction_beats_zf.png", dpi=150)
     plt.close(fig3)
 
     fig4, ax4 = plt.subplots(figsize=(8, 4.5))
@@ -431,7 +469,7 @@ def save_plots(
     ax4.set_ylim(0.0, 1.0)
     ax4.grid(True, alpha=0.35)
     fig4.tight_layout()
-    fig4.savefig(output_dir / "single_policy_rl_beam_similarity_to_zf.png", dpi=150)
+    fig4.savefig(output_dir / "esn_vmf_rl_beam_similarity_to_zf.png", dpi=150)
     plt.close(fig4)
 
     fig5, ax5 = plt.subplots(figsize=(8, 4.5))
@@ -441,27 +479,32 @@ def save_plots(
     ax5.set_ylabel("Gradient norm")
     ax5.grid(True, alpha=0.35)
     fig5.tight_layout()
-    fig5.savefig(output_dir / "single_policy_rl_grad_norm.png", dpi=150)
+    fig5.savefig(output_dir / "esn_vmf_rl_grad_norm.png", dpi=150)
     plt.close(fig5)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched single-policy RL")
+    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched ESN-vMF RL")
     parser.add_argument("--num-slots", type=int, default=100000)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/simple_rl_precoder_design"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/simple_esn_vmf_rl_precoder_design"))
     parser.add_argument("--window-len", type=int, default=1000)
+
+    # ESN knobs. W_in and W_res are fixed; only W_out is learned.
+    parser.add_argument("--reservoir-size", type=int, default=128)
+    parser.add_argument("--spectral-radius", type=float, default=0.8)
+    parser.add_argument("--input-scale", type=float, default=0.15)
 
     # RL/training knobs.
     parser.add_argument("--batch-size", type=int, default=512)
-    parser.add_argument("--lr-mu", type=float, default=3e-2)
+    parser.add_argument("--lr-out", type=float, default=3e-2)
     parser.add_argument("--fixed-kappa", type=float, default=10.0)
     parser.add_argument("--reward-baseline-beta", type=float, default=0.99)
     parser.add_argument("--advantage-clip", type=float, default=1.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
-    parser.add_argument("--init-scale-mu", type=float, default=1e-2)
+    parser.add_argument("--init-scale-out", type=float, default=1e-2)
     return parser.parse_args()
 
 
@@ -474,13 +517,16 @@ def main() -> None:
         seed=args.seed,
     )
     rl_cfg = RLConfig(
-        lr_mu=args.lr_mu,
+        lr_out=args.lr_out,
         fixed_kappa=args.fixed_kappa,
         reward_baseline_beta=args.reward_baseline_beta,
         advantage_clip=args.advantage_clip,
         grad_clip_norm=args.grad_clip_norm,
-        init_scale_mu=args.init_scale_mu,
+        init_scale_out=args.init_scale_out,
         batch_size=args.batch_size,
+        reservoir_size=args.reservoir_size,
+        spectral_radius=args.spectral_radius,
+        input_scale=args.input_scale,
     )
 
     rng = np.random.default_rng(cfg.seed)
@@ -492,20 +538,21 @@ def main() -> None:
     random_vmf_results = run_random_vmf_baseline(
         cfg, channels, rng, fixed_kappa=rl_cfg.fixed_kappa
     )
-    rl_results = run_single_policy_rl(cfg, rl_cfg, channels, zf_results, rng)
+    rl_results = run_esn_policy_rl(cfg, rl_cfg, channels, zf_results, rng)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.output_dir / "zf_throughput_trace.npy", zf_results["throughput"])
     np.save(args.output_dir / "random_vmf_baseline_throughput_trace.npy", random_vmf_results["throughput"])
-    np.save(args.output_dir / "single_policy_rl_throughput_trace.npy", rl_results["throughput"])
-    np.save(args.output_dir / "single_policy_rl_reward_trace.npy", rl_results["reward"])
-    np.save(args.output_dir / "single_policy_rl_advantage_trace.npy", rl_results["advantage"])
-    np.save(args.output_dir / "single_policy_rl_reward_baseline_trace.npy", rl_results["reward_baseline"])
-    np.save(args.output_dir / "single_policy_rl_kappa_trace.npy", rl_results["kappa"])
-    np.save(args.output_dir / "single_policy_rl_fraction_beats_zf_trace.npy", rl_results["beat_zf"])
-    np.save(args.output_dir / "single_policy_rl_beam_similarity_to_zf_trace.npy", rl_results["beam_similarity_to_zf"])
-    np.save(args.output_dir / "single_policy_rl_grad_norm_trace.npy", rl_results["grad_norm"])
-    np.save(args.output_dir / "single_policy_rl_loss_trace.npy", rl_results["loss"])
+    np.save(args.output_dir / "esn_vmf_rl_throughput_trace.npy", rl_results["throughput"])
+    np.save(args.output_dir / "esn_vmf_rl_reward_trace.npy", rl_results["reward"])
+    np.save(args.output_dir / "esn_vmf_rl_advantage_trace.npy", rl_results["advantage"])
+    np.save(args.output_dir / "esn_vmf_rl_reward_baseline_trace.npy", rl_results["reward_baseline"])
+    np.save(args.output_dir / "esn_vmf_rl_kappa_trace.npy", rl_results["kappa"])
+    np.save(args.output_dir / "esn_vmf_rl_fraction_beats_zf_trace.npy", rl_results["beat_zf"])
+    np.save(args.output_dir / "esn_vmf_rl_beam_similarity_to_zf_trace.npy", rl_results["beam_similarity_to_zf"])
+    np.save(args.output_dir / "esn_vmf_rl_grad_norm_trace.npy", rl_results["grad_norm"])
+    np.save(args.output_dir / "esn_vmf_rl_loss_trace.npy", rl_results["loss"])
+    np.save(args.output_dir / "esn_states_trace.npy", rl_results["esn_states"])
 
     save_plots(
         zf_throughput=zf_results["throughput"],
@@ -515,11 +562,11 @@ def main() -> None:
         window_len=args.window_len,
     )
 
-    print("Simple RL precoder design run finished.")
+    print("Simple ESN-vMF RL precoder design run finished.")
     print(f"ZF average throughput         : {zf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"Single-policy RL throughput   : {rl_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"Single-policy RL reward       : {rl_results['reward'].mean():.4f}")
+    print(f"ESN-vMF RL throughput         : {rl_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"ESN-vMF RL reward             : {rl_results['reward'].mean():.4f}")
     print(f"RL beats ZF fraction          : {rl_results['beat_zf'].mean():.4f}")
     print(f"Mean beam similarity to ZF    : {rl_results['beam_similarity_to_zf'].mean():.4f}")
     print(f"Mean grad norm                : {rl_results['grad_norm'].mean():.4f}")
