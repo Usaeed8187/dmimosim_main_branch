@@ -368,6 +368,10 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
     reward_avg = np.convolve(rl_results["reward"], np.ones(w_len) / w_len, mode='valid')
     learned_policy_prob_avg = np.convolve(rl_results["p_trace"], np.ones(w_len) / w_len, mode='valid')
     domain_knowledge_prob_avg = np.convolve(1.0 - rl_results["p_trace"], np.ones(w_len) / w_len, mode='valid')
+    acceptance_avg = np.convolve(rl_results["acceptance"], np.ones(w_len) / w_len, mode='valid')
+    fallback_avg = np.convolve(rl_results["fallback"], np.ones(w_len) / w_len, mode='valid')
+    attempts_avg = np.convolve(rl_results["attempts"], np.ones(w_len) / w_len, mode='valid')
+    sinr_ratio_avg = np.convolve(rl_results["sinr_ratio"].mean(axis=1), np.ones(w_len) / w_len, mode='valid')
 
     # Throughput plot
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
@@ -423,6 +427,48 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
     fig3.savefig(probability_plot, dpi=150)
     plt.close(fig3)
 
+    # Acceptance/fallback plot
+    fig4, ax4 = plt.subplots(figsize=(8, 4.5))
+    ax4.plot(np.arange(1, len(acceptance_avg) + 1), acceptance_avg, lw=1.6, label="Acceptance")
+    ax4.plot(np.arange(1, len(fallback_avg) + 1), fallback_avg, lw=1.6, label="Fallback")
+    ax4.set_title("Hybrid RL Acceptance/Fallback Across Time")
+    ax4.set_xlabel("Slot index")
+    ax4.set_ylabel("Probability")
+    ax4.set_ylim(0.0, 1.0)
+    ax4.grid(True, alpha=0.35)
+    ax4.legend(loc="best")
+    fig4.tight_layout()
+
+    acceptance_fallback_plot = output_dir / "hybrid_rl_acceptance_fallback_across_time.png"
+    fig4.savefig(acceptance_fallback_plot, dpi=150)
+    plt.close(fig4)
+
+    # Resampling attempts plot
+    fig5, ax5 = plt.subplots(figsize=(8, 4.5))
+    ax5.plot(np.arange(1, len(attempts_avg) + 1), attempts_avg, lw=1.6)
+    ax5.set_title("Hybrid RL Resampling Attempts Across Time")
+    ax5.set_xlabel("Slot index")
+    ax5.set_ylabel("Attempts")
+    ax5.grid(True, alpha=0.35)
+    fig5.tight_layout()
+
+    attempts_plot = output_dir / "hybrid_rl_attempts_across_time.png"
+    fig5.savefig(attempts_plot, dpi=150)
+    plt.close(fig5)
+
+    # SINR ratio plot
+    fig6, ax6 = plt.subplots(figsize=(8, 4.5))
+    ax6.plot(np.arange(1, len(sinr_ratio_avg) + 1), sinr_ratio_avg, lw=1.6)
+    ax6.set_title("Hybrid RL Mean SINR Ratio Across Time (relative to ZF)")
+    ax6.set_xlabel("Slot index")
+    ax6.set_ylabel("Mean SINR ratio")
+    ax6.grid(True, alpha=0.35)
+    fig6.tight_layout()
+
+    sinr_ratio_plot = output_dir / "hybrid_rl_sinr_ratio_across_time.png"
+    fig6.savefig(sinr_ratio_plot, dpi=150)
+    plt.close(fig6)
+
     return {
         "zf_trace": zf_trace,
         "rl_trace": rl_trace,
@@ -432,6 +478,9 @@ def save_results(zf_results: dict[str, np.ndarray], rl_results: dict[str, np.nda
         "throughput_plot": tput_plot,
         "reward_plot": reward_plot,
         "probability_plot": probability_plot,
+        "acceptance_fallback_plot": acceptance_fallback_plot,
+        "attempts_plot": attempts_plot,
+        "sinr_ratio_plot": sinr_ratio_plot,
     }
 
 
@@ -467,6 +516,10 @@ def main() -> None:
     print(f"ZF average throughput       : {zf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Hybrid RL average throughput: {rl_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Hybrid RL average reward    : {rl_results['reward'].mean():.4f}")
+    print(f"Hybrid RL acceptance rate   : {rl_results['acceptance'].mean():.4f}")
+    print(f"Hybrid RL fallback rate     : {rl_results['fallback'].mean():.4f}")
+    print(f"Hybrid RL avg attempts      : {rl_results['attempts'].mean():.4f}")
+    print(f"Hybrid RL mean SINR ratio   : {rl_results['sinr_ratio'].mean():.4f}")
     print("Saved artifacts:")
     for name, path in out.items():
         print(f"  - {name}: {path}")
