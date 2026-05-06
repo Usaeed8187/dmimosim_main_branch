@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,11 @@ class RLConfig:
     reservoir_size: int = 128
     spectral_radius: float = 0.8
     input_scale: float = 0.15
+    leakage_lambda: float = 1.0
+    signal_gamma: float = 0.5
+    max_fb_resamples: int = 16
+    leakage_norm_eps: float = 1e-12
+    signal_norm_eps: float = 1e-12
 
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
@@ -157,6 +163,159 @@ def beam_similarity(p_a: np.ndarray, p_b: np.ndarray) -> np.ndarray:
         den = np.linalg.norm(p_a[:, k]) * np.linalg.norm(p_b[:, k])
         sims.append(num / max(den, 1e-12))
     return np.array(sims, dtype=np.float64)
+
+
+
+
+def complex_hermitian_to_real_quadratic(a_complex: np.ndarray) -> np.ndarray:
+    """Return real matrix A_r such that v^H A v = x^T A_r x.
+
+    Here v = a + j b and x = [a^T, b^T]^T.  For Hermitian
+    A = H^H H, the resulting real matrix is symmetric PSD.
+    """
+    a_re = np.real(a_complex)
+    a_im = np.imag(a_complex)
+    return np.block([[a_re, -a_im], [a_im, a_re]]).astype(np.float64)
+
+
+def build_signal_and_leakage_matrices_real(user_channels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Build per-user real desired-signal and leakage matrices.
+
+    G_k = real_rep(H_k^H H_k), so x_k^T G_k x_k is proportional
+    to the useful channel gain of beam k for UE k.
+
+    L_k = sum_{j != k} real_rep(H_j^H H_j), so x_k^T L_k x_k is
+    proportional to the leakage caused by beam k into all other UEs.
+    """
+    num_users, _, num_tx_antennas = user_channels.shape
+    d = 2 * num_tx_antennas
+    signal_mats = np.zeros((num_users, d, d), dtype=np.float64)
+    leakage_mats = np.zeros((num_users, d, d), dtype=np.float64)
+
+    gram_real = []
+    for j in range(num_users):
+        h_j = user_channels[j]
+        gram_j = h_j.conj().T @ h_j
+        gram_j_real = complex_hermitian_to_real_quadratic(gram_j)
+        gram_j_real = 0.5 * (gram_j_real + gram_j_real.T)
+        gram_real.append(gram_j_real)
+
+    for k in range(num_users):
+        signal_mats[k] = gram_real[k]
+        for j in range(num_users):
+            if j != k:
+                leakage_mats[k] += gram_real[j]
+        leakage_mats[k] = 0.5 * (leakage_mats[k] + leakage_mats[k].T)
+
+    return signal_mats, leakage_mats
+
+
+def normalized_leakage_score(x: np.ndarray, leakage_mat: np.ndarray, eps: float = 1e-12) -> float:
+    """Dimensionless leakage score used in exp(-lambda * leakage).
+
+    The normalization by trace(L)/d makes lambda easier to tune across
+    slots and channel realizations.  A score around 1 means roughly
+    average leakage over random unit directions.
+    """
+    d = x.size
+    raw = float(x @ leakage_mat @ x)
+    scale = float(np.trace(leakage_mat) / max(d, 1))
+    return raw / max(scale, eps)
+
+
+
+
+def normalized_signal_score(x: np.ndarray, signal_mat: np.ndarray, eps: float = 1e-12) -> float:
+    """Dimensionless desired-signal gain score.
+
+    The normalization by trace(G)/d makes the score roughly equal to 1
+    for an average random unit direction. Larger values mean stronger
+    useful gain for the intended UE.
+    """
+    d = x.size
+    raw = float(x @ signal_mat @ x)
+    scale = float(np.trace(signal_mat) / max(d, 1))
+    return raw / max(scale, eps)
+
+
+def normalized_signal_upper_bound(signal_mat: np.ndarray, eps: float = 1e-12) -> float:
+    """Upper bound for normalized x^T G x over unit-norm x.
+
+    max_{||x||=1} x^T G x = lambda_max(G). After trace normalization,
+    the bound is lambda_max(G) / (trace(G)/d). This is used to make
+    the Fisher-Bingham rejection probability <= 1 when a positive
+    desired-signal term is included.
+    """
+    d = signal_mat.shape[0]
+    scale = float(np.trace(signal_mat) / max(d, 1))
+    if scale <= eps:
+        return 0.0
+    # eigvalsh is appropriate because signal_mat is symmetric PSD.
+    lam_max = float(np.linalg.eigvalsh(signal_mat).max())
+    return lam_max / max(scale, eps)
+
+
+def sample_fisher_bingham_signal_leakage(
+    mu: np.ndarray,
+    kappa: float,
+    signal_mat: np.ndarray,
+    leakage_mat: np.ndarray,
+    signal_gamma: float,
+    leakage_lambda: float,
+    rng: np.random.Generator,
+    max_resamples: int,
+    signal_norm_eps: float,
+    leakage_norm_eps: float,
+) -> tuple[np.ndarray, float, float, int, bool]:
+    """Sample from a desired-signal/leakage shaped Fisher-Bingham policy.
+
+    Proposal: q(x) = vMF(mu, kappa)
+
+    Target up to proportionality:
+        p(x) ∝ exp(kappa mu^T x
+                   + signal_gamma * g_bar(x)
+                   - leakage_lambda * ell_bar(x)).
+
+    Since the positive desired-signal term can make the target/proposal
+    ratio larger than 1, we use the bound
+        g_bar(x) <= g_bar_max
+    and accept with probability
+        exp(signal_gamma * (g_bar(x) - g_bar_max)
+            - leakage_lambda * ell_bar(x)).
+
+    This is always in [0, 1] for signal_gamma >= 0 and leakage_lambda >= 0.
+    If all attempts are rejected, return the candidate with the largest
+    shaped score signal_gamma*g_bar - leakage_lambda*ell_bar.
+    """
+    best_x = None
+    best_signal = -np.inf
+    best_leakage = np.inf
+    best_score = -np.inf
+    best_attempt = max_resamples
+
+    g_upper = normalized_signal_upper_bound(signal_mat, signal_norm_eps)
+
+    for attempt in range(1, max_resamples + 1):
+        x = sample_vmf(mu, kappa, rng)
+        g = normalized_signal_score(x, signal_mat, signal_norm_eps)
+        ell = normalized_leakage_score(x, leakage_mat, leakage_norm_eps)
+        shaped_score = signal_gamma * g - leakage_lambda * ell
+
+        if shaped_score > best_score:
+            best_x = x
+            best_signal = g
+            best_leakage = ell
+            best_score = shaped_score
+            best_attempt = attempt
+
+        log_accept_prob = signal_gamma * (g - g_upper) - leakage_lambda * ell
+        # Numerical safety: because of floating-point roundoff, clip to <= 0.
+        log_accept_prob = min(0.0, float(log_accept_prob))
+        if rng.uniform(0.0, 1.0) < np.exp(log_accept_prob):
+            return x, g, ell, attempt, True
+
+    assert best_x is not None
+    return best_x, best_signal, best_leakage, best_attempt, False
 
 
 def _sample_weight_vmf(dim: int, kappa: float, rng: np.random.Generator) -> float:
@@ -292,6 +451,10 @@ def run_esn_policy_rl(
     beam_similarity_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     grad_norm_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     loss_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    signal_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    leakage_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    fb_attempts_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    fb_accept_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
 
     reward_baseline: float | None = None
     batch_s: list[np.ndarray] = []
@@ -344,10 +507,28 @@ def run_esn_policy_rl(
             mu_t = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
             mu_np = mu_t.detach().cpu().numpy()
 
+        signal_mats, leakage_mats = build_signal_and_leakage_matrices_real(channels[t])
+
         beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
         x_sample = np.zeros((k, d), dtype=np.float64)
         for ku in range(k):
-            x_sample[ku] = sample_vmf(mu_np[ku], rl_cfg.fixed_kappa, rng)
+            xk, sig, ell, attempts, accepted = sample_fisher_bingham_signal_leakage(
+                mu=mu_np[ku],
+                kappa=rl_cfg.fixed_kappa,
+                signal_mat=signal_mats[ku],
+                leakage_mat=leakage_mats[ku],
+                signal_gamma=rl_cfg.signal_gamma,
+                leakage_lambda=rl_cfg.leakage_lambda,
+                rng=rng,
+                max_resamples=rl_cfg.max_fb_resamples,
+                signal_norm_eps=rl_cfg.signal_norm_eps,
+                leakage_norm_eps=rl_cfg.leakage_norm_eps,
+            )
+            x_sample[ku] = xk
+            signal_trace[t, ku] = sig
+            leakage_trace[t, ku] = ell
+            fb_attempts_trace[t, ku] = attempts
+            fb_accept_trace[t, ku] = 1.0 if accepted else 0.0
             beams[:, ku] = real_to_complex_beam(x_sample[ku], cfg.total_tx_power, k)
 
         rate, _ = compute_slot_sum_rate(channels[t], beams, noise_power)
@@ -392,6 +573,10 @@ def run_esn_policy_rl(
         "beam_similarity_to_zf": beam_similarity_trace,
         "grad_norm": grad_norm_trace,
         "loss": loss_trace,
+        "signal": signal_trace,
+        "leakage": leakage_trace,
+        "fb_attempts": fb_attempts_trace,
+        "fb_accept": fb_accept_trace,
         "esn_states": esn_states,
     }
 
@@ -415,6 +600,10 @@ def save_plots(
     beat_zf = rl_results["beat_zf"]
     sim_to_zf = rl_results["beam_similarity_to_zf"].mean(axis=1)
     grad_norm = rl_results["grad_norm"]
+    signal = rl_results.get("signal", None)
+    leakage = rl_results.get("leakage", None)
+    fb_attempts = rl_results.get("fb_attempts", None)
+    fb_accept = rl_results.get("fb_accept", None)
 
     zf_avg = moving_average(zf_throughput, window_len)
     random_vmf_avg = moving_average(random_vmf_throughput, window_len)
@@ -423,6 +612,10 @@ def save_plots(
     beat_zf_avg = moving_average(beat_zf, window_len)
     sim_avg = moving_average(sim_to_zf, window_len)
     grad_norm_avg = moving_average(grad_norm, window_len)
+    signal_avg = moving_average(signal.mean(axis=1), window_len) if signal is not None else None
+    leakage_avg = moving_average(leakage.mean(axis=1), window_len) if leakage is not None else None
+    fb_attempts_avg = moving_average(fb_attempts.mean(axis=1), window_len) if fb_attempts is not None else None
+    fb_accept_avg = moving_average(fb_accept.mean(axis=1), window_len) if fb_accept is not None else None
 
     x_tput = np.arange(1, zf_avg.size + 1)
     x_reward = np.arange(1, reward_avg.size + 1)
@@ -430,7 +623,7 @@ def save_plots(
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
     ax1.plot(x_tput, zf_avg, lw=1.5, label="ZF baseline")
     ax1.plot(x_tput, random_vmf_avg, lw=1.5, label="Random vMF baseline")
-    ax1.plot(x_tput, rl_avg, lw=1.5, label="ESN-vMF RL")
+    ax1.plot(x_tput, rl_avg, lw=1.5, label="ESN-FB signal/leakage RL")
     ax1.set_title("Throughput Across Time")
     ax1.set_xlabel("Slot index")
     ax1.set_ylabel("Sum-rate [bits/s/Hz]")
@@ -442,7 +635,7 @@ def save_plots(
 
     fig2, ax2 = plt.subplots(figsize=(8, 4.5))
     ax2.plot(x_reward, reward_avg, lw=1.5)
-    ax2.set_title("ESN-vMF RL Reward Across Time")
+    ax2.set_title("ESN-FB Signal/Leakage RL Reward Across Time")
     ax2.set_xlabel("Slot index")
     ax2.set_ylabel("Reward vs ZF")
     ax2.grid(True, alpha=0.35)
@@ -452,7 +645,7 @@ def save_plots(
 
     fig3, ax3 = plt.subplots(figsize=(8, 4.5))
     ax3.plot(np.arange(1, beat_zf_avg.size + 1), beat_zf_avg, lw=1.5)
-    ax3.set_title("Fraction of Slots Where ESN-vMF RL Beats ZF")
+    ax3.set_title("Fraction of Slots Where ESN-FB Signal/Leakage RL Beats ZF")
     ax3.set_xlabel("Slot index")
     ax3.set_ylabel("Moving-average fraction")
     ax3.set_ylim(0.0, 1.0)
@@ -479,18 +672,171 @@ def save_plots(
     ax5.set_ylabel("Gradient norm")
     ax5.grid(True, alpha=0.35)
     fig5.tight_layout()
-    fig5.savefig(output_dir / "esn_vmf_rl_grad_norm.png", dpi=150)
+    fig5.savefig(output_dir / "esn_fb_leakage_rl_grad_norm.png", dpi=150)
     plt.close(fig5)
 
 
+    if signal_avg is not None:
+        fig6, ax6 = plt.subplots(figsize=(8, 4.5))
+        ax6.plot(np.arange(1, signal_avg.size + 1), signal_avg, lw=1.5)
+        ax6.set_title("Mean Normalized Desired Signal of Accepted Samples")
+        ax6.set_xlabel("Slot index")
+        ax6.set_ylabel("Normalized desired signal")
+        ax6.grid(True, alpha=0.35)
+        fig6.tight_layout()
+        fig6.savefig(output_dir / "esn_fb_normalized_signal.png", dpi=150)
+        plt.close(fig6)
+
+    if leakage_avg is not None:
+        fig6b, ax6b = plt.subplots(figsize=(8, 4.5))
+        ax6b.plot(np.arange(1, leakage_avg.size + 1), leakage_avg, lw=1.5)
+        ax6b.set_title("Mean Normalized Leakage of Accepted Samples")
+        ax6b.set_xlabel("Slot index")
+        ax6b.set_ylabel("Normalized leakage")
+        ax6b.grid(True, alpha=0.35)
+        fig6b.tight_layout()
+        fig6b.savefig(output_dir / "esn_fb_normalized_leakage.png", dpi=150)
+        plt.close(fig6b)
+
+    if fb_attempts_avg is not None:
+        fig7, ax7 = plt.subplots(figsize=(8, 4.5))
+        ax7.plot(np.arange(1, fb_attempts_avg.size + 1), fb_attempts_avg, lw=1.5)
+        ax7.set_title("Fisher-Bingham Leakage Sampler Attempts")
+        ax7.set_xlabel("Slot index")
+        ax7.set_ylabel("Mean attempts per UE")
+        ax7.grid(True, alpha=0.35)
+        fig7.tight_layout()
+        fig7.savefig(output_dir / "esn_fb_leakage_sampler_attempts.png", dpi=150)
+        plt.close(fig7)
+
+    if fb_accept_avg is not None:
+        fig8, ax8 = plt.subplots(figsize=(8, 4.5))
+        ax8.plot(np.arange(1, fb_accept_avg.size + 1), fb_accept_avg, lw=1.5)
+        ax8.set_title("Fisher-Bingham Leakage Sampler Acceptance Rate")
+        ax8.set_xlabel("Slot index")
+        ax8.set_ylabel("Moving-average acceptance rate")
+        ax8.set_ylim(0.0, 1.0)
+        ax8.grid(True, alpha=0.35)
+        fig8.tight_layout()
+        fig8.savefig(output_dir / "esn_fb_leakage_sampler_acceptance.png", dpi=150)
+        plt.close(fig8)
+
+
+
+def sim_cache_metadata(cfg: SimConfig) -> dict[str, float | int]:
+    """Metadata that determines whether cached channel-dependent baselines are valid."""
+    return {
+        "num_tx_antennas": cfg.num_tx_antennas,
+        "num_users": cfg.num_users,
+        "num_rx_antennas_per_user": cfg.num_rx_antennas_per_user,
+        "streams_per_user": cfg.streams_per_user,
+        "num_slots": cfg.num_slots,
+        "snr_db": cfg.snr_db,
+        "temporal_correlation": cfg.temporal_correlation,
+        "seed": cfg.seed,
+        "total_tx_power": cfg.total_tx_power,
+    }
+
+
+def _metadata_matches(path: Path, expected: dict) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            actual = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return actual == expected
+
+
+def _write_metadata(path: Path, metadata: dict) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2, sort_keys=True)
+
+
+def load_or_run_zf_baseline(
+    cfg: SimConfig,
+    channels: np.ndarray,
+    cache_dir: Path,
+    force_recompute: bool = False,
+) -> dict[str, np.ndarray]:
+    """Load ZF baseline from cache if compatible; otherwise compute and cache it.
+
+    This avoids recomputing the deterministic ZF baseline when repeated runs use
+    the same simulation configuration and channel seed.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = cache_dir / "zf_baseline_meta.json"
+    metadata = sim_cache_metadata(cfg)
+
+    paths = {
+        "throughput": cache_dir / "zf_throughput_trace.npy",
+        "sinr": cache_dir / "zf_sinr_trace.npy",
+        "precoders": cache_dir / "zf_precoders_trace.npy",
+        "pmi_features": cache_dir / "zf_pmi_features_trace.npy",
+    }
+
+    can_load = (
+        not force_recompute
+        and _metadata_matches(meta_path, metadata)
+        and all(path.exists() for path in paths.values())
+    )
+    if can_load:
+        print(f"Loading cached ZF baseline from {cache_dir}")
+        return {name: np.load(path) for name, path in paths.items()}
+
+    print("Cached ZF baseline not found or incompatible; recomputing.")
+    zf_results = run_zf_baseline(cfg, channels)
+    for name, path in paths.items():
+        np.save(path, zf_results[name])
+    _write_metadata(meta_path, metadata)
+    return zf_results
+
+
+def load_or_run_random_vmf_baseline(
+    cfg: SimConfig,
+    channels: np.ndarray,
+    rng: np.random.Generator,
+    fixed_kappa: float,
+    cache_dir: Path,
+    force_recompute: bool = False,
+) -> dict[str, np.ndarray]:
+    """Load random-vMF baseline from cache if compatible; otherwise compute and cache it.
+
+    The random-vMF baseline depends on the simulation configuration, the channel
+    seed, the fixed kappa, and the RNG seed used specifically for this baseline.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = cache_dir / "random_vmf_baseline_meta.json"
+    metadata = sim_cache_metadata(cfg) | {"fixed_kappa": fixed_kappa}
+    throughput_path = cache_dir / "random_vmf_baseline_throughput_trace.npy"
+
+    can_load = (
+        not force_recompute
+        and _metadata_matches(meta_path, metadata)
+        and throughput_path.exists()
+    )
+    if can_load:
+        print(f"Loading cached random vMF baseline from {cache_dir}")
+        return {"throughput": np.load(throughput_path)}
+
+    print("Cached random vMF baseline not found or incompatible; recomputing.")
+    random_results = run_random_vmf_baseline(cfg, channels, rng, fixed_kappa=fixed_kappa)
+    np.save(throughput_path, random_results["throughput"])
+    _write_metadata(meta_path, metadata)
+    return random_results
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched ESN-vMF RL")
-    parser.add_argument("--num-slots", type=int, default=100000)
+    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched ESN Fisher-Bingham signal/leakage RL")
+    parser.add_argument("--num-slots", type=int, default=200000)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/simple_esn_vmf_rl_precoder_design"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/simple_esn_fb_signal_leakage_rl_precoder_design"))
     parser.add_argument("--window-len", type=int, default=1000)
+    parser.add_argument("--baseline-cache-dir", type=Path, default=None)
+    parser.add_argument("--force-recompute-baselines", action="store_true")
 
     # ESN knobs. W_in and W_res are fixed; only W_out is learned.
     parser.add_argument("--reservoir-size", type=int, default=128)
@@ -505,6 +851,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--advantage-clip", type=float, default=1.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--init-scale-out", type=float, default=1e-2)
+    parser.add_argument("--leakage-lambda", type=float, default=1.0)
+    parser.add_argument("--signal-gamma", type=float, default=0.5)
+    parser.add_argument("--max-fb-resamples", type=int, default=16)
+    parser.add_argument("--leakage-norm-eps", type=float, default=1e-12)
+    parser.add_argument("--signal-norm-eps", type=float, default=1e-12)
     return parser.parse_args()
 
 
@@ -527,18 +878,41 @@ def main() -> None:
         reservoir_size=args.reservoir_size,
         spectral_radius=args.spectral_radius,
         input_scale=args.input_scale,
+        leakage_lambda=args.leakage_lambda,
+        signal_gamma=args.signal_gamma,
+        max_fb_resamples=args.max_fb_resamples,
+        leakage_norm_eps=args.leakage_norm_eps,
+        signal_norm_eps=args.signal_norm_eps,
     )
 
-    rng = np.random.default_rng(cfg.seed)
+    # Use separate RNG streams so loading cached baselines does not change the
+    # stochastic trajectory of the RL policy. This keeps repeated runs comparable.
+    rng_channels = np.random.default_rng(cfg.seed)
+    rng_random_vmf = np.random.default_rng(cfg.seed + 10_000)
+    rng_rl = np.random.default_rng(cfg.seed + 20_000)
     torch.manual_seed(cfg.seed)
 
-    channels = simulate_channels(cfg, rng)
+    channels = simulate_channels(cfg, rng_channels)
 
-    zf_results = run_zf_baseline(cfg, channels)
-    random_vmf_results = run_random_vmf_baseline(
-        cfg, channels, rng, fixed_kappa=rl_cfg.fixed_kappa
+    baseline_cache_dir = args.baseline_cache_dir
+    if baseline_cache_dir is None:
+        baseline_cache_dir = args.output_dir / "baseline_cache"
+
+    zf_results = load_or_run_zf_baseline(
+        cfg=cfg,
+        channels=channels,
+        cache_dir=baseline_cache_dir,
+        force_recompute=args.force_recompute_baselines,
     )
-    rl_results = run_esn_policy_rl(cfg, rl_cfg, channels, zf_results, rng)
+    random_vmf_results = load_or_run_random_vmf_baseline(
+        cfg=cfg,
+        channels=channels,
+        rng=rng_random_vmf,
+        fixed_kappa=rl_cfg.fixed_kappa,
+        cache_dir=baseline_cache_dir,
+        force_recompute=args.force_recompute_baselines,
+    )
+    rl_results = run_esn_policy_rl(cfg, rl_cfg, channels, zf_results, rng_rl)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.output_dir / "zf_throughput_trace.npy", zf_results["throughput"])
@@ -552,6 +926,10 @@ def main() -> None:
     np.save(args.output_dir / "esn_vmf_rl_beam_similarity_to_zf_trace.npy", rl_results["beam_similarity_to_zf"])
     np.save(args.output_dir / "esn_vmf_rl_grad_norm_trace.npy", rl_results["grad_norm"])
     np.save(args.output_dir / "esn_vmf_rl_loss_trace.npy", rl_results["loss"])
+    np.save(args.output_dir / "esn_fb_signal_trace.npy", rl_results["signal"])
+    np.save(args.output_dir / "esn_fb_leakage_trace.npy", rl_results["leakage"])
+    np.save(args.output_dir / "esn_fb_sampler_attempts_trace.npy", rl_results["fb_attempts"])
+    np.save(args.output_dir / "esn_fb_sampler_accept_trace.npy", rl_results["fb_accept"])
     np.save(args.output_dir / "esn_states_trace.npy", rl_results["esn_states"])
 
     save_plots(
@@ -562,14 +940,18 @@ def main() -> None:
         window_len=args.window_len,
     )
 
-    print("Simple ESN-vMF RL precoder design run finished.")
+    print("Simple ESN-FB signal/leakage RL precoder design run finished.")
     print(f"ZF average throughput         : {zf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"ESN-vMF RL throughput         : {rl_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"ESN-vMF RL reward             : {rl_results['reward'].mean():.4f}")
+    print(f"ESN-FB signal/leakage RL throughput  : {rl_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"ESN-FB signal/leakage RL reward      : {rl_results['reward'].mean():.4f}")
     print(f"RL beats ZF fraction          : {rl_results['beat_zf'].mean():.4f}")
     print(f"Mean beam similarity to ZF    : {rl_results['beam_similarity_to_zf'].mean():.4f}")
     print(f"Mean grad norm                : {rl_results['grad_norm'].mean():.4f}")
+    print(f"Mean normalized desired signal: {rl_results['signal'].mean():.4f}")
+    print(f"Mean normalized leakage       : {rl_results['leakage'].mean():.4f}")
+    print(f"FB sampler acceptance rate    : {rl_results['fb_accept'].mean():.4f}")
+    print(f"FB sampler avg attempts       : {rl_results['fb_attempts'].mean():.4f}")
 
 
 if __name__ == "__main__":
