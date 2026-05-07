@@ -40,6 +40,8 @@ class RLConfig:
     max_fb_resamples: int = 16
     leakage_norm_eps: float = 1e-12
     signal_norm_eps: float = 1e-12
+    reward_mode: str = "sinr_proxy_log_ratio"
+    reward_sinr_eps: float = 1e-12
 
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
@@ -90,6 +92,74 @@ def compute_slot_sum_rate(
 
     return float(np.sum(np.log2(1.0 + sinr))), sinr
 
+
+
+def compute_slot_sinr_proxy(
+    user_channels: np.ndarray, precoder: np.ndarray, noise_power: float
+) -> np.ndarray:
+    """Compute a simple multi-user SINR proxy for reward shaping.
+
+    This proxy uses the total received energy from each beam at each UE:
+
+        desired_k = ||H_k p_k||_2^2
+        interference_k = sum_{j != k} ||H_k p_j||_2^2
+        proxy_sinr_k = desired_k / (interference_k + noise_power)
+
+    It is different from compute_slot_sum_rate(), which first forms a receive
+    combiner along the desired received vector and then projects interference
+    through that combiner.  The proxy is intentionally simpler and gives the RL
+    update a user-wise, SINR-like signal rather than only a scalar sum-rate
+    difference.
+    """
+    num_users = user_channels.shape[0]
+    proxy_sinr = np.zeros(num_users, dtype=np.float64)
+
+    for k in range(num_users):
+        hk = user_channels[k]
+        desired = np.linalg.norm(hk @ precoder[:, k]) ** 2
+        interference = 0.0
+        for j in range(num_users):
+            if j != k:
+                interference += np.linalg.norm(hk @ precoder[:, j]) ** 2
+        proxy_sinr[k] = desired / (interference + noise_power)
+
+    return proxy_sinr
+
+
+def compute_rl_reward(
+    reward_mode: str,
+    rate: float,
+    zf_rate: float,
+    actual_sinr: np.ndarray,
+    zf_actual_sinr: np.ndarray,
+    proxy_sinr: np.ndarray,
+    zf_proxy_sinr: np.ndarray,
+    eps: float,
+) -> float:
+    """Compute the scalar RL reward used in REINFORCE.
+
+    Supported modes:
+      - throughput_delta: old reward, R_RL - R_ZF.
+      - normalized_throughput_delta: (R_RL - R_ZF) / (|R_ZF| + eps).
+      - actual_sinr_log_ratio: mean_k log((SINR_RL,k + eps)/(SINR_ZF,k + eps)).
+      - sinr_proxy_log_ratio: same log-ratio but using the simpler SINR proxy.
+
+    The default is sinr_proxy_log_ratio because it gives a balanced per-user
+    SINR-like signal and penalizes cases where one user's SINR collapses.
+    """
+    if reward_mode == "throughput_delta":
+        return float(rate - zf_rate)
+    if reward_mode == "normalized_throughput_delta":
+        return float((rate - zf_rate) / (abs(zf_rate) + eps))
+    if reward_mode == "actual_sinr_log_ratio":
+        return float(np.mean(np.log((actual_sinr + eps) / (zf_actual_sinr + eps))))
+    if reward_mode == "sinr_proxy_log_ratio":
+        return float(np.mean(np.log((proxy_sinr + eps) / (zf_proxy_sinr + eps))))
+    raise ValueError(
+        f"Unknown reward_mode={reward_mode!r}. Expected one of: "
+        "throughput_delta, normalized_throughput_delta, "
+        "actual_sinr_log_ratio, sinr_proxy_log_ratio."
+    )
 
 def pmi_features_from_channels(user_channels: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
     vk_list: list[np.ndarray] = []
@@ -451,6 +521,11 @@ def run_esn_policy_rl(
     beam_similarity_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     grad_norm_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     loss_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    rate_delta_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    proxy_sinr_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    zf_proxy_sinr_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    proxy_sinr_ratio_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    actual_sinr_ratio_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     signal_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     leakage_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     fb_attempts_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
@@ -531,8 +606,24 @@ def run_esn_policy_rl(
             fb_accept_trace[t, ku] = 1.0 if accepted else 0.0
             beams[:, ku] = real_to_complex_beam(x_sample[ku], cfg.total_tx_power, k)
 
-        rate, _ = compute_slot_sum_rate(channels[t], beams, noise_power)
-        reward = rate - zf_baseline["throughput"][t]
+        rate, actual_sinr = compute_slot_sum_rate(channels[t], beams, noise_power)
+        zf_rate = float(zf_baseline["throughput"][t])
+        zf_actual_sinr = zf_baseline["sinr"][t]
+
+        proxy_sinr = compute_slot_sinr_proxy(channels[t], beams, noise_power)
+        zf_proxy_sinr = compute_slot_sinr_proxy(
+            channels[t], zf_baseline["precoders"][t], noise_power
+        )
+        reward = compute_rl_reward(
+            reward_mode=rl_cfg.reward_mode,
+            rate=rate,
+            zf_rate=zf_rate,
+            actual_sinr=actual_sinr,
+            zf_actual_sinr=zf_actual_sinr,
+            proxy_sinr=proxy_sinr,
+            zf_proxy_sinr=zf_proxy_sinr,
+            eps=rl_cfg.reward_sinr_eps,
+        )
 
         if reward_baseline is None:
             reward_baseline = reward
@@ -547,9 +638,14 @@ def run_esn_policy_rl(
 
         throughput[t] = rate
         reward_trace[t] = reward
+        rate_delta_trace[t] = rate - zf_rate
+        proxy_sinr_trace[t] = proxy_sinr
+        zf_proxy_sinr_trace[t] = zf_proxy_sinr
+        proxy_sinr_ratio_trace[t] = proxy_sinr / np.maximum(zf_proxy_sinr, rl_cfg.reward_sinr_eps)
+        actual_sinr_ratio_trace[t] = actual_sinr / np.maximum(zf_actual_sinr, rl_cfg.reward_sinr_eps)
         advantage_trace[t] = advantage
         baseline_trace[t] = reward_baseline
-        beat_zf_trace[t] = 1.0 if rate > zf_baseline["throughput"][t] else 0.0
+        beat_zf_trace[t] = 1.0 if rate > zf_rate else 0.0
         beam_similarity_trace[t] = beam_similarity(beams, zf_baseline["precoders"][t])
 
         batch_s.append(s)
@@ -566,6 +662,11 @@ def run_esn_policy_rl(
     return {
         "throughput": throughput,
         "reward": reward_trace,
+        "rate_delta": rate_delta_trace,
+        "proxy_sinr": proxy_sinr_trace,
+        "zf_proxy_sinr": zf_proxy_sinr_trace,
+        "proxy_sinr_ratio": proxy_sinr_ratio_trace,
+        "actual_sinr_ratio": actual_sinr_ratio_trace,
         "advantage": advantage_trace,
         "reward_baseline": baseline_trace,
         "kappa": kappa_trace,
@@ -600,6 +701,8 @@ def save_plots(
     beat_zf = rl_results["beat_zf"]
     sim_to_zf = rl_results["beam_similarity_to_zf"].mean(axis=1)
     grad_norm = rl_results["grad_norm"]
+    proxy_sinr_ratio = rl_results.get("proxy_sinr_ratio", None)
+    actual_sinr_ratio = rl_results.get("actual_sinr_ratio", None)
     signal = rl_results.get("signal", None)
     leakage = rl_results.get("leakage", None)
     fb_attempts = rl_results.get("fb_attempts", None)
@@ -612,6 +715,8 @@ def save_plots(
     beat_zf_avg = moving_average(beat_zf, window_len)
     sim_avg = moving_average(sim_to_zf, window_len)
     grad_norm_avg = moving_average(grad_norm, window_len)
+    proxy_sinr_ratio_avg = moving_average(proxy_sinr_ratio.mean(axis=1), window_len) if proxy_sinr_ratio is not None else None
+    actual_sinr_ratio_avg = moving_average(actual_sinr_ratio.mean(axis=1), window_len) if actual_sinr_ratio is not None else None
     signal_avg = moving_average(signal.mean(axis=1), window_len) if signal is not None else None
     leakage_avg = moving_average(leakage.mean(axis=1), window_len) if leakage is not None else None
     fb_attempts_avg = moving_average(fb_attempts.mean(axis=1), window_len) if fb_attempts is not None else None
@@ -675,6 +780,28 @@ def save_plots(
     fig5.savefig(output_dir / "esn_fb_leakage_rl_grad_norm.png", dpi=150)
     plt.close(fig5)
 
+
+    if proxy_sinr_ratio_avg is not None:
+        fig_proxy, ax_proxy = plt.subplots(figsize=(8, 4.5))
+        ax_proxy.plot(np.arange(1, proxy_sinr_ratio_avg.size + 1), proxy_sinr_ratio_avg, lw=1.5)
+        ax_proxy.set_title("Mean Proxy-SINR Ratio to ZF")
+        ax_proxy.set_xlabel("Slot index")
+        ax_proxy.set_ylabel("Proxy-SINR ratio")
+        ax_proxy.grid(True, alpha=0.35)
+        fig_proxy.tight_layout()
+        fig_proxy.savefig(output_dir / "esn_fb_proxy_sinr_ratio_to_zf.png", dpi=150)
+        plt.close(fig_proxy)
+
+    if actual_sinr_ratio_avg is not None:
+        fig_actual, ax_actual = plt.subplots(figsize=(8, 4.5))
+        ax_actual.plot(np.arange(1, actual_sinr_ratio_avg.size + 1), actual_sinr_ratio_avg, lw=1.5)
+        ax_actual.set_title("Mean Actual SINR Ratio to ZF")
+        ax_actual.set_xlabel("Slot index")
+        ax_actual.set_ylabel("Actual SINR ratio")
+        ax_actual.grid(True, alpha=0.35)
+        fig_actual.tight_layout()
+        fig_actual.savefig(output_dir / "esn_fb_actual_sinr_ratio_to_zf.png", dpi=150)
+        plt.close(fig_actual)
 
     if signal_avg is not None:
         fig6, ax6 = plt.subplots(figsize=(8, 4.5))
@@ -856,6 +983,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-fb-resamples", type=int, default=16)
     parser.add_argument("--leakage-norm-eps", type=float, default=1e-12)
     parser.add_argument("--signal-norm-eps", type=float, default=1e-12)
+    parser.add_argument(
+        "--reward-mode",
+        type=str,
+        default="sinr_proxy_log_ratio",
+        choices=[
+            "throughput_delta",
+            "normalized_throughput_delta",
+            "actual_sinr_log_ratio",
+            "sinr_proxy_log_ratio",
+        ],
+        help="Scalar reward used for REINFORCE updates.",
+    )
+    parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
     return parser.parse_args()
 
 
@@ -883,6 +1023,8 @@ def main() -> None:
         max_fb_resamples=args.max_fb_resamples,
         leakage_norm_eps=args.leakage_norm_eps,
         signal_norm_eps=args.signal_norm_eps,
+        reward_mode=args.reward_mode,
+        reward_sinr_eps=args.reward_sinr_eps,
     )
 
     # Use separate RNG streams so loading cached baselines does not change the
@@ -919,6 +1061,11 @@ def main() -> None:
     np.save(args.output_dir / "random_vmf_baseline_throughput_trace.npy", random_vmf_results["throughput"])
     np.save(args.output_dir / "esn_vmf_rl_throughput_trace.npy", rl_results["throughput"])
     np.save(args.output_dir / "esn_vmf_rl_reward_trace.npy", rl_results["reward"])
+    np.save(args.output_dir / "esn_vmf_rl_rate_delta_trace.npy", rl_results["rate_delta"])
+    np.save(args.output_dir / "esn_fb_proxy_sinr_trace.npy", rl_results["proxy_sinr"])
+    np.save(args.output_dir / "esn_fb_zf_proxy_sinr_trace.npy", rl_results["zf_proxy_sinr"])
+    np.save(args.output_dir / "esn_fb_proxy_sinr_ratio_trace.npy", rl_results["proxy_sinr_ratio"])
+    np.save(args.output_dir / "esn_fb_actual_sinr_ratio_trace.npy", rl_results["actual_sinr_ratio"])
     np.save(args.output_dir / "esn_vmf_rl_advantage_trace.npy", rl_results["advantage"])
     np.save(args.output_dir / "esn_vmf_rl_reward_baseline_trace.npy", rl_results["reward_baseline"])
     np.save(args.output_dir / "esn_vmf_rl_kappa_trace.npy", rl_results["kappa"])
@@ -944,7 +1091,11 @@ def main() -> None:
     print(f"ZF average throughput         : {zf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"ESN-FB signal/leakage RL throughput  : {rl_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"Reward mode                   : {rl_cfg.reward_mode}")
     print(f"ESN-FB signal/leakage RL reward      : {rl_results['reward'].mean():.4f}")
+    print(f"ESN-FB throughput delta       : {rl_results['rate_delta'].mean():.4f}")
+    print(f"Mean proxy-SINR ratio to ZF   : {rl_results['proxy_sinr_ratio'].mean():.4f}")
+    print(f"Mean actual SINR ratio to ZF  : {rl_results['actual_sinr_ratio'].mean():.4f}")
     print(f"RL beats ZF fraction          : {rl_results['beat_zf'].mean():.4f}")
     print(f"Mean beam similarity to ZF    : {rl_results['beam_similarity_to_zf'].mean():.4f}")
     print(f"Mean grad norm                : {rl_results['grad_norm'].mean():.4f}")
