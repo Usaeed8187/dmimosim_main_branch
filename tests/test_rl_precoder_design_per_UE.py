@@ -42,7 +42,6 @@ class RLConfig:
     signal_norm_eps: float = 1e-12
     reward_mode: str = "sinr_proxy_log_ratio"
     reward_sinr_eps: float = 1e-12
-    best_of_n: int = 1
 
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
@@ -326,46 +325,86 @@ def normalized_signal_upper_bound(signal_mat: np.ndarray, eps: float = 1e-12) ->
     return lam_max / max(scale, eps)
 
 
+def pmi_dominant_vectors_from_channels(user_channels: np.ndarray) -> np.ndarray:
+    """Return one dominant right singular vector q_k per UE.
 
-def phase_invariant_alignment_score(x: np.ndarray, mu: np.ndarray) -> float:
-    """Return |m^H v|^2 using real representations x=[Re{v}; Im{v}].
-
-    This is invariant to an arbitrary complex scalar phase applied to either
-    the sampled beam v or the mean beam m. Both x and mu are assumed to be
-    real representations of unit-norm complex vectors.
+    This function emulates PMI/right-singular-vector feedback in this toy
+    testbench.  The policy sampler below uses only these q_k vectors for
+    desired-signal and leakage shaping, not full channel Gram matrices H_k^H H_k.
     """
-    nt = x.size // 2
-    x_re, x_im = x[:nt], x[nt:]
-    m_re, m_im = mu[:nt], mu[nt:]
-    inner_re = float(m_re @ x_re + m_im @ x_im)
-    inner_im = float(m_re @ x_im - m_im @ x_re)
-    return inner_re * inner_re + inner_im * inner_im
+    q_list: list[np.ndarray] = []
+    for k in range(user_channels.shape[0]):
+        _, _, vh = np.linalg.svd(user_channels[k], full_matrices=True)
+        q = vh.conj().T[:, 0]
+        q_list.append(q / max(np.linalg.norm(q), 1e-12))
+    return np.stack(q_list, axis=0)
 
 
+def build_pmi_signal_and_leakage_matrices_real(q_vectors: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Build per-UE PMI-only desired and leakage matrices.
 
+    q_vectors[k] is the dominant right singular vector / PMI direction for UE k.
 
-def apply_random_global_phase_real(x: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Apply v <- exp(j phi) v to real representation x=[Re{v}; Im{v}]."""
-    nt = x.size // 2
-    phi = rng.uniform(0.0, 2.0 * np.pi)
-    c, s = np.cos(phi), np.sin(phi)
-    re = x[:nt]
-    im = x[nt:]
-    return np.concatenate([c * re - s * im, s * re + c * im]).astype(np.float64)
+    G_k^PMI = real_rep(q_k q_k^H), so x_k^T G_k^PMI x_k = |q_k^H v_k|^2.
 
+    L_k^PMI = sum_{j != k} real_rep(q_j q_j^H), so x_k^T L_k^PMI x_k
+    approximates how much beam k overlaps with other UEs' PMI directions.
 
-def sample_phase_randomized_vmf(mu: np.ndarray, kappa: float, rng: np.random.Generator) -> np.ndarray:
-    """Sample near the complex line spanned by mu, then randomize global phase.
-
-    Standard real-vMF around a fixed real vector is not phase invariant. This
-    helper uses it only as an efficient proposal near the ESN-predicted line and
-    then applies a uniform global phase rotation, so all phase-equivalent beams
-    are treated identically at execution time.
+    This replaces the earlier full-channel matrices based on H_k^H H_k.
     """
-    x = sample_vmf(mu, kappa, rng)
-    return apply_random_global_phase_real(x, rng)
+    num_users, num_tx_antennas = q_vectors.shape
+    d = 2 * num_tx_antennas
+    signal_mats = np.zeros((num_users, d, d), dtype=np.float64)
+    leakage_mats = np.zeros((num_users, d, d), dtype=np.float64)
 
-def sample_phase_invariant_bingham_signal_leakage(
+    pmi_gram_real: list[np.ndarray] = []
+    for k in range(num_users):
+        qk = q_vectors[k]
+        gram_k = np.outer(qk, qk.conj())
+        gram_k_real = complex_hermitian_to_real_quadratic(gram_k)
+        gram_k_real = 0.5 * (gram_k_real + gram_k_real.T)
+        pmi_gram_real.append(gram_k_real)
+
+    for k in range(num_users):
+        signal_mats[k] = pmi_gram_real[k]
+        for j in range(num_users):
+            if j != k:
+                leakage_mats[k] += pmi_gram_real[j]
+        leakage_mats[k] = 0.5 * (leakage_mats[k] + leakage_mats[k].T)
+
+    return signal_mats, leakage_mats
+
+
+def compute_pmi_sinr_proxy_from_precoder(
+    q_vectors: np.ndarray,
+    precoder: np.ndarray,
+    noise_power: float,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Compute a PMI-only SINR proxy from right singular vectors and a precoder.
+
+    q_vectors[k] is the PMI/right singular vector for UE k.  This uses
+
+        desired_k = |q_k^H p_k|^2
+        interference_k = sum_{j != k} |q_k^H p_j|^2
+        SINR_hat_k = desired_k / (interference_k + noise_power)
+
+    and does not use the full channel matrix H_k.
+    """
+    num_users = q_vectors.shape[0]
+    out = np.zeros(num_users, dtype=np.float64)
+    for k in range(num_users):
+        qk = q_vectors[k]
+        desired = float(np.abs(np.vdot(qk, precoder[:, k])) ** 2)
+        interference = 0.0
+        for j in range(num_users):
+            if j != k:
+                interference += float(np.abs(np.vdot(qk, precoder[:, j])) ** 2)
+        out[k] = desired / (interference + noise_power + eps)
+    return out
+
+
+def sample_fisher_bingham_signal_leakage(
     mu: np.ndarray,
     kappa: float,
     signal_mat: np.ndarray,
@@ -376,63 +415,56 @@ def sample_phase_invariant_bingham_signal_leakage(
     max_resamples: int,
     signal_norm_eps: float,
     leakage_norm_eps: float,
-) -> tuple[np.ndarray, float, float, float, int, bool]:
-    """Sample using a phase-invariant Bingham-style alignment term.
+) -> tuple[np.ndarray, float, float, int, bool]:
+    """Sample from a desired-PMI signal/leakage shaped Fisher-Bingham policy.
 
-    The old code used a real-vMF proposal/score based on kappa * mu^T x.
-    That is not phase invariant for complex precoders. Here the shaped target
-    score is instead
+    Proposal: q(x) = vMF(mu, kappa)
 
-        S(x) = kappa * |m^H v|^2
-               + signal_gamma * g_bar(x)
-               - leakage_lambda * ell_bar(x),
+    Target up to proportionality:
+        p(x) ∝ exp(kappa mu^T x
+                   + signal_gamma * g_bar(x)
+                   - leakage_lambda * ell_bar(x)).
 
-    where x=[Re{v}; Im{v}] and mu=[Re{m}; Im{m}].
+    Since the positive desired-signal term can make the target/proposal
+    ratio larger than 1, we use the bound
+        g_bar(x) <= g_bar_max
+    and accept with probability
+        exp(signal_gamma * (g_bar(x) - g_bar_max)
+            - leakage_lambda * ell_bar(x)).
 
-    For efficiency, the proposal is a phase-randomized real-vMF sample: we draw
-    near the ESN-predicted real mean and then apply a uniformly random global
-    complex phase. This keeps exploration near the predicted complex line while
-    avoiding preference for any arbitrary absolute phase.
-
-    Rejection/resampling uses only the signal/leakage part, as in the previous
-    code. If all attempts are rejected, return the candidate with the largest
-    full phase-invariant shaped score.
+    This is always in [0, 1] for signal_gamma >= 0 and leakage_lambda >= 0.
+    If all attempts are rejected, return the candidate with the largest
+    shaped score signal_gamma*g_bar - leakage_lambda*ell_bar.
     """
     best_x = None
-    best_alignment = -np.inf
     best_signal = -np.inf
     best_leakage = np.inf
     best_score = -np.inf
     best_attempt = max_resamples
 
-    mu = unit_norm(mu)
     g_upper = normalized_signal_upper_bound(signal_mat, signal_norm_eps)
 
     for attempt in range(1, max_resamples + 1):
-        x = sample_phase_randomized_vmf(mu, kappa, rng)
-        align = phase_invariant_alignment_score(x, mu)
+        x = sample_vmf(mu, kappa, rng)
         g = normalized_signal_score(x, signal_mat, signal_norm_eps)
         ell = normalized_leakage_score(x, leakage_mat, leakage_norm_eps)
-        shaped_score = kappa * align + signal_gamma * g - leakage_lambda * ell
+        shaped_score = signal_gamma * g - leakage_lambda * ell
 
         if shaped_score > best_score:
             best_x = x
-            best_alignment = align
             best_signal = g
             best_leakage = ell
             best_score = shaped_score
             best_attempt = attempt
 
-        # The proposal already handles phase-invariant concentration near the
-        # learned complex line. The rejection step only adds signal/leakage
-        # shaping, using the same bounded rule as the earlier FB sampler.
         log_accept_prob = signal_gamma * (g - g_upper) - leakage_lambda * ell
+        # Numerical safety: because of floating-point roundoff, clip to <= 0.
         log_accept_prob = min(0.0, float(log_accept_prob))
         if rng.uniform(0.0, 1.0) < np.exp(log_accept_prob):
-            return x, align, g, ell, attempt, True
+            return x, g, ell, attempt, True
 
     assert best_x is not None
-    return best_x, best_alignment, best_signal, best_leakage, best_attempt, False
+    return best_x, best_signal, best_leakage, best_attempt, False
 
 
 def _sample_weight_vmf(dim: int, kappa: float, rng: np.random.Generator) -> float:
@@ -531,27 +563,11 @@ def compute_esn_states(pmi_features: np.ndarray, rl_cfg: RLConfig, rng: np.rando
     return states
 
 
-def phase_invariant_log_score_fixed_kappa_torch(
+def vmf_log_prob_fixed_kappa_torch(
     x: torch.Tensor, mu: torch.Tensor, fixed_kappa: float
 ) -> torch.Tensor:
-    """Phase-invariant Bingham-style alignment score.
-
-    Returns fixed_kappa * |m^H v|^2, where x=[Re{v}; Im{v}]
-    and mu=[Re{m}; Im{m}]. This replaces the old real-vMF score
-    fixed_kappa * mu^T x, which was not invariant to per-stream phase.
-
-    This is used as an unnormalized policy log-score for REINFORCE.
-    As with the earlier Fisher-Bingham sampler, the normalizer is omitted
-    as a practical approximation.
-    """
-    d = x.shape[-1]
-    nt = d // 2
-    x_re, x_im = x[..., :nt], x[..., nt:]
-    m_re, m_im = mu[..., :nt], mu[..., nt:]
-    inner_re = torch.sum(m_re * x_re + m_im * x_im, dim=-1)
-    inner_im = torch.sum(m_re * x_im - m_im * x_re, dim=-1)
-    alignment = inner_re.square() + inner_im.square()
-    return fixed_kappa * alignment
+    """vMF log probability up to a constant when kappa is fixed."""
+    return fixed_kappa * torch.sum(mu * x, dim=-1)
 
 
 def run_esn_policy_rl(
@@ -589,13 +605,10 @@ def run_esn_policy_rl(
     zf_proxy_sinr_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     proxy_sinr_ratio_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     actual_sinr_ratio_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
-    alignment_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     signal_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     leakage_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     fb_attempts_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     fb_accept_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
-    best_of_n_score_trace = np.zeros(cfg.num_slots, dtype=np.float64)
-    best_of_n_selected_trace = np.zeros(cfg.num_slots, dtype=np.float64)
 
     reward_baseline: float | None = None
     batch_s: list[np.ndarray] = []
@@ -617,7 +630,7 @@ def run_esn_policy_rl(
         logits = torch.einsum("kdn,bn->bkd", w_out, s_batch)
         mu = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
 
-        per_user_log_prob = phase_invariant_log_score_fixed_kappa_torch(x_batch, mu, rl_cfg.fixed_kappa)
+        per_user_log_prob = vmf_log_prob_fixed_kappa_torch(x_batch, mu, rl_cfg.fixed_kappa)
         joint_log_prob = torch.sum(per_user_log_prob, dim=1)
         loss = -torch.mean(adv_batch * joint_log_prob)
 
@@ -648,111 +661,57 @@ def run_esn_policy_rl(
             mu_t = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
             mu_np = mu_t.detach().cpu().numpy()
 
-        signal_mats, leakage_mats = build_signal_and_leakage_matrices_real(channels[t])
+        # Emulate the limited-feedback information available to the policy.
+        # The sampler uses only dominant right singular vectors / PMI directions,
+        # not full channel Gram matrices H_k^H H_k.
+        q_vectors = pmi_dominant_vectors_from_channels(channels[t])
+        signal_mats, leakage_mats = build_pmi_signal_and_leakage_matrices_real(q_vectors)
 
+        beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
+        x_sample = np.zeros((k, d), dtype=np.float64)
+        for ku in range(k):
+            xk, sig, ell, attempts, accepted = sample_fisher_bingham_signal_leakage(
+                mu=mu_np[ku],
+                kappa=rl_cfg.fixed_kappa,
+                signal_mat=signal_mats[ku],
+                leakage_mat=leakage_mats[ku],
+                signal_gamma=rl_cfg.signal_gamma,
+                leakage_lambda=rl_cfg.leakage_lambda,
+                rng=rng,
+                max_resamples=rl_cfg.max_fb_resamples,
+                signal_norm_eps=rl_cfg.signal_norm_eps,
+                leakage_norm_eps=rl_cfg.leakage_norm_eps,
+            )
+            x_sample[ku] = xk
+            signal_trace[t, ku] = sig
+            leakage_trace[t, ku] = ell
+            fb_attempts_trace[t, ku] = attempts
+            fb_accept_trace[t, ku] = 1.0 if accepted else 0.0
+            beams[:, ku] = real_to_complex_beam(x_sample[ku], cfg.total_tx_power, k)
+
+        rate, actual_sinr = compute_slot_sum_rate(channels[t], beams, noise_power)
         zf_rate = float(zf_baseline["throughput"][t])
         zf_actual_sinr = zf_baseline["sinr"][t]
-        zf_proxy_sinr = compute_slot_sinr_proxy(
-            channels[t], zf_baseline["precoders"][t], noise_power
+
+        # For the RL reward proxy, use PMI-only SINR rather than the full-channel
+        # proxy. Actual throughput/SINR are still computed with the true channel
+        # only for environment evaluation.
+        proxy_sinr = compute_pmi_sinr_proxy_from_precoder(
+            q_vectors, beams, noise_power, eps=rl_cfg.reward_sinr_eps
         )
-
-        # Best-of-N full-precoder selection. Each candidate is a complete
-        # K-column precoder generated by the current per-UE phase-invariant
-        # FB signal/leakage sampler. We then score the full precoder using
-        # the same scalar objective as the RL reward and keep the best one.
-        best_score = -np.inf
-        best_candidate_index = 0
-        best_beams = None
-        best_x_sample = None
-        best_alignment = None
-        best_signal = None
-        best_leakage = None
-        best_attempts = None
-        best_accept = None
-        best_rate = None
-        best_actual_sinr = None
-        best_proxy_sinr = None
-        best_reward = None
-
-        for cand_idx in range(max(1, rl_cfg.best_of_n)):
-            cand_beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
-            cand_x_sample = np.zeros((k, d), dtype=np.float64)
-            cand_alignment = np.zeros(k, dtype=np.float64)
-            cand_signal = np.zeros(k, dtype=np.float64)
-            cand_leakage = np.zeros(k, dtype=np.float64)
-            cand_attempts = np.zeros(k, dtype=np.float64)
-            cand_accept = np.zeros(k, dtype=np.float64)
-
-            for ku in range(k):
-                xk, align, sig, ell, attempts, accepted = sample_phase_invariant_bingham_signal_leakage(
-                    mu=mu_np[ku],
-                    kappa=rl_cfg.fixed_kappa,
-                    signal_mat=signal_mats[ku],
-                    leakage_mat=leakage_mats[ku],
-                    signal_gamma=rl_cfg.signal_gamma,
-                    leakage_lambda=rl_cfg.leakage_lambda,
-                    rng=rng,
-                    max_resamples=rl_cfg.max_fb_resamples,
-                    signal_norm_eps=rl_cfg.signal_norm_eps,
-                    leakage_norm_eps=rl_cfg.leakage_norm_eps,
-                )
-                cand_x_sample[ku] = xk
-                cand_alignment[ku] = align
-                cand_signal[ku] = sig
-                cand_leakage[ku] = ell
-                cand_attempts[ku] = attempts
-                cand_accept[ku] = 1.0 if accepted else 0.0
-                cand_beams[:, ku] = real_to_complex_beam(xk, cfg.total_tx_power, k)
-
-            cand_rate, cand_actual_sinr = compute_slot_sum_rate(
-                channels[t], cand_beams, noise_power
-            )
-            cand_proxy_sinr = compute_slot_sinr_proxy(
-                channels[t], cand_beams, noise_power
-            )
-            cand_reward = compute_rl_reward(
-                reward_mode=rl_cfg.reward_mode,
-                rate=cand_rate,
-                zf_rate=zf_rate,
-                actual_sinr=cand_actual_sinr,
-                zf_actual_sinr=zf_actual_sinr,
-                proxy_sinr=cand_proxy_sinr,
-                zf_proxy_sinr=zf_proxy_sinr,
-                eps=rl_cfg.reward_sinr_eps,
-            )
-
-            # Select the candidate maximizing the same scalar objective used
-            # for policy-gradient reward. For reward modes based on log-ratios
-            # or throughput deltas, larger is always better.
-            if cand_reward > best_score:
-                best_score = cand_reward
-                best_candidate_index = cand_idx
-                best_beams = cand_beams
-                best_x_sample = cand_x_sample
-                best_alignment = cand_alignment
-                best_signal = cand_signal
-                best_leakage = cand_leakage
-                best_attempts = cand_attempts
-                best_accept = cand_accept
-                best_rate = cand_rate
-                best_actual_sinr = cand_actual_sinr
-                best_proxy_sinr = cand_proxy_sinr
-                best_reward = cand_reward
-
-        assert best_beams is not None
-        beams = best_beams
-        x_sample = best_x_sample
-        alignment_trace[t] = best_alignment
-        signal_trace[t] = best_signal
-        leakage_trace[t] = best_leakage
-        fb_attempts_trace[t] = best_attempts
-        fb_accept_trace[t] = best_accept
-        rate = float(best_rate)
-        actual_sinr = best_actual_sinr
-        proxy_sinr = best_proxy_sinr
-        reward = float(best_reward)
-        best_of_n_score_trace[t] = best_score
-        best_of_n_selected_trace[t] = best_candidate_index
+        zf_proxy_sinr = compute_pmi_sinr_proxy_from_precoder(
+            q_vectors, zf_baseline["precoders"][t], noise_power, eps=rl_cfg.reward_sinr_eps
+        )
+        reward = compute_rl_reward(
+            reward_mode=rl_cfg.reward_mode,
+            rate=rate,
+            zf_rate=zf_rate,
+            actual_sinr=actual_sinr,
+            zf_actual_sinr=zf_actual_sinr,
+            proxy_sinr=proxy_sinr,
+            zf_proxy_sinr=zf_proxy_sinr,
+            eps=rl_cfg.reward_sinr_eps,
+        )
 
         if reward_baseline is None:
             reward_baseline = reward
@@ -796,7 +755,6 @@ def run_esn_policy_rl(
         "zf_proxy_sinr": zf_proxy_sinr_trace,
         "proxy_sinr_ratio": proxy_sinr_ratio_trace,
         "actual_sinr_ratio": actual_sinr_ratio_trace,
-        "phase_alignment": alignment_trace,
         "advantage": advantage_trace,
         "reward_baseline": baseline_trace,
         "kappa": kappa_trace,
@@ -808,8 +766,6 @@ def run_esn_policy_rl(
         "leakage": leakage_trace,
         "fb_attempts": fb_attempts_trace,
         "fb_accept": fb_accept_trace,
-        "best_of_n_score": best_of_n_score_trace,
-        "best_of_n_selected": best_of_n_selected_trace,
         "esn_states": esn_states,
     }
 
@@ -835,7 +791,6 @@ def save_plots(
     grad_norm = rl_results["grad_norm"]
     proxy_sinr_ratio = rl_results.get("proxy_sinr_ratio", None)
     actual_sinr_ratio = rl_results.get("actual_sinr_ratio", None)
-    phase_alignment = rl_results.get("phase_alignment", None)
     signal = rl_results.get("signal", None)
     leakage = rl_results.get("leakage", None)
     fb_attempts = rl_results.get("fb_attempts", None)
@@ -850,7 +805,6 @@ def save_plots(
     grad_norm_avg = moving_average(grad_norm, window_len)
     proxy_sinr_ratio_avg = moving_average(proxy_sinr_ratio.mean(axis=1), window_len) if proxy_sinr_ratio is not None else None
     actual_sinr_ratio_avg = moving_average(actual_sinr_ratio.mean(axis=1), window_len) if actual_sinr_ratio is not None else None
-    phase_alignment_avg = moving_average(phase_alignment.mean(axis=1), window_len) if phase_alignment is not None else None
     signal_avg = moving_average(signal.mean(axis=1), window_len) if signal is not None else None
     leakage_avg = moving_average(leakage.mean(axis=1), window_len) if leakage is not None else None
     fb_attempts_avg = moving_average(fb_attempts.mean(axis=1), window_len) if fb_attempts is not None else None
@@ -862,7 +816,7 @@ def save_plots(
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
     ax1.plot(x_tput, zf_avg, lw=1.5, label="ZF baseline")
     ax1.plot(x_tput, random_vmf_avg, lw=1.5, label="Random vMF baseline")
-    ax1.plot(x_tput, rl_avg, lw=1.5, label="ESN phase-invariant FB signal/leakage RL")
+    ax1.plot(x_tput, rl_avg, lw=1.5, label="ESN-FB PMI signal/leakage RL")
     ax1.set_title("Throughput Across Time")
     ax1.set_xlabel("Slot index")
     ax1.set_ylabel("Sum-rate [bits/s/Hz]")
@@ -874,7 +828,7 @@ def save_plots(
 
     fig2, ax2 = plt.subplots(figsize=(8, 4.5))
     ax2.plot(x_reward, reward_avg, lw=1.5)
-    ax2.set_title("ESN Phase-Invariant FB Signal/Leakage RL Reward Across Time")
+    ax2.set_title("ESN-FB Signal/Leakage RL Reward Across Time")
     ax2.set_xlabel("Slot index")
     ax2.set_ylabel("Reward vs ZF")
     ax2.grid(True, alpha=0.35)
@@ -884,7 +838,7 @@ def save_plots(
 
     fig3, ax3 = plt.subplots(figsize=(8, 4.5))
     ax3.plot(np.arange(1, beat_zf_avg.size + 1), beat_zf_avg, lw=1.5)
-    ax3.set_title("Fraction of Slots Where ESN Phase-Invariant FB Signal/Leakage RL Beats ZF")
+    ax3.set_title("Fraction of Slots Where ESN-FB Signal/Leakage RL Beats ZF")
     ax3.set_xlabel("Slot index")
     ax3.set_ylabel("Moving-average fraction")
     ax3.set_ylim(0.0, 1.0)
@@ -936,18 +890,6 @@ def save_plots(
         fig_actual.tight_layout()
         fig_actual.savefig(output_dir / "esn_fb_actual_sinr_ratio_to_zf.png", dpi=150)
         plt.close(fig_actual)
-
-    if phase_alignment_avg is not None:
-        fig_align, ax_align = plt.subplots(figsize=(8, 4.5))
-        ax_align.plot(np.arange(1, phase_alignment_avg.size + 1), phase_alignment_avg, lw=1.5)
-        ax_align.set_title("Mean Phase-Invariant Alignment of Accepted Samples")
-        ax_align.set_xlabel("Slot index")
-        ax_align.set_ylabel(r"$|m^H v|^2$")
-        ax_align.set_ylim(0.0, 1.0)
-        ax_align.grid(True, alpha=0.35)
-        fig_align.tight_layout()
-        fig_align.savefig(output_dir / "esn_fb_phase_invariant_alignment.png", dpi=150)
-        plt.close(fig_align)
 
     if signal_avg is not None:
         fig6, ax6 = plt.subplots(figsize=(8, 4.5))
@@ -1101,12 +1043,12 @@ def load_or_run_random_vmf_baseline(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched ESN phase-invariant Fisher-Bingham signal/leakage RL")
+    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched ESN Fisher-Bingham PMI signal/leakage RL")
     parser.add_argument("--num-slots", type=int, default=200000)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_global_per_UE"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/simple_esn_fb_signal_leakage_rl_precoder_design"))
     parser.add_argument("--window-len", type=int, default=1000)
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--force-recompute-baselines", action="store_true")
@@ -1142,7 +1084,6 @@ def parse_args() -> argparse.Namespace:
         help="Scalar reward used for REINFORCE updates.",
     )
     parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
-    parser.add_argument("--best-of-n", type=int, default=8, help="Number of complete candidate precoders sampled per slot; execute/train on the best by reward score.")
     return parser.parse_args()
 
 
@@ -1172,7 +1113,6 @@ def main() -> None:
         signal_norm_eps=args.signal_norm_eps,
         reward_mode=args.reward_mode,
         reward_sinr_eps=args.reward_sinr_eps,
-        best_of_n=args.best_of_n,
     )
 
     # Use separate RNG streams so loading cached baselines does not change the
@@ -1214,7 +1154,6 @@ def main() -> None:
     np.save(args.output_dir / "esn_fb_zf_proxy_sinr_trace.npy", rl_results["zf_proxy_sinr"])
     np.save(args.output_dir / "esn_fb_proxy_sinr_ratio_trace.npy", rl_results["proxy_sinr_ratio"])
     np.save(args.output_dir / "esn_fb_actual_sinr_ratio_trace.npy", rl_results["actual_sinr_ratio"])
-    np.save(args.output_dir / "esn_fb_phase_invariant_alignment_trace.npy", rl_results["phase_alignment"])
     np.save(args.output_dir / "esn_vmf_rl_advantage_trace.npy", rl_results["advantage"])
     np.save(args.output_dir / "esn_vmf_rl_reward_baseline_trace.npy", rl_results["reward_baseline"])
     np.save(args.output_dir / "esn_vmf_rl_kappa_trace.npy", rl_results["kappa"])
@@ -1226,8 +1165,6 @@ def main() -> None:
     np.save(args.output_dir / "esn_fb_leakage_trace.npy", rl_results["leakage"])
     np.save(args.output_dir / "esn_fb_sampler_attempts_trace.npy", rl_results["fb_attempts"])
     np.save(args.output_dir / "esn_fb_sampler_accept_trace.npy", rl_results["fb_accept"])
-    np.save(args.output_dir / "esn_fb_best_of_n_score_trace.npy", rl_results["best_of_n_score"])
-    np.save(args.output_dir / "esn_fb_best_of_n_selected_trace.npy", rl_results["best_of_n_selected"])
     np.save(args.output_dir / "esn_states_trace.npy", rl_results["esn_states"])
 
     save_plots(
@@ -1238,25 +1175,22 @@ def main() -> None:
         window_len=args.window_len,
     )
 
-    print("Simple ESN phase-invariant FB signal/leakage RL precoder design run finished.")
+    print("Simple ESN-FB PMI signal/leakage RL precoder design run finished.")
     print(f"ZF average throughput         : {zf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"ESN phase-invariant FB signal/leakage RL throughput  : {rl_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"ESN-FB PMI signal/leakage RL throughput  : {rl_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Reward mode                   : {rl_cfg.reward_mode}")
-    print(f"ESN phase-invariant FB signal/leakage RL reward      : {rl_results['reward'].mean():.4f}")
+    print(f"ESN-FB PMI signal/leakage RL reward      : {rl_results['reward'].mean():.4f}")
     print(f"ESN-FB throughput delta       : {rl_results['rate_delta'].mean():.4f}")
     print(f"Mean proxy-SINR ratio to ZF   : {rl_results['proxy_sinr_ratio'].mean():.4f}")
     print(f"Mean actual SINR ratio to ZF  : {rl_results['actual_sinr_ratio'].mean():.4f}")
-    print(f"Mean phase-invariant alignment: {rl_results['phase_alignment'].mean():.4f}")
     print(f"RL beats ZF fraction          : {rl_results['beat_zf'].mean():.4f}")
     print(f"Mean beam similarity to ZF    : {rl_results['beam_similarity_to_zf'].mean():.4f}")
     print(f"Mean grad norm                : {rl_results['grad_norm'].mean():.4f}")
-    print(f"Mean normalized desired signal: {rl_results['signal'].mean():.4f}")
-    print(f"Mean normalized leakage       : {rl_results['leakage'].mean():.4f}")
+    print(f"Mean normalized PMI desired signal: {rl_results['signal'].mean():.4f}")
+    print(f"Mean normalized PMI leakage       : {rl_results['leakage'].mean():.4f}")
     print(f"FB sampler acceptance rate    : {rl_results['fb_accept'].mean():.4f}")
     print(f"FB sampler avg attempts       : {rl_results['fb_attempts'].mean():.4f}")
-    print(f"Best-of-N candidates          : {rl_cfg.best_of_n}")
-    print(f"Mean selected candidate index : {rl_results['best_of_n_selected'].mean():.4f}")
 
 
 if __name__ == "__main__":
