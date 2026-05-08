@@ -35,6 +35,8 @@ class RLConfig:
     reservoir_size: int = 128
     spectral_radius: float = 0.8
     input_scale: float = 0.15
+    learned_policy_probability: float = 0.5
+    kappa_dk: float = 50.0
     leakage_lambda: float = 1.0
     signal_gamma: float = 0.5
     max_fb_resamples: int = 16
@@ -42,7 +44,7 @@ class RLConfig:
     signal_norm_eps: float = 1e-12
     reward_mode: str = "sinr_proxy_log_ratio"
     reward_sinr_eps: float = 1e-12
-    best_of_n: int = 8
+    best_of_n: int = 1
 
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
@@ -225,6 +227,13 @@ def unit_norm(x: np.ndarray) -> np.ndarray:
 def real_to_complex_beam(x: np.ndarray, total_tx_power: float, num_users: int) -> np.ndarray:
     nt = x.size // 2
     return np.sqrt(total_tx_power / num_users) * (x[:nt] + 1j * x[nt:])
+
+
+def complex_to_real_unit(p: np.ndarray, total_tx_power: float, num_users: int) -> np.ndarray:
+    """Map one complex equal-power beam to a real unit vector on S^{2N_t-1}."""
+    scale = np.sqrt(total_tx_power / num_users)
+    x = np.concatenate([np.real(p), np.imag(p)], axis=0) / max(scale, 1e-12)
+    return unit_norm(x)
 
 
 def beam_similarity(p_a: np.ndarray, p_b: np.ndarray) -> np.ndarray:
@@ -564,11 +573,22 @@ def compute_esn_states(pmi_features: np.ndarray, rl_cfg: RLConfig, rng: np.rando
     return states
 
 
-def vmf_log_prob_fixed_kappa_torch(
-    x: torch.Tensor, mu: torch.Tensor, fixed_kappa: float
+def vmf_log_prob_approx_torch(
+    x: torch.Tensor, mu: torch.Tensor, kappa: float
 ) -> torch.Tensor:
-    """vMF log probability up to a constant when kappa is fixed."""
-    return fixed_kappa * torch.sum(mu * x, dim=-1)
+    """Approximate vMF log probability for real unit vectors.
+
+    The exact vMF normalizer contains a modified Bessel term.  For this
+    lightweight testbench we use the same large-kappa approximation style as
+    the older mixture-policy script.  Including the approximate normalizer is
+    useful here because the learned branch and DK branch can use different
+    kappa values.
+    """
+    dim = x.shape[-1]
+    kappa_t = torch.as_tensor(kappa, dtype=x.dtype, device=x.device)
+    kappa_safe = torch.clamp(kappa_t, min=1e-12)
+    log_c = (dim / 2.0 - 1.0) * torch.log(kappa_safe) - (dim / 2.0) * np.log(2.0 * np.pi) - kappa_safe
+    return log_c + kappa_t * torch.sum(mu * x, dim=-1)
 
 
 def run_esn_policy_rl(
@@ -590,6 +610,12 @@ def run_esn_policy_rl(
     # This is the only trainable policy parameter in this fixed-reservoir ESN setup.
     w_out_init = rl_cfg.init_scale_out * rng.standard_normal((k, d, state_dim))
     w_out = torch.nn.Parameter(torch.tensor(w_out_init, dtype=torch.float64))
+
+    # Fixed mixture-policy domain-knowledge injection.
+    # p_learned selects the learned per-UE FB-vMF branch.
+    # 1 - p_learned selects a DK branch: per-UE vMFs centered at the ZF beams.
+    # In this step-by-step version, this probability is fixed, not learned.
+    p_learned_fixed = float(np.clip(rl_cfg.learned_policy_probability, 1e-6, 1.0 - 1e-6))
     optimizer = torch.optim.Adam([w_out], lr=rl_cfg.lr_out)
 
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
@@ -612,6 +638,11 @@ def run_esn_policy_rl(
     fb_accept_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     best_of_n_score_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     best_of_n_selected_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    learned_policy_probability_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    dk_policy_probability_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    selected_learned_branch_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    selected_dk_branch_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    mixture_logit_trace = np.zeros(cfg.num_slots, dtype=np.float64)
 
     reward_baseline: float | None = None
     batch_s: list[np.ndarray] = []
@@ -628,14 +659,17 @@ def run_esn_policy_rl(
         x_batch = torch.tensor(np.stack(batch_x, axis=0), dtype=torch.float64)
         adv_batch = torch.tensor(np.array(batch_adv), dtype=torch.float64)
 
-        # Recompute log probabilities under the current W_out for REINFORCE.
-        # logits/mu shape: [B, K, D]
+        # Recompute the learned per-UE vMF means under the current W_out.
+        # Debugging version: update W_out only from actions actually generated
+        # by the learned branch. DK-branch actions are executed/evaluated but
+        # are not inserted into this batch, so they contribute no policy-gradient
+        # term. Since the mixture probability is fixed, this isolates learning of
+        # the learned-policy mean map.
         logits = torch.einsum("kdn,bn->bkd", w_out, s_batch)
         mu = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
 
-        per_user_log_prob = vmf_log_prob_fixed_kappa_torch(x_batch, mu, rl_cfg.fixed_kappa)
-        joint_log_prob = torch.sum(per_user_log_prob, dim=1)
-        loss = -torch.mean(adv_batch * joint_log_prob)
+        log_pi_phi = torch.sum(vmf_log_prob_approx_torch(x_batch, mu, rl_cfg.fixed_kappa), dim=1)
+        loss = -torch.mean(adv_batch * log_pi_phi)
 
         optimizer.zero_grad()
         loss.backward()
@@ -650,6 +684,7 @@ def run_esn_policy_rl(
 
         batch_s = []
         batch_x = []
+        batch_mu_dk = []
         batch_adv = []
         batch_indices = []
 
@@ -676,11 +711,30 @@ def run_esn_policy_rl(
             q_vectors, zf_baseline["precoders"][t], noise_power, eps=rl_cfg.reward_sinr_eps
         )
 
-        # Best-of-N full-precoder selection. Each candidate is a complete
-        # K-column precoder generated by the current per-UE PMI-only
-        # signal/leakage sampler. We score each full candidate using the
-        # same scalar reward used for the policy-gradient update and keep
-        # the best candidate for execution/training.
+        # DK branch: one per-UE vMF centered at the current ZF beam direction.
+        # This keeps the per-UE sphere structure: each beam lives on S^{2N_t-1}.
+        p_zf = normalize_columns_equal_power(zf_baseline["precoders"][t], cfg.total_tx_power)
+        mu_zf = np.zeros((k, d), dtype=np.float64)
+        for ku in range(k):
+            mu_zf[ku] = complex_to_real_unit(p_zf[:, ku], cfg.total_tx_power, k)
+
+        p_learned_np = p_learned_fixed
+        learned_policy_probability_trace[t] = p_learned_np
+        dk_policy_probability_trace[t] = 1.0 - p_learned_np
+        mixture_logit_trace[t] = np.log(p_learned_np / (1.0 - p_learned_np))
+
+        # Branch-first mixture-policy execution.
+        # First choose the branch for this slot using the fixed mixture probability.
+        # If the learned branch is selected, run best-of-N over learned FB-vMF
+        # candidates only. If the DK branch is selected, draw exactly one
+        # ZF-centered DK perturbation. This means best_of_n only improves the
+        # learned branch; it does not give the DK branch multiple chances.
+        slot_from_learned = rng.uniform(0.0, 1.0) < p_learned_np
+        # Temporary debugging setting: no best-of-N selection. The learned
+        # branch samples exactly one full precoder, and the DK branch samples
+        # exactly one ZF-centered perturbation.
+        num_candidates = 1
+
         best_score = -np.inf
         best_candidate_index = 0
         best_beams = None
@@ -693,8 +747,9 @@ def run_esn_policy_rl(
         best_actual_sinr = None
         best_proxy_sinr = None
         best_reward = None
+        best_from_learned = slot_from_learned
 
-        for cand_idx in range(max(1, rl_cfg.best_of_n)):
+        for cand_idx in range(num_candidates):
             cand_beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
             cand_x_sample = np.zeros((k, d), dtype=np.float64)
             cand_signal = np.zeros(k, dtype=np.float64)
@@ -703,18 +758,28 @@ def run_esn_policy_rl(
             cand_accept = np.zeros(k, dtype=np.float64)
 
             for ku in range(k):
-                xk, sig, ell, attempts, accepted = sample_fisher_bingham_signal_leakage(
-                    mu=mu_np[ku],
-                    kappa=rl_cfg.fixed_kappa,
-                    signal_mat=signal_mats[ku],
-                    leakage_mat=leakage_mats[ku],
-                    signal_gamma=rl_cfg.signal_gamma,
-                    leakage_lambda=rl_cfg.leakage_lambda,
-                    rng=rng,
-                    max_resamples=rl_cfg.max_fb_resamples,
-                    signal_norm_eps=rl_cfg.signal_norm_eps,
-                    leakage_norm_eps=rl_cfg.leakage_norm_eps,
-                )
+                if slot_from_learned:
+                    xk, sig, ell, attempts, accepted = sample_fisher_bingham_signal_leakage(
+                        mu=mu_np[ku],
+                        kappa=rl_cfg.fixed_kappa,
+                        signal_mat=signal_mats[ku],
+                        leakage_mat=leakage_mats[ku],
+                        signal_gamma=rl_cfg.signal_gamma,
+                        leakage_lambda=rl_cfg.leakage_lambda,
+                        rng=rng,
+                        max_resamples=rl_cfg.max_fb_resamples,
+                        signal_norm_eps=rl_cfg.signal_norm_eps,
+                        leakage_norm_eps=rl_cfg.leakage_norm_eps,
+                    )
+                else:
+                    # DK branch: one vMF draw per UE around the ZF direction.
+                    # No best-of-N and no FB rejection/resampling for the DK branch.
+                    xk = sample_vmf(mu_zf[ku], rl_cfg.kappa_dk, rng)
+                    sig = normalized_signal_score(xk, signal_mats[ku], rl_cfg.signal_norm_eps)
+                    ell = normalized_leakage_score(xk, leakage_mats[ku], rl_cfg.leakage_norm_eps)
+                    attempts = 1
+                    accepted = True
+
                 cand_x_sample[ku] = xk
                 cand_signal[ku] = sig
                 cand_leakage[ku] = ell
@@ -769,6 +834,8 @@ def run_esn_policy_rl(
         reward = float(best_reward)
         best_of_n_score_trace[t] = best_score
         best_of_n_selected_trace[t] = best_candidate_index
+        selected_learned_branch_trace[t] = 1.0 if bool(best_from_learned) else 0.0
+        selected_dk_branch_trace[t] = 1.0 - selected_learned_branch_trace[t]
 
         if reward_baseline is None:
             reward_baseline = reward
@@ -793,10 +860,14 @@ def run_esn_policy_rl(
         beat_zf_trace[t] = 1.0 if rate > zf_rate else 0.0
         beam_similarity_trace[t] = beam_similarity(beams, zf_baseline["precoders"][t])
 
-        batch_s.append(s)
-        batch_x.append(x_sample)
-        batch_adv.append(advantage)
-        batch_indices.append(t)
+        # Train only on learned-branch samples for this debugging version.
+        # DK branch samples are executed and logged, but they are not used to
+        # update W_out.
+        if slot_from_learned:
+            batch_s.append(s)
+            batch_x.append(x_sample)
+            batch_adv.append(advantage)
+            batch_indices.append(t)
 
         if len(batch_s) >= rl_cfg.batch_size:
             flush_batch()
@@ -825,6 +896,11 @@ def run_esn_policy_rl(
         "fb_accept": fb_accept_trace,
         "best_of_n_score": best_of_n_score_trace,
         "best_of_n_selected": best_of_n_selected_trace,
+        "learned_policy_probability": learned_policy_probability_trace,
+        "dk_policy_probability": dk_policy_probability_trace,
+        "selected_learned_branch": selected_learned_branch_trace,
+        "selected_dk_branch": selected_dk_branch_trace,
+        "mixture_logit": mixture_logit_trace,
         "esn_states": esn_states,
     }
 
@@ -854,6 +930,9 @@ def save_plots(
     leakage = rl_results.get("leakage", None)
     fb_attempts = rl_results.get("fb_attempts", None)
     fb_accept = rl_results.get("fb_accept", None)
+    learned_policy_probability = rl_results.get("learned_policy_probability", None)
+    dk_policy_probability = rl_results.get("dk_policy_probability", None)
+    selected_learned_branch = rl_results.get("selected_learned_branch", None)
 
     zf_avg = moving_average(zf_throughput, window_len)
     random_vmf_avg = moving_average(random_vmf_throughput, window_len)
@@ -868,6 +947,9 @@ def save_plots(
     leakage_avg = moving_average(leakage.mean(axis=1), window_len) if leakage is not None else None
     fb_attempts_avg = moving_average(fb_attempts.mean(axis=1), window_len) if fb_attempts is not None else None
     fb_accept_avg = moving_average(fb_accept.mean(axis=1), window_len) if fb_accept is not None else None
+    learned_policy_probability_avg = moving_average(learned_policy_probability, window_len) if learned_policy_probability is not None else None
+    dk_policy_probability_avg = moving_average(dk_policy_probability, window_len) if dk_policy_probability is not None else None
+    selected_learned_branch_avg = moving_average(selected_learned_branch, window_len) if selected_learned_branch is not None else None
 
     x_tput = np.arange(1, zf_avg.size + 1)
     x_reward = np.arange(1, reward_avg.size + 1)
@@ -997,6 +1079,33 @@ def save_plots(
 
 
 
+    if learned_policy_probability_avg is not None and dk_policy_probability_avg is not None:
+        fig9, ax9 = plt.subplots(figsize=(8, 4.5))
+        ax9.plot(np.arange(1, learned_policy_probability_avg.size + 1), learned_policy_probability_avg, lw=1.5, label="Learned policy probability")
+        ax9.plot(np.arange(1, dk_policy_probability_avg.size + 1), dk_policy_probability_avg, lw=1.5, label="Domain-knowledge policy probability")
+        ax9.set_title("Hybrid Mixture Branch Probabilities Across Time")
+        ax9.set_xlabel("Slot index")
+        ax9.set_ylabel("Probability")
+        ax9.set_ylim(0.0, 1.0)
+        ax9.grid(True, alpha=0.35)
+        ax9.legend(loc="best")
+        fig9.tight_layout()
+        fig9.savefig(output_dir / "hybrid_mixture_branch_probabilities.png", dpi=150)
+        plt.close(fig9)
+
+    if selected_learned_branch_avg is not None:
+        fig10, ax10 = plt.subplots(figsize=(8, 4.5))
+        ax10.plot(np.arange(1, selected_learned_branch_avg.size + 1), selected_learned_branch_avg, lw=1.5)
+        ax10.set_title("Fraction of Executed Slots from Learned Branch")
+        ax10.set_xlabel("Slot index")
+        ax10.set_ylabel("Moving-average fraction")
+        ax10.set_ylim(0.0, 1.0)
+        ax10.grid(True, alpha=0.35)
+        fig10.tight_layout()
+        fig10.savefig(output_dir / "hybrid_mixture_executed_learned_branch.png", dpi=150)
+        plt.close(fig10)
+
+
 def sim_cache_metadata(cfg: SimConfig) -> dict[str, float | int]:
     """Metadata that determines whether cached channel-dependent baselines are valid."""
     return {
@@ -1107,7 +1216,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE_with_mixture"))
     parser.add_argument("--window-len", type=int, default=5000)
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--force-recompute-baselines", action="store_true")
@@ -1116,6 +1225,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reservoir-size", type=int, default=128)
     parser.add_argument("--spectral-radius", type=float, default=0.8)
     parser.add_argument("--input-scale", type=float, default=0.15)
+
+    # Mixture-policy domain-knowledge injection knobs.
+    parser.add_argument("--learned-policy-probability", type=float, default=0.5, help="Fixed probability of sampling the learned-policy branch. Default 0.5 gives 50%% learned / 50%% DK.")
+    parser.add_argument("--kappa-dk", type=float, default=50.0, help="Fixed vMF concentration for the ZF-centered domain-knowledge branch.")
 
     # RL/training knobs.
     parser.add_argument("--batch-size", type=int, default=512)
@@ -1143,7 +1256,7 @@ def parse_args() -> argparse.Namespace:
         help="Scalar reward used for REINFORCE updates.",
     )
     parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
-    parser.add_argument("--best-of-n", type=int, default=4, help="Number of complete candidate precoders sampled per slot; execute/train on the best by reward score.")
+    parser.add_argument("--best-of-n", type=int, default=1, help="Temporarily fixed to 1 for debugging: no best-of-N selection is used.")
     return parser.parse_args()
 
 
@@ -1166,6 +1279,8 @@ def main() -> None:
         reservoir_size=args.reservoir_size,
         spectral_radius=args.spectral_radius,
         input_scale=args.input_scale,
+        learned_policy_probability=args.learned_policy_probability,
+        kappa_dk=args.kappa_dk,
         leakage_lambda=args.leakage_lambda,
         signal_gamma=args.signal_gamma,
         max_fb_resamples=args.max_fb_resamples,
@@ -1173,7 +1288,7 @@ def main() -> None:
         signal_norm_eps=args.signal_norm_eps,
         reward_mode=args.reward_mode,
         reward_sinr_eps=args.reward_sinr_eps,
-        best_of_n=args.best_of_n,
+        best_of_n=1,  # temporary debugging setting: force best_of_n=1
     )
 
     # Use separate RNG streams so loading cached baselines does not change the
@@ -1228,6 +1343,11 @@ def main() -> None:
     np.save(args.output_dir / "esn_fb_sampler_accept_trace.npy", rl_results["fb_accept"])
     np.save(args.output_dir / "esn_fb_best_of_n_score_trace.npy", rl_results["best_of_n_score"])
     np.save(args.output_dir / "esn_fb_best_of_n_selected_trace.npy", rl_results["best_of_n_selected"])
+    np.save(args.output_dir / "hybrid_mixture_learned_policy_probability_trace.npy", rl_results["learned_policy_probability"])
+    np.save(args.output_dir / "hybrid_mixture_dk_policy_probability_trace.npy", rl_results["dk_policy_probability"])
+    np.save(args.output_dir / "hybrid_mixture_selected_learned_branch_trace.npy", rl_results["selected_learned_branch"])
+    np.save(args.output_dir / "hybrid_mixture_selected_dk_branch_trace.npy", rl_results["selected_dk_branch"])
+    np.save(args.output_dir / "hybrid_mixture_fixed_logit_trace.npy", rl_results["mixture_logit"])
     np.save(args.output_dir / "esn_states_trace.npy", rl_results["esn_states"])
 
     save_plots(
@@ -1254,8 +1374,13 @@ def main() -> None:
     print(f"Mean normalized PMI leakage       : {rl_results['leakage'].mean():.4f}")
     print(f"FB sampler acceptance rate    : {rl_results['fb_accept'].mean():.4f}")
     print(f"FB sampler avg attempts       : {rl_results['fb_attempts'].mean():.4f}")
-    print(f"Best-of-N candidates          : {rl_cfg.best_of_n}")
-    print(f"Mean selected candidate index : {rl_results['best_of_n_selected'].mean():.4f}")
+    print(f"Best-of-N candidates          : {rl_cfg.best_of_n}  (temporarily forced to 1)")
+    print(f"Mean selected candidate index : {rl_results['best_of_n_selected'].mean():.4f}  (DK slots always index 0)")
+    print(f"Mean learned branch prob      : {rl_results['learned_policy_probability'].mean():.4f}")
+    print(f"Mean DK branch prob           : {rl_results['dk_policy_probability'].mean():.4f}")
+    print(f"Selected learned branch frac  : {rl_results['selected_learned_branch'].mean():.4f}")
+    print(f"Selected DK branch frac       : {rl_results['selected_dk_branch'].mean():.4f}")
+    print(f"Fixed learned branch prob     : {rl_results['learned_policy_probability'][-1]:.4f}")
 
 
 if __name__ == "__main__":
