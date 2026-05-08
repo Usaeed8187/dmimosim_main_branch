@@ -1048,7 +1048,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/simple_esn_fb_signal_leakage_rl_precoder_design"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE"))
     parser.add_argument("--window-len", type=int, default=1000)
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--force-recompute-baselines", action="store_true")
