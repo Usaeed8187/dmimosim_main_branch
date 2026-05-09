@@ -26,7 +26,7 @@ class SimConfig:
 @dataclass
 class RLConfig:
     lr_out: float = 3e-2
-    fixed_kappa: float = 10.0
+    fixed_kappa: float = 3.0
     reward_baseline_beta: float = 0.99
     advantage_clip: float = 1.0
     grad_clip_norm: float = 1.0
@@ -45,13 +45,14 @@ class RLConfig:
     leakage_norm_eps: float = 1e-12
     signal_norm_eps: float = 1e-12
     reward_mode: str = "rate_log_ratio"
+    reward_reference: str = "slnr"
     reward_sinr_eps: float = 1e-12
     # Keep this at 1 for exact on-policy training. The per-UE candidate
     # sampler already uses max_fb_resamples candidate directions.
     best_of_n: int = 1
     # Candidate-softmax controls for the phase-invariant finite policy.
     # Smaller temperature makes the categorical selection stricter.
-    candidate_temperature: float = 0.2
+    candidate_temperature: float = 0.8
     normalize_candidate_scores: bool = True
     # Mixed candidate pool. Uniform/PMI/SLNR candidates are independent of
     # W_out. The optional WESN-centered group is generated around the current
@@ -62,12 +63,19 @@ class RLConfig:
     pmi_candidate_frac: float = 0.35
     slnr_candidate_frac: float = 0.35
     wesn_candidate_frac: float = 0.20
-    candidate_proposal_kappa: float = 15.0
+    candidate_proposal_kappa: float = 50.0
+    # SLNR-residual mode: the learned WESN vector no longer defines an
+    # independent beam center.  Instead, it defines a residual/tangent
+    # correction around the PMI-SLNR direction, so SLNR is the default action
+    # and WESN learns how to deform it.
+    slnr_residual_scale: float = 0.15
+    include_exact_anchor_candidates: bool = True
     # Auxiliary joint PMI-only full-precoder ranking loss.  This uses multiple
     # unexecuted candidate combinations through a PMI-only SINR/rate proxy,
     # while the RL term still uses only the actually executed precoder reward.
     # Set joint_pmi_aux_loss_weight=0 to disable.
-    joint_pmi_aux_loss_weight: float = 0.05
+    joint_pmi_aux_loss_weight: float = 0.0
+    enable_oracle_pool_diagnostics: bool = False
     joint_pmi_aux_temperature: float = 0.5
     num_joint_pmi_aux_candidates: int = 32
 
@@ -556,6 +564,77 @@ def complex_inner_abs2_from_real_np(x: np.ndarray, mu: np.ndarray) -> float:
     return inner_re**2 + inner_im**2
 
 
+
+
+def phase_align_real_beam_to_reference_np(x: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    """Rotate complex beam x so that ref^H x has zero phase.
+
+    Both x and ref are real-packed complex unit vectors [Re{v}, Im{v}].
+    This is important when combining a learned correction with an SLNR anchor:
+    without phase alignment, the same physical beam with a different global
+    phase could destructively cancel the anchor.
+    """
+    nt = x.size // 2
+    v = x[:nt] + 1j * x[nt:]
+    r = ref[:nt] + 1j * ref[nt:]
+    inner = np.vdot(r, v)
+    if np.abs(inner) < 1e-12:
+        return unit_norm(x.copy())
+    v_aligned = np.exp(-1j * np.angle(inner)) * v
+    return unit_norm(np.concatenate([np.real(v_aligned), np.imag(v_aligned)]).astype(np.float64))
+
+
+def build_slnr_residual_center_np(
+    mu: np.ndarray, slnr_center: np.ndarray, residual_scale: float
+) -> np.ndarray:
+    """Build normalize(v_SLNR + alpha * Delta(mu)) in real-packed form.
+
+    The learned WESN output mu is interpreted as a residual direction around
+    the SLNR anchor, not as an independent beam.  We first align mu's global
+    phase to the SLNR direction, remove the component parallel to SLNR, and
+    then add the remaining tangent-like correction to the SLNR anchor.
+    """
+    slnr_center = unit_norm(slnr_center)
+    mu_aligned = phase_align_real_beam_to_reference_np(unit_norm(mu), slnr_center)
+    parallel = float(np.dot(slnr_center, mu_aligned)) * slnr_center
+    residual = mu_aligned - parallel
+    if np.linalg.norm(residual) < 1e-12:
+        return slnr_center.copy()
+    return unit_norm(slnr_center + float(residual_scale) * residual)
+
+
+def build_slnr_residual_center_torch(
+    mu: torch.Tensor, slnr_center: torch.Tensor, residual_scale: float
+) -> torch.Tensor:
+    """Torch version of build_slnr_residual_center_np.
+
+    Shapes: mu and slnr_center are [..., D] real-packed complex vectors.
+    """
+    d = mu.shape[-1]
+    nt = d // 2
+    mu = mu / torch.clamp(torch.linalg.norm(mu, dim=-1, keepdim=True), min=1e-12)
+    slnr_center = slnr_center / torch.clamp(torch.linalg.norm(slnr_center, dim=-1, keepdim=True), min=1e-12)
+
+    mu_re, mu_im = mu[..., :nt], mu[..., nt:]
+    ref_re, ref_im = slnr_center[..., :nt], slnr_center[..., nt:]
+
+    inner_re = torch.sum(ref_re * mu_re + ref_im * mu_im, dim=-1, keepdim=True)
+    inner_im = torch.sum(ref_re * mu_im - ref_im * mu_re, dim=-1, keepdim=True)
+    mag = torch.clamp(torch.sqrt(inner_re**2 + inner_im**2), min=1e-12)
+
+    # Multiply mu by exp(-j angle(ref^H mu)).
+    cos_phi = inner_re / mag
+    sin_phi = -inner_im / mag
+    mu_aligned_re = cos_phi * mu_re - sin_phi * mu_im
+    mu_aligned_im = sin_phi * mu_re + cos_phi * mu_im
+    mu_aligned = torch.cat([mu_aligned_re, mu_aligned_im], dim=-1)
+
+    parallel_coeff = torch.sum(slnr_center * mu_aligned, dim=-1, keepdim=True)
+    residual = mu_aligned - parallel_coeff * slnr_center
+    center = slnr_center + float(residual_scale) * residual
+    return center / torch.clamp(torch.linalg.norm(center, dim=-1, keepdim=True), min=1e-12)
+
+
 def complex_inner_abs2_from_real_torch(x: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
     """Return |mu^H v|^2 for real-packed complex vectors.
 
@@ -582,13 +661,30 @@ def phase_invariant_candidate_log_probs_torch(
     slnr_scores: torch.Tensor,
     candidate_temperature: float,
     normalize_candidate_scores: bool,
+    slnr_centers: torch.Tensor | None = None,
+    slnr_residual_scale: float = 0.0,
 ) -> torch.Tensor:
     """Log-probabilities over all candidates under the finite policy.
 
     candidate_pool has shape [B, K, M, D], mu has shape [B, K, D], and
     slnr_scores has shape [B, K, M].  The returned tensor has shape [B, K, M].
+
+    If slnr_centers is provided, the WESN mean is interpreted as a residual
+    correction around the SLNR anchor.  The phase score then uses
+
+        c = normalize(v_SLNR + alpha * Delta(mu))
+
+    instead of using mu directly.
     """
-    mu_expanded = mu.unsqueeze(-2)
+    if slnr_centers is not None:
+        policy_center = build_slnr_residual_center_torch(
+            mu=mu,
+            slnr_center=slnr_centers,
+            residual_scale=slnr_residual_scale,
+        )
+    else:
+        policy_center = mu
+    mu_expanded = policy_center.unsqueeze(-2)
     phase_scores = fixed_kappa * complex_inner_abs2_from_real_torch(candidate_pool, mu_expanded)
     if normalize_candidate_scores:
         phase_scores = (
@@ -609,6 +705,8 @@ def phase_invariant_candidate_log_prob_torch(
     slnr_scores: torch.Tensor,
     candidate_temperature: float,
     normalize_candidate_scores: bool,
+    slnr_centers: torch.Tensor | None = None,
+    slnr_residual_scale: float = 0.0,
 ) -> torch.Tensor:
     """Log-probability of the selected candidate under the finite policy.
 
@@ -631,6 +729,8 @@ def phase_invariant_candidate_log_prob_torch(
         slnr_scores=slnr_scores,
         candidate_temperature=candidate_temperature,
         normalize_candidate_scores=normalize_candidate_scores,
+        slnr_centers=slnr_centers,
+        slnr_residual_scale=slnr_residual_scale,
     )
     return torch.gather(log_probs, dim=-1, index=selected_indices.unsqueeze(-1)).squeeze(-1)
 
@@ -812,8 +912,11 @@ def sample_fisher_bingham_signal_leakage(
     slnr_candidate_frac: float,
     wesn_candidate_frac: float,
     candidate_proposal_kappa: float,
+    slnr_residual_scale: float,
+    include_exact_anchor_candidates: bool,
+    slnr_center_override: np.ndarray | None = None,
 ) -> tuple[
-    np.ndarray, float, float, int, bool, np.ndarray, np.ndarray, np.ndarray, int, dict[str, float]
+    np.ndarray, float, float, int, bool, np.ndarray, np.ndarray, np.ndarray, int, dict[str, float], np.ndarray
 ]:
     """Candidate-based phase-invariant PMI-SLNR policy sampler.
 
@@ -821,19 +924,24 @@ def sample_fisher_bingham_signal_leakage(
       1) uniform directions for exploration,
       2) phase-randomized vMF directions around the PMI vector q_k,
       3) phase-randomized vMF directions around a PMI-SLNR generalized-eigenvector,
-      4) phase-randomized vMF directions around the current WESN mean mu.
+      4) phase-randomized vMF directions around an SLNR-residual WESN center.
 
-    The WESN-centered proposal gives the learned mean a direct way to introduce
-    candidate directions.  The training loss below remains an exact conditional
-    log-softmax update for the selector given the realized candidate pool, but
-    it treats the WESN-centered pool itself as fixed during the batch update
-    (a stop-gradient proposal approximation).
+    In residual mode, the learned WESN output does not compete with SLNR as an
+    unrelated center.  Instead, it defines a residual/tangent correction around
+    the SLNR direction:
 
-    After the pool is drawn, the WESN-dependent mean mu affects the
+        c_WESN = normalize(v_SLNR + alpha * Delta(mu)).
+
+    Thus SLNR is the default action, and WESN learns how to deform it.  The
+    training loss below remains a conditional log-softmax update for the
+    selector given the realized candidate pool, while treating the candidate
+    proposal itself as stop-gradient.
+
+    After the pool is drawn, the WESN-dependent residual center affects the
     categorical selector over the realized pool:
 
         pi(i | s, C) ∝ exp((score_i) / tau),
-        score_i = kappa |mu^H v_i|^2 + gamma g_i/(ell_i+sigma2_eff).
+        score_i = kappa |c_WESN^H v_i|^2 + gamma g_i/(ell_i+sigma2_eff).
 
     If normalize_candidate_scores=True, the phase and SLNR terms are separately
     standardized over the candidate pool before the temperature is applied.
@@ -851,30 +959,60 @@ def sample_fisher_bingham_signal_leakage(
         slnr_candidate_frac,
         wesn_candidate_frac,
     )
-    slnr_center = generalized_slnr_direction_real(signal_mat, leakage_mat, noise_floor)
+    if slnr_center_override is None:
+        slnr_center = generalized_slnr_direction_real(signal_mat, leakage_mat, noise_floor)
+    else:
+        slnr_center = unit_norm(slnr_center_override)
+    residual_center = build_slnr_residual_center_np(
+        mu=mu, slnr_center=slnr_center, residual_scale=slnr_residual_scale
+    )
 
     candidate_pool = np.zeros((num_candidates, dim), dtype=np.float64)
     source_pool = np.zeros(num_candidates, dtype=np.int64)  # 0=uniform, 1=PMI, 2=SLNR, 3=WESN-mu
     idx = 0
+
+    # Deterministic anchors make sure the policy can reproduce the strong
+    # hand-designed baselines exactly before trying to improve on them.
+    if include_exact_anchor_candidates and idx < num_candidates:
+        candidate_pool[idx] = slnr_center
+        source_pool[idx] = 2
+        idx += 1
+    if include_exact_anchor_candidates and idx < num_candidates:
+        candidate_pool[idx] = residual_center
+        source_pool[idx] = 3
+        idx += 1
+    if include_exact_anchor_candidates and idx < num_candidates:
+        candidate_pool[idx] = pmi_center
+        source_pool[idx] = 1
+        idx += 1
+
     for _ in range(n_uniform):
+        if idx >= num_candidates:
+            break
         candidate_pool[idx] = sample_uniform_real_unit_sphere(dim, rng)
         source_pool[idx] = 0
         idx += 1
     for _ in range(n_pmi):
+        if idx >= num_candidates:
+            break
         candidate_pool[idx] = sample_phase_randomized_vmf(
             pmi_center, candidate_proposal_kappa, rng
         )
         source_pool[idx] = 1
         idx += 1
     for _ in range(n_slnr):
+        if idx >= num_candidates:
+            break
         candidate_pool[idx] = sample_phase_randomized_vmf(
             slnr_center, candidate_proposal_kappa, rng
         )
         source_pool[idx] = 2
         idx += 1
     for _ in range(n_wesn):
+        if idx >= num_candidates:
+            break
         candidate_pool[idx] = sample_phase_randomized_vmf(
-            mu, candidate_proposal_kappa, rng
+            residual_center, candidate_proposal_kappa, rng
         )
         source_pool[idx] = 3
         idx += 1
@@ -894,7 +1032,7 @@ def sample_fisher_bingham_signal_leakage(
         ell = raw_quadratic_score(x, leakage_mat)
         signal_pool[i] = g
         leakage_pool[i] = ell
-        phase_score_pool[i] = kappa * complex_inner_abs2_from_real_np(x, mu)
+        phase_score_pool[i] = kappa * complex_inner_abs2_from_real_np(x, residual_center)
         slnr_score_pool[i] = signal_gamma * g / max(ell + noise_floor, leakage_norm_eps)
 
     if normalize_candidate_scores:
@@ -950,6 +1088,7 @@ def sample_fisher_bingham_signal_leakage(
         slnr_score_pool,
         selected_idx,
         diag,
+        residual_center,
     )
 
 def _sample_weight_vmf(dim: int, kappa: float, rng: np.random.Generator) -> float:
@@ -1100,6 +1239,7 @@ def run_wesn_policy_rl(
     rl_cfg: RLConfig,
     channels: np.ndarray,
     zf_baseline: dict[str, np.ndarray],
+    slnr_baseline: dict[str, np.ndarray],
     rng: np.random.Generator,
 ) -> dict[str, np.ndarray]:
     noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
@@ -1138,6 +1278,12 @@ def run_wesn_policy_rl(
     baseline_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     kappa_trace = np.full((cfg.num_slots, k), rl_cfg.fixed_kappa, dtype=np.float64)
     beat_zf_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    beat_slnr_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    rate_delta_slnr_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    actual_sinr_ratio_slnr_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    proxy_sinr_ratio_slnr_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    oracle_slnr_anchor_rate_trace = np.full(cfg.num_slots, np.nan, dtype=np.float64)
+    oracle_best_pool_rate_trace = np.full(cfg.num_slots, np.nan, dtype=np.float64)
     beam_similarity_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     grad_norm_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     loss_trace = np.zeros(cfg.num_slots, dtype=np.float64)
@@ -1175,12 +1321,13 @@ def run_wesn_policy_rl(
     batch_candidate_pools: list[np.ndarray] = []
     batch_slnr_score_pools: list[np.ndarray] = []
     batch_selected_indices: list[np.ndarray] = []
+    batch_slnr_centers: list[np.ndarray] = []
     batch_q_real: list[np.ndarray] = []
     batch_adv: list[float] = []
     batch_indices: list[int] = []
 
     def flush_batch() -> None:
-        nonlocal batch_s, batch_candidate_pools, batch_slnr_score_pools, batch_selected_indices, batch_q_real, batch_adv, batch_indices
+        nonlocal batch_s, batch_candidate_pools, batch_slnr_score_pools, batch_selected_indices, batch_slnr_centers, batch_q_real, batch_adv, batch_indices
         if not batch_s:
             return
 
@@ -1188,6 +1335,7 @@ def run_wesn_policy_rl(
         candidate_pool_batch = torch.tensor(np.stack(batch_candidate_pools, axis=0), dtype=torch.float64)
         slnr_score_pool_batch = torch.tensor(np.stack(batch_slnr_score_pools, axis=0), dtype=torch.float64)
         selected_index_batch = torch.tensor(np.stack(batch_selected_indices, axis=0), dtype=torch.long)
+        slnr_center_batch = torch.tensor(np.stack(batch_slnr_centers, axis=0), dtype=torch.float64)
         q_real_batch = torch.tensor(np.stack(batch_q_real, axis=0), dtype=torch.float64)
         adv_batch = torch.tensor(np.array(batch_adv), dtype=torch.float64)
 
@@ -1211,6 +1359,8 @@ def run_wesn_policy_rl(
             slnr_scores=slnr_score_pool_batch,
             candidate_temperature=rl_cfg.candidate_temperature,
             normalize_candidate_scores=rl_cfg.normalize_candidate_scores,
+            slnr_centers=slnr_center_batch,
+            slnr_residual_scale=rl_cfg.slnr_residual_scale,
         )
         per_user_log_prob = torch.gather(
             log_probs_all, dim=-1, index=selected_index_batch.unsqueeze(-1)
@@ -1256,6 +1406,7 @@ def run_wesn_policy_rl(
         batch_candidate_pools = []
         batch_slnr_score_pools = []
         batch_selected_indices = []
+        batch_slnr_centers = []
         batch_q_real = []
         batch_adv = []
         batch_indices = []
@@ -1284,6 +1435,24 @@ def run_wesn_policy_rl(
             q_vectors, zf_baseline["precoders"][t], noise_power, eps=rl_cfg.reward_sinr_eps
         )
 
+        slnr_precoder_t = slnr_baseline["precoders"][t]
+        slnr_rate = float(slnr_baseline["throughput"][t])
+        slnr_actual_sinr = slnr_baseline["sinr"][t]
+        slnr_proxy_sinr = compute_pmi_sinr_proxy_from_precoder(
+            q_vectors, slnr_precoder_t, noise_power, eps=rl_cfg.reward_sinr_eps
+        )
+
+        if rl_cfg.reward_reference == "slnr":
+            ref_rate = slnr_rate
+            ref_actual_sinr = slnr_actual_sinr
+            ref_proxy_sinr = slnr_proxy_sinr
+        elif rl_cfg.reward_reference == "zf":
+            ref_rate = zf_rate
+            ref_actual_sinr = zf_actual_sinr
+            ref_proxy_sinr = zf_proxy_sinr
+        else:
+            raise ValueError(f"Unknown reward_reference={rl_cfg.reward_reference!r}")
+
         # Best-of-N full-precoder selection. Each candidate is a complete
         # K-column precoder generated by the current per-UE PMI-only
         # signal/leakage sampler. We score each full candidate using the
@@ -1301,6 +1470,7 @@ def run_wesn_policy_rl(
         best_candidate_pool = None
         best_slnr_score_pool = None
         best_selected_indices = None
+        best_slnr_centers = None
         best_diag = None
         best_rate = None
         best_actual_sinr = None
@@ -1318,6 +1488,7 @@ def run_wesn_policy_rl(
             cand_candidate_pool = np.zeros((k, max(1, rl_cfg.max_fb_resamples), d), dtype=np.float64)
             cand_slnr_score_pool = np.zeros((k, max(1, rl_cfg.max_fb_resamples)), dtype=np.float64)
             cand_selected_indices = np.zeros(k, dtype=np.int64)
+            cand_slnr_centers = np.zeros((k, d), dtype=np.float64)
             cand_diag = {
                 "entropy": np.zeros(k, dtype=np.float64),
                 "entropy_norm": np.zeros(k, dtype=np.float64),
@@ -1346,6 +1517,7 @@ def run_wesn_policy_rl(
                     slnr_score_pool,
                     selected_idx,
                     diag,
+                    slnr_residual_center,
                 ) = sample_fisher_bingham_signal_leakage(
                     mu=mu_np[ku],
                     kappa=rl_cfg.fixed_kappa,
@@ -1365,6 +1537,9 @@ def run_wesn_policy_rl(
                     slnr_candidate_frac=rl_cfg.slnr_candidate_frac,
                     wesn_candidate_frac=rl_cfg.wesn_candidate_frac,
                     candidate_proposal_kappa=rl_cfg.candidate_proposal_kappa,
+                    slnr_residual_scale=rl_cfg.slnr_residual_scale,
+                    include_exact_anchor_candidates=rl_cfg.include_exact_anchor_candidates,
+                    slnr_center_override=complex_unit_to_real(slnr_precoder_t[:, ku]),
                 )
                 cand_x_sample[ku] = xk
                 cand_signal[ku] = sig
@@ -1375,6 +1550,7 @@ def run_wesn_policy_rl(
                 cand_candidate_pool[ku] = candidate_pool
                 cand_slnr_score_pool[ku] = slnr_score_pool
                 cand_selected_indices[ku] = selected_idx
+                cand_slnr_centers[ku] = complex_unit_to_real(slnr_precoder_t[:, ku])
                 for diag_key in cand_diag:
                     cand_diag[diag_key][ku] = diag[diag_key]
                 cand_beams[:, ku] = real_to_complex_beam(cand_x_sample[ku], cfg.total_tx_power, k)
@@ -1391,11 +1567,11 @@ def run_wesn_policy_rl(
             cand_reward = compute_rl_reward(
                 reward_mode=rl_cfg.reward_mode,
                 rate=cand_rate,
-                zf_rate=zf_rate,
+                zf_rate=ref_rate,
                 actual_sinr=cand_actual_sinr,
-                zf_actual_sinr=zf_actual_sinr,
+                zf_actual_sinr=ref_actual_sinr,
                 proxy_sinr=cand_proxy_sinr,
-                zf_proxy_sinr=zf_proxy_sinr,
+                zf_proxy_sinr=ref_proxy_sinr,
                 eps=rl_cfg.reward_sinr_eps,
             )
 
@@ -1412,6 +1588,7 @@ def run_wesn_policy_rl(
                 best_candidate_pool = cand_candidate_pool
                 best_slnr_score_pool = cand_slnr_score_pool
                 best_selected_indices = cand_selected_indices
+                best_slnr_centers = cand_slnr_centers
                 best_diag = cand_diag
                 best_rate = cand_rate
                 best_actual_sinr = cand_actual_sinr
@@ -1429,7 +1606,41 @@ def run_wesn_policy_rl(
         candidate_pool_sample = best_candidate_pool
         slnr_score_pool_sample = best_slnr_score_pool
         selected_indices_sample = best_selected_indices
+        slnr_centers_sample = best_slnr_centers
         diag_sample = best_diag
+
+        # Cheap oracle diagnostic: if exact anchors are enabled, candidate index 0
+        # is the cached PMI-SLNR beam for every UE. This should match the cached
+        # SLNR baseline throughput almost exactly; otherwise the candidate pool
+        # is not reproducing the baseline.
+        if rl_cfg.include_exact_anchor_candidates and candidate_pool_sample is not None:
+            oracle_slnr_beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
+            for ku in range(k):
+                oracle_slnr_beams[:, ku] = real_to_complex_beam(
+                    candidate_pool_sample[ku, 0], cfg.total_tx_power, k
+                )
+            oracle_slnr_anchor_rate_trace[t], _ = compute_slot_sum_rate(
+                channels[t], oracle_slnr_beams, noise_power
+            )
+
+        # Expensive optional diagnostic: score all M^K full-precoder combinations
+        # from the per-UE candidate pools and record the best actual rate. For
+        # K=2, M=32 this is 1024 rate evaluations per slot, so keep it off for
+        # long runs unless explicitly requested.
+        if rl_cfg.enable_oracle_pool_diagnostics and candidate_pool_sample is not None:
+            from itertools import product
+            m_count = candidate_pool_sample.shape[1]
+            best_pool_rate = -np.inf
+            for combo in product(range(m_count), repeat=k):
+                pool_beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
+                for ku, ci in enumerate(combo):
+                    pool_beams[:, ku] = real_to_complex_beam(
+                        candidate_pool_sample[ku, ci], cfg.total_tx_power, k
+                    )
+                pool_rate, _ = compute_slot_sum_rate(channels[t], pool_beams, noise_power)
+                if pool_rate > best_pool_rate:
+                    best_pool_rate = pool_rate
+            oracle_best_pool_rate_trace[t] = best_pool_rate
         candidate_entropy_trace[t] = diag_sample["entropy"]
         candidate_entropy_norm_trace[t] = diag_sample["entropy_norm"]
         candidate_effective_count_trace[t] = diag_sample["effective_candidates"]
@@ -1466,19 +1677,24 @@ def run_wesn_policy_rl(
         throughput[t] = rate
         reward_trace[t] = reward
         rate_delta_trace[t] = rate - zf_rate
+        rate_delta_slnr_trace[t] = rate - slnr_rate
         proxy_sinr_trace[t] = proxy_sinr
         zf_proxy_sinr_trace[t] = zf_proxy_sinr
         proxy_sinr_ratio_trace[t] = proxy_sinr / np.maximum(zf_proxy_sinr, rl_cfg.reward_sinr_eps)
         actual_sinr_ratio_trace[t] = actual_sinr / np.maximum(zf_actual_sinr, rl_cfg.reward_sinr_eps)
+        proxy_sinr_ratio_slnr_trace[t] = proxy_sinr / np.maximum(slnr_proxy_sinr, rl_cfg.reward_sinr_eps)
+        actual_sinr_ratio_slnr_trace[t] = actual_sinr / np.maximum(slnr_actual_sinr, rl_cfg.reward_sinr_eps)
         advantage_trace[t] = advantage
         baseline_trace[t] = reward_baseline
         beat_zf_trace[t] = 1.0 if rate > zf_rate else 0.0
+        beat_slnr_trace[t] = 1.0 if rate > slnr_rate else 0.0
         beam_similarity_trace[t] = beam_similarity(beams, zf_baseline["precoders"][t])
 
         batch_s.append(s)
         batch_candidate_pools.append(candidate_pool_sample)
         batch_slnr_score_pools.append(slnr_score_pool_sample)
         batch_selected_indices.append(selected_indices_sample)
+        batch_slnr_centers.append(slnr_centers_sample)
         batch_q_real.append(q_real_sample)
         batch_adv.append(advantage)
         batch_indices.append(t)
@@ -1493,14 +1709,20 @@ def run_wesn_policy_rl(
         "throughput": throughput,
         "reward": reward_trace,
         "rate_delta": rate_delta_trace,
+        "rate_delta_slnr": rate_delta_slnr_trace,
         "proxy_sinr": proxy_sinr_trace,
         "zf_proxy_sinr": zf_proxy_sinr_trace,
         "proxy_sinr_ratio": proxy_sinr_ratio_trace,
         "actual_sinr_ratio": actual_sinr_ratio_trace,
+        "proxy_sinr_ratio_slnr": proxy_sinr_ratio_slnr_trace,
+        "actual_sinr_ratio_slnr": actual_sinr_ratio_slnr_trace,
         "advantage": advantage_trace,
         "reward_baseline": baseline_trace,
         "kappa": kappa_trace,
         "beat_zf": beat_zf_trace,
+        "beat_slnr": beat_slnr_trace,
+        "oracle_slnr_anchor_rate": oracle_slnr_anchor_rate_trace,
+        "oracle_best_pool_rate": oracle_best_pool_rate_trace,
         "beam_similarity_to_zf": beam_similarity_trace,
         "grad_norm": grad_norm_trace,
         "loss": loss_trace,
@@ -1549,6 +1771,7 @@ def save_plots(
     rl_throughput = rl_results["throughput"]
     reward = rl_results["reward"]
     beat_zf = rl_results["beat_zf"]
+    beat_slnr = rl_results.get("beat_slnr", None)
     sim_to_zf = rl_results["beam_similarity_to_zf"].mean(axis=1)
     grad_norm = rl_results["grad_norm"]
     proxy_sinr_ratio = rl_results.get("proxy_sinr_ratio", None)
@@ -1567,6 +1790,7 @@ def save_plots(
     rl_avg = moving_average(rl_throughput, window_len)
     reward_avg = moving_average(reward, window_len)
     beat_zf_avg = moving_average(beat_zf, window_len)
+    beat_slnr_avg = moving_average(beat_slnr, window_len) if beat_slnr is not None else None
     sim_avg = moving_average(sim_to_zf, window_len)
     grad_norm_avg = moving_average(grad_norm, window_len)
     proxy_sinr_ratio_avg = moving_average(proxy_sinr_ratio.mean(axis=1), window_len) if proxy_sinr_ratio is not None else None
@@ -1585,7 +1809,7 @@ def save_plots(
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
     ax1.plot(x_tput, zf_avg, lw=1.5, label="ZF baseline")
     ax1.plot(x_tput, slnr_avg, lw=1.5, label="PMI-SLNR baseline")
-    ax1.plot(x_tput, random_vmf_avg, lw=1.5, label="Random vMF baseline")
+    # ax1.plot(x_tput, random_vmf_avg, lw=1.5, label="Random vMF baseline")
     ax1.plot(x_tput, rl_avg, lw=1.5, label="WESN")
     ax1.set_title("Throughput Across Time")
     ax1.set_xlabel("Slot index")
@@ -1600,7 +1824,7 @@ def save_plots(
     ax2.plot(x_reward, reward_avg, lw=1.5)
     ax2.set_title("WESN-FB Raw-SLNR RL Reward Across Time")
     ax2.set_xlabel("Slot index")
-    ax2.set_ylabel("Reward vs ZF")
+    ax2.set_ylabel("Reward vs selected reference")
     ax2.grid(True, alpha=0.35)
     fig2.tight_layout()
     fig2.savefig(output_dir / "esn_vmf_rl_reward_across_time.png", dpi=150)
@@ -1616,6 +1840,18 @@ def save_plots(
     fig3.tight_layout()
     fig3.savefig(output_dir / "esn_vmf_rl_fraction_beats_zf.png", dpi=150)
     plt.close(fig3)
+
+    if beat_slnr_avg is not None:
+        fig3b, ax3b = plt.subplots(figsize=(8, 4.5))
+        ax3b.plot(np.arange(1, beat_slnr_avg.size + 1), beat_slnr_avg, lw=1.5)
+        ax3b.set_title("Fraction of Slots Where WESN-FB Raw-SLNR RL Beats SLNR")
+        ax3b.set_xlabel("Slot index")
+        ax3b.set_ylabel("Moving-average fraction")
+        ax3b.set_ylim(0.0, 1.0)
+        ax3b.grid(True, alpha=0.35)
+        fig3b.tight_layout()
+        fig3b.savefig(output_dir / "esn_vmf_rl_fraction_beats_slnr.png", dpi=150)
+        plt.close(fig3b)
 
     fig4, ax4 = plt.subplots(figsize=(8, 4.5))
     ax4.plot(np.arange(1, sim_avg.size + 1), sim_avg, lw=1.5)
@@ -1883,11 +2119,11 @@ def load_or_run_random_vmf_baseline(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched WESN phase-invariant PMI raw-SLNR RL")
-    parser.add_argument("--num-slots", type=int, default=100000)
+    parser.add_argument("--num-slots", type=int, default=1000000)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE_SLNR_perturbation"))
     parser.add_argument("--window-len", type=int, default=5000)
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--force-recompute-baselines", action="store_true")
@@ -1908,7 +2144,7 @@ def parse_args() -> argparse.Namespace:
     # RL/training knobs.
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr-out", type=float, default=3e-2)
-    parser.add_argument("--fixed-kappa", type=float, default=10.0)
+    parser.add_argument("--fixed-kappa", type=float, default=3.0)
     parser.add_argument("--reward-baseline-beta", type=float, default=0.99)
     parser.add_argument("--advantage-clip", type=float, default=1.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
@@ -1932,17 +2168,27 @@ def parse_args() -> argparse.Namespace:
         help="Scalar reward used for REINFORCE updates.",
     )
     parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
+    parser.add_argument(
+        "--reward-reference",
+        type=str,
+        default="slnr",
+        choices=["zf", "slnr"],
+        help="Reference baseline used inside the RL reward. Use slnr when trying to beat the SLNR baseline.",
+    )
     parser.add_argument("--best-of-n", type=int, default=1, help="Must be 1 for exact on-policy candidate-based training. Use --max-fb-resamples for per-UE candidate directions.")
-    parser.add_argument("--candidate-temperature", type=float, default=0.2, help="Softmax temperature for candidate selection; smaller is stricter.")
+    parser.add_argument("--candidate-temperature", type=float, default=0.8, help="Softmax temperature for candidate selection; smaller is stricter.")
     parser.add_argument("--no-normalize-candidate-scores", action="store_true", help="Disable per-pool z-score normalization of phase and SLNR candidate scores.")
     parser.add_argument("--uniform-candidate-frac", type=float, default=0.10, help="Fraction of candidates sampled uniformly.")
     parser.add_argument("--pmi-candidate-frac", type=float, default=0.35, help="Fraction of candidates sampled around the PMI direction.")
     parser.add_argument("--slnr-candidate-frac", type=float, default=0.35, help="Fraction of candidates sampled around the PMI-SLNR heuristic direction.")
     parser.add_argument("--wesn-candidate-frac", type=float, default=0.20, help="Fraction of candidates sampled around the current WESN policy mean. This improves learned proposal diversity but uses a stop-gradient proposal approximation in the training loss.")
-    parser.add_argument("--candidate-proposal-kappa", type=float, default=15.0, help="Concentration for PMI/SLNR/WESN vMF proposal candidates.")
-    parser.add_argument("--joint-pmi-aux-loss-weight", type=float, default=0.05, help="Weight of the joint PMI-only full-precoder auxiliary ranking loss. Use 0 to disable.")
+    parser.add_argument("--candidate-proposal-kappa", type=float, default=50.0, help="Concentration for PMI/SLNR/WESN vMF proposal candidates.")
+    parser.add_argument("--slnr-residual-scale", type=float, default=0.15, help="Scale alpha in normalize(v_SLNR + alpha * Delta(mu)); larger values let WESN move farther away from the SLNR anchor.")
+    parser.add_argument("--no-exact-anchor-candidates", action="store_true", help="Disable deterministic exact SLNR / SLNR-residual / PMI candidates in the candidate pool.")
+    parser.add_argument("--joint-pmi-aux-loss-weight", type=float, default=0.0, help="Weight of the joint PMI-only full-precoder auxiliary ranking loss. Use 0 to disable.")
     parser.add_argument("--joint-pmi-aux-temperature", type=float, default=0.5, help="Softmax temperature used to convert joint PMI proxy rates into auxiliary target weights.")
     parser.add_argument("--num-joint-pmi-aux-candidates", type=int, default=32, help="Number of full-precoder candidate combinations sampled per slot for the joint PMI auxiliary loss.")
+    parser.add_argument("--enable-oracle-pool-diagnostics", action="store_true", help="Expensively score all M^K full-precoder combinations from the candidate pools and log the best actual rate.")
     return parser.parse_args()
 
 
@@ -1972,6 +2218,7 @@ def main() -> None:
         leakage_norm_eps=args.leakage_norm_eps,
         signal_norm_eps=args.signal_norm_eps,
         reward_mode=args.reward_mode,
+        reward_reference=args.reward_reference,
         reward_sinr_eps=args.reward_sinr_eps,
         best_of_n=args.best_of_n,
         candidate_temperature=args.candidate_temperature,
@@ -1981,7 +2228,10 @@ def main() -> None:
         slnr_candidate_frac=args.slnr_candidate_frac,
         wesn_candidate_frac=args.wesn_candidate_frac,
         candidate_proposal_kappa=args.candidate_proposal_kappa,
+        slnr_residual_scale=args.slnr_residual_scale,
+        include_exact_anchor_candidates=not args.no_exact_anchor_candidates,
         joint_pmi_aux_loss_weight=args.joint_pmi_aux_loss_weight,
+        enable_oracle_pool_diagnostics=args.enable_oracle_pool_diagnostics,
         joint_pmi_aux_temperature=args.joint_pmi_aux_temperature,
         num_joint_pmi_aux_candidates=args.num_joint_pmi_aux_candidates,
     )
@@ -2019,7 +2269,7 @@ def main() -> None:
         cache_dir=baseline_cache_dir,
         force_recompute=args.force_recompute_baselines,
     )
-    rl_results = run_wesn_policy_rl(cfg, rl_cfg, channels, zf_results, rng_rl)
+    rl_results = run_wesn_policy_rl(cfg, rl_cfg, channels, zf_results, slnr_results, rng_rl)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.output_dir / "zf_throughput_trace.npy", zf_results["throughput"])
@@ -2030,14 +2280,20 @@ def main() -> None:
     np.save(args.output_dir / "esn_vmf_rl_throughput_trace.npy", rl_results["throughput"])
     np.save(args.output_dir / "esn_vmf_rl_reward_trace.npy", rl_results["reward"])
     np.save(args.output_dir / "esn_vmf_rl_rate_delta_trace.npy", rl_results["rate_delta"])
+    np.save(args.output_dir / "esn_vmf_rl_rate_delta_slnr_trace.npy", rl_results["rate_delta_slnr"])
     np.save(args.output_dir / "esn_fb_proxy_sinr_trace.npy", rl_results["proxy_sinr"])
     np.save(args.output_dir / "esn_fb_zf_proxy_sinr_trace.npy", rl_results["zf_proxy_sinr"])
     np.save(args.output_dir / "esn_fb_proxy_sinr_ratio_trace.npy", rl_results["proxy_sinr_ratio"])
     np.save(args.output_dir / "esn_fb_actual_sinr_ratio_trace.npy", rl_results["actual_sinr_ratio"])
+    np.save(args.output_dir / "esn_fb_proxy_sinr_ratio_slnr_trace.npy", rl_results["proxy_sinr_ratio_slnr"])
+    np.save(args.output_dir / "esn_fb_actual_sinr_ratio_slnr_trace.npy", rl_results["actual_sinr_ratio_slnr"])
     np.save(args.output_dir / "esn_vmf_rl_advantage_trace.npy", rl_results["advantage"])
     np.save(args.output_dir / "esn_vmf_rl_reward_baseline_trace.npy", rl_results["reward_baseline"])
     np.save(args.output_dir / "esn_vmf_rl_kappa_trace.npy", rl_results["kappa"])
     np.save(args.output_dir / "esn_vmf_rl_fraction_beats_zf_trace.npy", rl_results["beat_zf"])
+    np.save(args.output_dir / "esn_vmf_rl_fraction_beats_slnr_trace.npy", rl_results["beat_slnr"])
+    np.save(args.output_dir / "oracle_slnr_anchor_rate_trace.npy", rl_results["oracle_slnr_anchor_rate"])
+    np.save(args.output_dir / "oracle_best_pool_rate_trace.npy", rl_results["oracle_best_pool_rate"])
     np.save(args.output_dir / "esn_vmf_rl_beam_similarity_to_zf_trace.npy", rl_results["beam_similarity_to_zf"])
     np.save(args.output_dir / "esn_vmf_rl_grad_norm_trace.npy", rl_results["grad_norm"])
     np.save(args.output_dir / "esn_vmf_rl_loss_trace.npy", rl_results["loss"])
@@ -2081,23 +2337,35 @@ def main() -> None:
     print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"WESN-FB PMI raw-SLNR RL throughput  : {rl_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Reward mode                   : {rl_cfg.reward_mode}")
+    print(f"Reward reference              : {rl_cfg.reward_reference}")
     print(f"WESN-FB PMI raw-SLNR RL reward      : {rl_results['reward'].mean():.4f}")
-    print(f"WESN-FB throughput delta       : {rl_results['rate_delta'].mean():.4f}")
+    print(f"WESN-FB throughput delta vs ZF  : {rl_results['rate_delta'].mean():.4f}")
+    print(f"WESN-FB throughput delta vs SLNR: {rl_results['rate_delta_slnr'].mean():.4f}")
     print(f"Mean proxy-SINR ratio to ZF   : {rl_results['proxy_sinr_ratio'].mean():.4f}")
     print(f"Mean actual SINR ratio to ZF  : {rl_results['actual_sinr_ratio'].mean():.4f}")
+    print(f"Mean proxy-SINR ratio to SLNR : {rl_results['proxy_sinr_ratio_slnr'].mean():.4f}")
+    print(f"Mean actual SINR ratio to SLNR: {rl_results['actual_sinr_ratio_slnr'].mean():.4f}")
     print(f"RL beats ZF fraction          : {rl_results['beat_zf'].mean():.4f}")
+    print(f"RL beats SLNR fraction        : {rl_results['beat_slnr'].mean():.4f}")
     print(f"Mean beam similarity to ZF    : {rl_results['beam_similarity_to_zf'].mean():.4f}")
     print(f"Mean grad norm                : {rl_results['grad_norm'].mean():.4f}")
+    print(f"Oracle exact candidate-SLNR throughput: {np.nanmean(rl_results['oracle_slnr_anchor_rate']):.4f}")
+    print(f"True cached SLNR throughput          : {slnr_results['throughput'].mean():.4f}")
+    if np.any(np.isfinite(rl_results['oracle_best_pool_rate'])):
+        print(f"Oracle best candidate-pool throughput: {np.nanmean(rl_results['oracle_best_pool_rate']):.4f}")
     print(f"Mean raw PMI desired signal: {rl_results['signal'].mean():.4f}")
     print(f"Mean raw PMI leakage       : {rl_results['leakage'].mean():.4f}")
     print(f"Phase-invariant sampler    : yes (mixed candidate softmax over |mu^H v|^2 + raw PMI-SLNR)")
-    print(f"WESN-centered candidates   : yes (phase-randomized candidates around learned mu)")
-    print(f"Candidate update           : conditional log-softmax with stop-gradient candidate proposal)")
+    print(f"SLNR-residual WESN mode    : yes (WESN learns residual corrections around the PMI-SLNR anchor)")
+    print(f"SLNR residual scale        : {rl_cfg.slnr_residual_scale:.4f}")
+    print(f"Exact anchor candidates    : {rl_cfg.include_exact_anchor_candidates}")
+    print(f"Candidate update           : conditional log-softmax with stop-gradient residual candidate proposal)")
     print(f"Candidate temperature      : {rl_cfg.candidate_temperature:.4f}")
     print(f"Normalize candidate scores : {rl_cfg.normalize_candidate_scores}")
     print(f"Candidate proposal fractions [uniform, PMI, SLNR, WESN]: {rl_cfg.uniform_candidate_frac:.2f}, {rl_cfg.pmi_candidate_frac:.2f}, {rl_cfg.slnr_candidate_frac:.2f}, {rl_cfg.wesn_candidate_frac:.2f}")
     print(f"Candidate proposal kappa   : {rl_cfg.candidate_proposal_kappa:.4f}")
     print(f"Joint PMI aux loss weight  : {rl_cfg.joint_pmi_aux_loss_weight:.4f}")
+    print(f"Oracle pool diagnostics    : {rl_cfg.enable_oracle_pool_diagnostics}")
     print(f"Joint PMI aux temperature  : {rl_cfg.joint_pmi_aux_temperature:.4f}")
     print(f"Joint PMI aux candidates   : {rl_cfg.num_joint_pmi_aux_candidates}")
     print(f"Mean RL loss               : {rl_results['rl_loss'].mean():.4f}")
