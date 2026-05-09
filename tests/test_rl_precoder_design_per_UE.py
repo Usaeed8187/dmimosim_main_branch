@@ -35,12 +35,13 @@ class RLConfig:
     reservoir_size: int = 128
     spectral_radius: float = 0.8
     input_scale: float = 0.15
+    # Deprecated/unused for SLNR-ratio shaping; denominator now uses noise power.
     leakage_lambda: float = 1.0
     signal_gamma: float = 0.5
     max_fb_resamples: int = 16
     leakage_norm_eps: float = 1e-12
     signal_norm_eps: float = 1e-12
-    reward_mode: str = "sinr_proxy_log_ratio"
+    reward_mode: str = "actual_sinr_log_ratio"
     reward_sinr_eps: float = 1e-12
     best_of_n: int = 8
 
@@ -145,8 +146,8 @@ def compute_rl_reward(
       - actual_sinr_log_ratio: mean_k log((SINR_RL,k + eps)/(SINR_ZF,k + eps)).
       - sinr_proxy_log_ratio: same log-ratio but using the simpler SINR proxy.
 
-    The default is sinr_proxy_log_ratio because it gives a balanced per-user
-    SINR-like signal and penalizes cases where one user's SINR collapses.
+    The default is actual_sinr_log_ratio so the policy is trained using the
+    true post-detection SINR returned by compute_slot_sum_rate().
     """
     if reward_mode == "throughput_delta":
         return float(rate - zf_rate)
@@ -326,6 +327,20 @@ def normalized_signal_upper_bound(signal_mat: np.ndarray, eps: float = 1e-12) ->
     return lam_max / max(scale, eps)
 
 
+def raw_quadratic_score(x: np.ndarray, mat: np.ndarray) -> float:
+    """Raw quadratic score x^T A x without trace normalization."""
+    return float(x @ mat @ x)
+
+
+def raw_signal_upper_bound(signal_mat: np.ndarray) -> float:
+    """Upper bound for raw x^T G x over unit-norm x.
+
+    max_{||x||=1} x^T G x = lambda_max(G).  For the PMI-only
+    rank-one projector case, this is approximately 1.
+    """
+    return float(np.linalg.eigvalsh(signal_mat).max())
+
+
 def pmi_dominant_vectors_from_channels(user_channels: np.ndarray) -> np.ndarray:
     """Return one dominant right singular vector q_k per UE.
 
@@ -411,31 +426,41 @@ def sample_fisher_bingham_signal_leakage(
     signal_mat: np.ndarray,
     leakage_mat: np.ndarray,
     signal_gamma: float,
-    leakage_lambda: float,
+    slnr_noise_power: float,
     rng: np.random.Generator,
     max_resamples: int,
     signal_norm_eps: float,
     leakage_norm_eps: float,
-) -> tuple[np.ndarray, float, float, int, bool]:
-    """Sample from a desired-PMI signal/leakage shaped Fisher-Bingham policy.
+) -> tuple[np.ndarray, float, float, int, bool, np.ndarray]:
+    """Sample from a PMI-only actual-SLNR-shaped policy.
 
-    Proposal: q(x) = vMF(mu, kappa)
+    Proposal:
+        q(x) = vMF(mu, kappa)
 
     Target up to proportionality:
         p(x) ∝ exp(kappa mu^T x
-                   + signal_gamma * g_bar(x)
-                   - leakage_lambda * ell_bar(x)).
+                   + signal_gamma * g(x)/(ell(x) + sigma2_eff)).
 
-    Since the positive desired-signal term can make the target/proposal
-    ratio larger than 1, we use the bound
-        g_bar(x) <= g_bar_max
-    and accept with probability
-        exp(signal_gamma * (g_bar(x) - g_bar_max)
-            - leakage_lambda * ell_bar(x)).
+    This uses the PMI-only version of the actual SLNR form without trace
+    normalization:
 
-    This is always in [0, 1] for signal_gamma >= 0 and leakage_lambda >= 0.
-    If all attempts are rejected, return the candidate with the largest
-    shaped score signal_gamma*g_bar - leakage_lambda*ell_bar.
+        g(x)   = x^T G_k^PMI x   = |q_k^H v_k|^2
+        ell(x) = x^T L_k^PMI x   = sum_{j != k} |q_j^H v_k|^2
+
+    where x is the real representation of the unit-norm complex beam v_k.
+    Since the actual transmitted beam is sqrt(P_user) * v_k, the equivalent
+    noise term in this unit-beam SLNR is
+
+        sigma2_eff = noise_power / P_user.
+
+    The acceptance probability uses the bound g(x) <= lambda_max(G_k^PMI)
+    and ell(x) >= 0, so the ratio is upper-bounded by
+    lambda_max(G_k^PMI) / sigma2_eff.
+
+    If all attempts are rejected, return the candidate with the largest raw
+    PMI-only SLNR score.  In addition, return an empirical shaped-distribution
+    mean estimate from the same proposal pool.  This mean is used to center the
+    REINFORCE score function during training.
     """
     best_x = None
     best_signal = -np.inf
@@ -443,13 +468,25 @@ def sample_fisher_bingham_signal_leakage(
     best_score = -np.inf
     best_attempt = max_resamples
 
-    g_upper = normalized_signal_upper_bound(signal_mat, signal_norm_eps)
+    # Raw, unnormalized upper bound: max_{||x||=1} x^T G x.
+    g_upper = raw_signal_upper_bound(signal_mat)
+    noise_floor = max(float(slnr_noise_power), leakage_norm_eps)
+    shaped_upper = signal_gamma * g_upper / noise_floor
+
+    # Keep the full resampling pool so we can estimate the mean of the
+    # SLNR-shaped distribution induced by vMF proposals and the shaping score.
+    pool_x: list[np.ndarray] = []
+    pool_scores: list[float] = []
+    first_accepted: tuple[np.ndarray, float, float, int, bool] | None = None
 
     for attempt in range(1, max_resamples + 1):
         x = sample_vmf(mu, kappa, rng)
-        g = normalized_signal_score(x, signal_mat, signal_norm_eps)
-        ell = normalized_leakage_score(x, leakage_mat, leakage_norm_eps)
-        shaped_score = signal_gamma * g - leakage_lambda * ell
+        g = raw_quadratic_score(x, signal_mat)
+        ell = raw_quadratic_score(x, leakage_mat)
+        shaped_score = signal_gamma * g / max(ell + noise_floor, leakage_norm_eps)
+
+        pool_x.append(x)
+        pool_scores.append(shaped_score)
 
         if shaped_score > best_score:
             best_x = x
@@ -458,15 +495,32 @@ def sample_fisher_bingham_signal_leakage(
             best_score = shaped_score
             best_attempt = attempt
 
-        log_accept_prob = signal_gamma * (g - g_upper) - leakage_lambda * ell
+        log_accept_prob = shaped_score - shaped_upper
         # Numerical safety: because of floating-point roundoff, clip to <= 0.
         log_accept_prob = min(0.0, float(log_accept_prob))
-        if rng.uniform(0.0, 1.0) < np.exp(log_accept_prob):
-            return x, g, ell, attempt, True
+        if first_accepted is None and rng.uniform(0.0, 1.0) < np.exp(log_accept_prob):
+            # Preserve the original execution rule: use the first accepted
+            # sample if one appears.  We still continue drawing the pool to
+            # estimate the empirical shaped mean used for the update.
+            first_accepted = (x, g, ell, attempt, True)
 
     assert best_x is not None
-    return best_x, best_signal, best_leakage, best_attempt, False
 
+    x_pool = np.stack(pool_x, axis=0)
+    score_arr = np.array(pool_scores, dtype=np.float64)
+    # Stable importance weights proportional to exp(shaped_score).  Since the
+    # proposals are from q(x)=vMF(mu,kappa), this approximates the mean under
+    # q(x) exp(raw-SLNR shaping).
+    score_arr = score_arr - np.max(score_arr)
+    weights = np.exp(score_arr)
+    weights = weights / max(float(np.sum(weights)), leakage_norm_eps)
+    empirical_mean = np.sum(weights[:, None] * x_pool, axis=0)
+
+    if first_accepted is not None:
+        x, g, ell, attempt, accepted = first_accepted
+        return x, g, ell, attempt, accepted, empirical_mean
+
+    return best_x, best_signal, best_leakage, best_attempt, False, empirical_mean
 
 def _sample_weight_vmf(dim: int, kappa: float, rng: np.random.Generator) -> float:
     b = (-2.0 * kappa + np.sqrt(4.0 * kappa**2 + (dim - 1) ** 2)) / (dim - 1)
@@ -538,11 +592,20 @@ def make_fixed_esn(
     return w_in, w_res
 
 
-def compute_esn_states(pmi_features: np.ndarray, rl_cfg: RLConfig, rng: np.random.Generator) -> np.ndarray:
-    """Compute fixed ESN states from all-UE PMI features.
+def compute_wesn_states(pmi_features: np.ndarray, rl_cfg: RLConfig, rng: np.random.Generator) -> np.ndarray:
+    """Compute fixed WESN readout features from all-UE PMI features.
 
-    The ESN is fixed. Only W_out is trained by the RL algorithm.
-    State feature used by W_out is [Re{z_t}, Im{z_t}, 1].
+    This uses the same reservoir state update as the vanilla ESN,
+
+        z_t = tanh(W_in y_t + W_res z_{t-1}),
+
+    but uses the WESN/skip-readout feature
+
+        s_t = [Re{z_t}, Im{z_t}, y_t].
+
+    In this script, y_t is already real-valued because pmi_features_from_channels()
+    concatenates Re{V_k} and Im{V_k}. Therefore, we append y_t directly rather
+    than splitting it again. Only W_out is trained by the RL algorithm.
     """
     num_slots, feat_dim = pmi_features.shape
     nz = rl_cfg.reservoir_size
@@ -555,12 +618,11 @@ def compute_esn_states(pmi_features: np.ndarray, rl_cfg: RLConfig, rng: np.rando
     )
 
     z = np.zeros(nz, dtype=np.complex128)
-    states = np.zeros((num_slots, 2 * nz + 1), dtype=np.float64)
+    states = np.zeros((num_slots, 2 * nz + feat_dim), dtype=np.float64)
     for t in range(num_slots):
         y = pmi_features[t]
         z = split_tanh_np(w_in @ y + w_res @ z)
-        states[t, :-1] = np.concatenate([np.real(z), np.imag(z)])
-        states[t, -1] = 1.0
+        states[t, :] = np.concatenate([np.real(z), np.imag(z), y])
     return states
 
 
@@ -581,13 +643,22 @@ def run_esn_policy_rl(
     noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
     k = cfg.num_users
     d = 2 * cfg.num_tx_antennas
+    # The SLNR sampler uses raw PMI-only quadratic scores for a unit-norm
+    # complex beam v_k: |q_k^H v_k|^2 / (sum_j |q_j^H v_k|^2 + sigma2_eff).
+    # Since the transmitted beam is sqrt(P_user) * v_k, the equivalent
+    # unit-beam noise term is sigma2_eff = noise_power / P_user.
+    per_user_tx_power = cfg.total_tx_power / max(k, 1)
+    slnr_noise_power = noise_power / max(per_user_tx_power, rl_cfg.reward_sinr_eps)
 
-    # Shared ESN state generated from the PMI feedback of all UEs.
-    esn_states = compute_esn_states(zf_baseline["pmi_features"], rl_cfg, rng)
-    state_dim = esn_states.shape[1]
+    # Shared WESN readout feature generated from the PMI feedback of all UEs.
+    # The reservoir update is unchanged from the vanilla ESN. The readout feature
+    # is augmented with a skip connection from the current PMI input.
+    wesn_states = compute_wesn_states(zf_baseline["pmi_features"], rl_cfg, rng)
+    state_dim = wesn_states.shape[1]
 
-    # W_out maps shared ESN state to all UE vMF mean logits, shape [K, D, N_z_aug].
-    # This is the only trainable policy parameter in this fixed-reservoir ESN setup.
+    # W_out maps shared WESN readout features to all UE vMF mean logits,
+    # shape [K, D, 2*N_z + input_dim]. This is the only trainable policy
+    # parameter in this fixed-reservoir WESN setup.
     w_out_init = rl_cfg.init_scale_out * rng.standard_normal((k, d, state_dim))
     w_out = torch.nn.Parameter(torch.tensor(w_out_init, dtype=torch.float64))
     optimizer = torch.optim.Adam([w_out], lr=rl_cfg.lr_out)
@@ -612,20 +683,24 @@ def run_esn_policy_rl(
     fb_accept_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     best_of_n_score_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     best_of_n_selected_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    empirical_mean_norm_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    centered_update_norm_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
 
     reward_baseline: float | None = None
     batch_s: list[np.ndarray] = []
     batch_x: list[np.ndarray] = []
+    batch_emp_mean: list[np.ndarray] = []
     batch_adv: list[float] = []
     batch_indices: list[int] = []
 
     def flush_batch() -> None:
-        nonlocal batch_s, batch_x, batch_adv, batch_indices
+        nonlocal batch_s, batch_x, batch_emp_mean, batch_adv, batch_indices
         if not batch_s:
             return
 
         s_batch = torch.tensor(np.stack(batch_s, axis=0), dtype=torch.float64)
         x_batch = torch.tensor(np.stack(batch_x, axis=0), dtype=torch.float64)
+        emp_mean_batch = torch.tensor(np.stack(batch_emp_mean, axis=0), dtype=torch.float64)
         adv_batch = torch.tensor(np.array(batch_adv), dtype=torch.float64)
 
         # Recompute log probabilities under the current W_out for REINFORCE.
@@ -633,7 +708,15 @@ def run_esn_policy_rl(
         logits = torch.einsum("kdn,bn->bkd", w_out, s_batch)
         mu = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
 
-        per_user_log_prob = vmf_log_prob_fixed_kappa_torch(x_batch, mu, rl_cfg.fixed_kappa)
+        # Empirical-mean-corrected score-function surrogate.
+        # The executed sample comes from vMF proposals filtered by the raw-SLNR
+        # accept/reject mechanism, so the correct shaped-policy score contains
+        # a centering term x - E_shaped[x].  emp_mean_batch is a Monte-Carlo
+        # estimate of E_shaped[x] from the same resampling pool used by the
+        # sampler.  This reduces the mismatch between the actual sampler and the
+        # plain-vMF REINFORCE update.
+        centered_x = x_batch - emp_mean_batch
+        per_user_log_prob = vmf_log_prob_fixed_kappa_torch(centered_x, mu, rl_cfg.fixed_kappa)
         joint_log_prob = torch.sum(per_user_log_prob, dim=1)
         loss = -torch.mean(adv_batch * joint_log_prob)
 
@@ -650,14 +733,15 @@ def run_esn_policy_rl(
 
         batch_s = []
         batch_x = []
+        batch_emp_mean = []
         batch_adv = []
         batch_indices = []
 
     for t in range(cfg.num_slots):
         print(f"ESN-RL Slot {t + 1} / {cfg.num_slots}", end="\r")
-        s = esn_states[t]
+        s = wesn_states[t]
 
-        # All users' vMF means are produced from the same shared ESN state.
+        # All users' vMF means are produced from the same shared WESN readout feature.
         s_t = torch.tensor(s, dtype=torch.float64)
         with torch.no_grad():
             logits = torch.einsum("kdn,n->kd", w_out, s_t)
@@ -689,6 +773,7 @@ def run_esn_policy_rl(
         best_leakage = None
         best_attempts = None
         best_accept = None
+        best_emp_mean = None
         best_rate = None
         best_actual_sinr = None
         best_proxy_sinr = None
@@ -701,15 +786,16 @@ def run_esn_policy_rl(
             cand_leakage = np.zeros(k, dtype=np.float64)
             cand_attempts = np.zeros(k, dtype=np.float64)
             cand_accept = np.zeros(k, dtype=np.float64)
+            cand_emp_mean = np.zeros((k, d), dtype=np.float64)
 
             for ku in range(k):
-                xk, sig, ell, attempts, accepted = sample_fisher_bingham_signal_leakage(
+                xk, sig, ell, attempts, accepted, emp_mean = sample_fisher_bingham_signal_leakage(
                     mu=mu_np[ku],
                     kappa=rl_cfg.fixed_kappa,
                     signal_mat=signal_mats[ku],
                     leakage_mat=leakage_mats[ku],
                     signal_gamma=rl_cfg.signal_gamma,
-                    leakage_lambda=rl_cfg.leakage_lambda,
+                    slnr_noise_power=slnr_noise_power,
                     rng=rng,
                     max_resamples=rl_cfg.max_fb_resamples,
                     signal_norm_eps=rl_cfg.signal_norm_eps,
@@ -720,14 +806,15 @@ def run_esn_policy_rl(
                 cand_leakage[ku] = ell
                 cand_attempts[ku] = attempts
                 cand_accept[ku] = 1.0 if accepted else 0.0
+                cand_emp_mean[ku] = emp_mean
                 cand_beams[:, ku] = real_to_complex_beam(cand_x_sample[ku], cfg.total_tx_power, k)
 
             cand_rate, cand_actual_sinr = compute_slot_sum_rate(
                 channels[t], cand_beams, noise_power
             )
-            # For the RL reward proxy, use PMI-only SINR rather than the
-            # full-channel proxy. Actual throughput/SINR are still computed
-            # with the true channel only for environment evaluation.
+            # The RL reward uses the true post-detection SINR when
+            # reward_mode="actual_sinr_log_ratio".  The PMI-only proxy is
+            # still computed and logged for diagnostics.
             cand_proxy_sinr = compute_pmi_sinr_proxy_from_precoder(
                 q_vectors, cand_beams, noise_power, eps=rl_cfg.reward_sinr_eps
             )
@@ -751,6 +838,7 @@ def run_esn_policy_rl(
                 best_leakage = cand_leakage
                 best_attempts = cand_attempts
                 best_accept = cand_accept
+                best_emp_mean = cand_emp_mean
                 best_rate = cand_rate
                 best_actual_sinr = cand_actual_sinr
                 best_proxy_sinr = cand_proxy_sinr
@@ -763,6 +851,9 @@ def run_esn_policy_rl(
         leakage_trace[t] = best_leakage
         fb_attempts_trace[t] = best_attempts
         fb_accept_trace[t] = best_accept
+        emp_mean_sample = best_emp_mean
+        empirical_mean_norm_trace[t] = np.linalg.norm(emp_mean_sample, axis=1)
+        centered_update_norm_trace[t] = np.linalg.norm(x_sample - emp_mean_sample, axis=1)
         rate = float(best_rate)
         actual_sinr = best_actual_sinr
         proxy_sinr = best_proxy_sinr
@@ -795,6 +886,7 @@ def run_esn_policy_rl(
 
         batch_s.append(s)
         batch_x.append(x_sample)
+        batch_emp_mean.append(emp_mean_sample)
         batch_adv.append(advantage)
         batch_indices.append(t)
 
@@ -825,7 +917,9 @@ def run_esn_policy_rl(
         "fb_accept": fb_accept_trace,
         "best_of_n_score": best_of_n_score_trace,
         "best_of_n_selected": best_of_n_selected_trace,
-        "esn_states": esn_states,
+        "empirical_mean_norm": empirical_mean_norm_trace,
+        "centered_update_norm": centered_update_norm_trace,
+        "wesn_states": wesn_states,
     }
 
 
@@ -875,7 +969,7 @@ def save_plots(
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
     ax1.plot(x_tput, zf_avg, lw=1.5, label="ZF baseline")
     ax1.plot(x_tput, random_vmf_avg, lw=1.5, label="Random vMF baseline")
-    ax1.plot(x_tput, rl_avg, lw=1.5, label="ESN-FB PMI signal/leakage RL")
+    ax1.plot(x_tput, rl_avg, lw=1.5, label="WESN-FB PMI raw-SLNR RL")
     ax1.set_title("Throughput Across Time")
     ax1.set_xlabel("Slot index")
     ax1.set_ylabel("Sum-rate [bits/s/Hz]")
@@ -887,7 +981,7 @@ def save_plots(
 
     fig2, ax2 = plt.subplots(figsize=(8, 4.5))
     ax2.plot(x_reward, reward_avg, lw=1.5)
-    ax2.set_title("ESN-FB Signal/Leakage RL Reward Across Time")
+    ax2.set_title("WESN-FB Raw-SLNR RL Reward Across Time")
     ax2.set_xlabel("Slot index")
     ax2.set_ylabel("Reward vs ZF")
     ax2.grid(True, alpha=0.35)
@@ -897,7 +991,7 @@ def save_plots(
 
     fig3, ax3 = plt.subplots(figsize=(8, 4.5))
     ax3.plot(np.arange(1, beat_zf_avg.size + 1), beat_zf_avg, lw=1.5)
-    ax3.set_title("Fraction of Slots Where ESN-FB Signal/Leakage RL Beats ZF")
+    ax3.set_title("Fraction of Slots Where WESN-FB Raw-SLNR RL Beats ZF")
     ax3.set_xlabel("Slot index")
     ax3.set_ylabel("Moving-average fraction")
     ax3.set_ylim(0.0, 1.0)
@@ -953,9 +1047,9 @@ def save_plots(
     if signal_avg is not None:
         fig6, ax6 = plt.subplots(figsize=(8, 4.5))
         ax6.plot(np.arange(1, signal_avg.size + 1), signal_avg, lw=1.5)
-        ax6.set_title("Mean Normalized Desired Signal of Accepted Samples")
+        ax6.set_title("Mean Raw PMI Desired Signal of Accepted Samples")
         ax6.set_xlabel("Slot index")
-        ax6.set_ylabel("Normalized desired signal")
+        ax6.set_ylabel("Raw PMI desired signal")
         ax6.grid(True, alpha=0.35)
         fig6.tight_layout()
         fig6.savefig(output_dir / "esn_fb_normalized_signal.png", dpi=150)
@@ -964,9 +1058,9 @@ def save_plots(
     if leakage_avg is not None:
         fig6b, ax6b = plt.subplots(figsize=(8, 4.5))
         ax6b.plot(np.arange(1, leakage_avg.size + 1), leakage_avg, lw=1.5)
-        ax6b.set_title("Mean Normalized Leakage of Accepted Samples")
+        ax6b.set_title("Mean Raw PMI Leakage of Accepted Samples")
         ax6b.set_xlabel("Slot index")
-        ax6b.set_ylabel("Normalized leakage")
+        ax6b.set_ylabel("Raw PMI leakage")
         ax6b.grid(True, alpha=0.35)
         fig6b.tight_layout()
         fig6b.savefig(output_dir / "esn_fb_normalized_leakage.png", dpi=150)
@@ -1102,8 +1196,8 @@ def load_or_run_random_vmf_baseline(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched ESN Fisher-Bingham PMI signal/leakage RL")
-    parser.add_argument("--num-slots", type=int, default=100000)
+    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched WESN PMI raw-SLNR RL")
+    parser.add_argument("--num-slots", type=int, default=200000)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
@@ -1112,28 +1206,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--force-recompute-baselines", action="store_true")
 
-    # ESN knobs. W_in and W_res are fixed; only W_out is learned.
+    # WESN knobs. The reservoir update is the same as the vanilla ESN;
+    # the readout is augmented with the current PMI input as a skip connection.
+    # W_in and W_res are fixed; only W_out is learned.
     parser.add_argument("--reservoir-size", type=int, default=128)
     parser.add_argument("--spectral-radius", type=float, default=0.8)
     parser.add_argument("--input-scale", type=float, default=0.15)
 
     # RL/training knobs.
-    parser.add_argument("--batch-size", type=int, default=512)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr-out", type=float, default=3e-2)
     parser.add_argument("--fixed-kappa", type=float, default=10.0)
     parser.add_argument("--reward-baseline-beta", type=float, default=0.99)
     parser.add_argument("--advantage-clip", type=float, default=1.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--init-scale-out", type=float, default=1e-2)
-    parser.add_argument("--leakage-lambda", type=float, default=1.0)
-    parser.add_argument("--signal-gamma", type=float, default=0.5)
+    parser.add_argument("--leakage-lambda", type=float, default=1.0, help="Deprecated/unused: SLNR-ratio denominator now uses normalized noise power.")
+    parser.add_argument("--signal-gamma", type=float, default=1)
     parser.add_argument("--max-fb-resamples", type=int, default=16)
     parser.add_argument("--leakage-norm-eps", type=float, default=1e-12)
     parser.add_argument("--signal-norm-eps", type=float, default=1e-12)
     parser.add_argument(
         "--reward-mode",
         type=str,
-        default="sinr_proxy_log_ratio",
+        default="actual_sinr_log_ratio",
         choices=[
             "throughput_delta",
             "normalized_throughput_delta",
@@ -1143,7 +1239,7 @@ def parse_args() -> argparse.Namespace:
         help="Scalar reward used for REINFORCE updates.",
     )
     parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
-    parser.add_argument("--best-of-n", type=int, default=4, help="Number of complete candidate precoders sampled per slot; execute/train on the best by reward score.")
+    parser.add_argument("--best-of-n", type=int, default=1, help="Number of complete candidate precoders sampled per slot; execute/train on the best by reward score.")
     return parser.parse_args()
 
 
@@ -1228,7 +1324,9 @@ def main() -> None:
     np.save(args.output_dir / "esn_fb_sampler_accept_trace.npy", rl_results["fb_accept"])
     np.save(args.output_dir / "esn_fb_best_of_n_score_trace.npy", rl_results["best_of_n_score"])
     np.save(args.output_dir / "esn_fb_best_of_n_selected_trace.npy", rl_results["best_of_n_selected"])
-    np.save(args.output_dir / "esn_states_trace.npy", rl_results["esn_states"])
+    np.save(args.output_dir / "esn_fb_empirical_mean_norm_trace.npy", rl_results["empirical_mean_norm"])
+    np.save(args.output_dir / "esn_fb_centered_update_norm_trace.npy", rl_results["centered_update_norm"])
+    np.save(args.output_dir / "wesn_states_trace.npy", rl_results["wesn_states"])
 
     save_plots(
         zf_throughput=zf_results["throughput"],
@@ -1238,20 +1336,24 @@ def main() -> None:
         window_len=args.window_len,
     )
 
-    print("Simple ESN-FB PMI signal/leakage RL precoder design run finished.")
+    print("Simple WESN-FB PMI raw-SLNR RL precoder design run finished.")
     print(f"ZF average throughput         : {zf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"ESN-FB PMI signal/leakage RL throughput  : {rl_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"WESN-FB PMI raw-SLNR RL throughput  : {rl_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Reward mode                   : {rl_cfg.reward_mode}")
-    print(f"ESN-FB PMI signal/leakage RL reward      : {rl_results['reward'].mean():.4f}")
-    print(f"ESN-FB throughput delta       : {rl_results['rate_delta'].mean():.4f}")
+    print(f"WESN-FB PMI raw-SLNR RL reward      : {rl_results['reward'].mean():.4f}")
+    print(f"WESN-FB throughput delta       : {rl_results['rate_delta'].mean():.4f}")
     print(f"Mean proxy-SINR ratio to ZF   : {rl_results['proxy_sinr_ratio'].mean():.4f}")
     print(f"Mean actual SINR ratio to ZF  : {rl_results['actual_sinr_ratio'].mean():.4f}")
     print(f"RL beats ZF fraction          : {rl_results['beat_zf'].mean():.4f}")
     print(f"Mean beam similarity to ZF    : {rl_results['beam_similarity_to_zf'].mean():.4f}")
     print(f"Mean grad norm                : {rl_results['grad_norm'].mean():.4f}")
-    print(f"Mean normalized PMI desired signal: {rl_results['signal'].mean():.4f}")
-    print(f"Mean normalized PMI leakage       : {rl_results['leakage'].mean():.4f}")
+    print(f"Mean raw PMI desired signal: {rl_results['signal'].mean():.4f}")
+    print(f"Mean raw PMI leakage       : {rl_results['leakage'].mean():.4f}")
+    print(f"Empirical mean correction  : yes (centered x - E_shaped[x])")
+    print(f"Mean empirical mean norm   : {rl_results['empirical_mean_norm'].mean():.4f}")
+    print(f"Mean centered update norm  : {rl_results['centered_update_norm'].mean():.4f}")
+    print(f"SLNR score uses raw PMI-only actual SLNR: yes")
     print(f"FB sampler acceptance rate    : {rl_results['fb_accept'].mean():.4f}")
     print(f"FB sampler avg attempts       : {rl_results['fb_attempts'].mean():.4f}")
     print(f"Best-of-N candidates          : {rl_cfg.best_of_n}")

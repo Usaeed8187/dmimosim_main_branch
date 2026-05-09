@@ -26,7 +26,7 @@ class SimConfig:
 @dataclass
 class RLConfig:
     lr_out: float = 3e-2
-    fixed_kappa: float = 10.0
+    fixed_kappa: float = 3.0
     reward_baseline_beta: float = 0.99
     advantage_clip: float = 1.0
     grad_clip_norm: float = 1.0
@@ -35,7 +35,7 @@ class RLConfig:
     reservoir_size: int = 128
     spectral_radius: float = 0.8
     input_scale: float = 0.15
-    learned_policy_probability: float = 0.5
+    learned_policy_probability: float = 1.0
     kappa_dk: float = 50.0
     leakage_lambda: float = 1.0
     signal_gamma: float = 0.5
@@ -44,7 +44,8 @@ class RLConfig:
     signal_norm_eps: float = 1e-12
     reward_mode: str = "sinr_proxy_log_ratio"
     reward_sinr_eps: float = 1e-12
-    best_of_n: int = 1
+    best_of_n: int = 4
+    beta_zf: float = 2.0
 
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
@@ -615,7 +616,7 @@ def run_esn_policy_rl(
     # p_learned selects the learned per-UE FB-vMF branch.
     # 1 - p_learned selects a DK branch: per-UE vMFs centered at the ZF beams.
     # In this step-by-step version, this probability is fixed, not learned.
-    p_learned_fixed = float(np.clip(rl_cfg.learned_policy_probability, 1e-6, 1.0 - 1e-6))
+    p_learned_fixed = 1.0  # Run B: learned-only test; DK branch disabled
     optimizer = torch.optim.Adam([w_out], lr=rl_cfg.lr_out)
 
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
@@ -647,26 +648,29 @@ def run_esn_policy_rl(
     reward_baseline: float | None = None
     batch_s: list[np.ndarray] = []
     batch_x: list[np.ndarray] = []
+    batch_mu_zf: list[np.ndarray] = []
     batch_adv: list[float] = []
     batch_indices: list[int] = []
 
     def flush_batch() -> None:
-        nonlocal batch_s, batch_x, batch_adv, batch_indices
+        nonlocal batch_s, batch_x, batch_mu_zf, batch_adv, batch_indices
         if not batch_s:
             return
 
         s_batch = torch.tensor(np.stack(batch_s, axis=0), dtype=torch.float64)
         x_batch = torch.tensor(np.stack(batch_x, axis=0), dtype=torch.float64)
+        mu_zf_batch = torch.tensor(np.stack(batch_mu_zf, axis=0), dtype=torch.float64)
         adv_batch = torch.tensor(np.array(batch_adv), dtype=torch.float64)
 
-        # Recompute the learned per-UE vMF means under the current W_out.
-        # Debugging version: update W_out only from actions actually generated
-        # by the learned branch. DK-branch actions are executed/evaluated but
-        # are not inserted into this batch, so they contribute no policy-gradient
-        # term. Since the mixture probability is fixed, this isolates learning of
-        # the learned-policy mean map.
+        # Recompute the ZF-anchored learned per-UE vMF means under the current W_out.
+        # Run D uses
+        #   h_k(s_t) = beta_zf * mu_zf,k,t + W_out,k s_t,
+        #   mu_k(s_t) = h_k(s_t) / ||h_k(s_t)||.
+        # This initializes the learned policy near the ZF direction while still
+        # allowing W_out to learn state-dependent deviations from ZF.
         logits = torch.einsum("kdn,bn->bkd", w_out, s_batch)
-        mu = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
+        anchored_logits = rl_cfg.beta_zf * mu_zf_batch + logits
+        mu = anchored_logits / torch.clamp(torch.linalg.norm(anchored_logits, dim=-1, keepdim=True), min=1e-12)
 
         log_pi_phi = torch.sum(vmf_log_prob_approx_torch(x_batch, mu, rl_cfg.fixed_kappa), dim=1)
         loss = -torch.mean(adv_batch * log_pi_phi)
@@ -684,7 +688,7 @@ def run_esn_policy_rl(
 
         batch_s = []
         batch_x = []
-        batch_mu_dk = []
+        batch_mu_zf = []
         batch_adv = []
         batch_indices = []
 
@@ -692,12 +696,12 @@ def run_esn_policy_rl(
         print(f"ESN-RL Slot {t + 1} / {cfg.num_slots}", end="\r")
         s = esn_states[t]
 
-        # All users' vMF means are produced from the same shared ESN state.
+        # Compute the ESN readout logits. The final policy mean is formed after
+        # the current slot's ZF direction mu_zf is available.
         s_t = torch.tensor(s, dtype=torch.float64)
         with torch.no_grad():
-            logits = torch.einsum("kdn,n->kd", w_out, s_t)
-            mu_t = logits / torch.clamp(torch.linalg.norm(logits, dim=-1, keepdim=True), min=1e-12)
-            mu_np = mu_t.detach().cpu().numpy()
+            logits_t = torch.einsum("kdn,n->kd", w_out, s_t)
+            logits_np = logits_t.detach().cpu().numpy()
 
         # Emulate the limited-feedback information available to the policy.
         # The sampler uses only dominant right singular vectors / PMI directions,
@@ -718,10 +722,18 @@ def run_esn_policy_rl(
         for ku in range(k):
             mu_zf[ku] = complex_to_real_unit(p_zf[:, ku], cfg.total_tx_power, k)
 
+        # Run D: ZF-anchored learned mean. At initialization, W_out is small,
+        # so mu_np starts close to mu_zf. Learning then adjusts the residual
+        # W_out s_t term to improve over the ZF-centered direction.
+        anchored_logits_np = rl_cfg.beta_zf * mu_zf + logits_np
+        mu_np = anchored_logits_np / np.maximum(
+            np.linalg.norm(anchored_logits_np, axis=1, keepdims=True), 1e-12
+        )
+
         p_learned_np = p_learned_fixed
         learned_policy_probability_trace[t] = p_learned_np
         dk_policy_probability_trace[t] = 1.0 - p_learned_np
-        mixture_logit_trace[t] = np.log(p_learned_np / (1.0 - p_learned_np))
+        mixture_logit_trace[t] = np.inf
 
         # Branch-first mixture-policy execution.
         # First choose the branch for this slot using the fixed mixture probability.
@@ -729,11 +741,11 @@ def run_esn_policy_rl(
         # candidates only. If the DK branch is selected, draw exactly one
         # ZF-centered DK perturbation. This means best_of_n only improves the
         # learned branch; it does not give the DK branch multiple chances.
-        slot_from_learned = rng.uniform(0.0, 1.0) < p_learned_np
-        # Temporary debugging setting: no best-of-N selection. The learned
-        # branch samples exactly one full precoder, and the DK branch samples
-        # exactly one ZF-centered perturbation.
-        num_candidates = 1
+        slot_from_learned = True  # Run D: ZF-anchored learned-only FB test with best-of-N
+        # Run D debugging setting: ZF-anchored learned-only FB with best-of-N.
+        # Since DK is disabled, all candidates come from the ZF-anchored learned FB-shaped
+        # branch and the executed/trained action is the highest-reward candidate.
+        num_candidates = max(1, rl_cfg.best_of_n)
 
         best_score = -np.inf
         best_candidate_index = 0
@@ -866,6 +878,7 @@ def run_esn_policy_rl(
         if slot_from_learned:
             batch_s.append(s)
             batch_x.append(x_sample)
+            batch_mu_zf.append(mu_zf)
             batch_adv.append(advantage)
             batch_indices.append(t)
 
@@ -1216,7 +1229,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE_with_mixture"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE_runD_zf_anchored_fb_best4"))
     parser.add_argument("--window-len", type=int, default=5000)
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--force-recompute-baselines", action="store_true")
@@ -1227,13 +1240,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-scale", type=float, default=0.15)
 
     # Mixture-policy domain-knowledge injection knobs.
-    parser.add_argument("--learned-policy-probability", type=float, default=0.5, help="Fixed probability of sampling the learned-policy branch. Default 0.5 gives 50%% learned / 50%% DK.")
+    parser.add_argument("--learned-policy-probability", type=float, default=1.0, help="Fixed probability of sampling the learned-policy branch. Run D default 1.0 gives learned-only / no DK.")
     parser.add_argument("--kappa-dk", type=float, default=50.0, help="Fixed vMF concentration for the ZF-centered domain-knowledge branch.")
 
     # RL/training knobs.
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--lr-out", type=float, default=3e-2)
-    parser.add_argument("--fixed-kappa", type=float, default=10.0)
+    parser.add_argument("--fixed-kappa", type=float, default=3.0)
     parser.add_argument("--reward-baseline-beta", type=float, default=0.99)
     parser.add_argument("--advantage-clip", type=float, default=1.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
@@ -1256,7 +1269,8 @@ def parse_args() -> argparse.Namespace:
         help="Scalar reward used for REINFORCE updates.",
     )
     parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
-    parser.add_argument("--best-of-n", type=int, default=1, help="Temporarily fixed to 1 for debugging: no best-of-N selection is used.")
+    parser.add_argument("--best-of-n", type=int, default=4, help="Run D: number of learned-branch FB-shaped candidate precoders per slot; default 4.")
+    parser.add_argument("--beta-zf", type=float, default=2.0, help="Run D: strength of ZF anchoring in h = beta_zf * mu_zf + W_out s. Larger values keep the learned mean closer to ZF.")
     return parser.parse_args()
 
 
@@ -1279,7 +1293,7 @@ def main() -> None:
         reservoir_size=args.reservoir_size,
         spectral_radius=args.spectral_radius,
         input_scale=args.input_scale,
-        learned_policy_probability=args.learned_policy_probability,
+        learned_policy_probability=1.0,  # Run D: force learned branch only
         kappa_dk=args.kappa_dk,
         leakage_lambda=args.leakage_lambda,
         signal_gamma=args.signal_gamma,
@@ -1288,7 +1302,8 @@ def main() -> None:
         signal_norm_eps=args.signal_norm_eps,
         reward_mode=args.reward_mode,
         reward_sinr_eps=args.reward_sinr_eps,
-        best_of_n=1,  # temporary debugging setting: force best_of_n=1
+        best_of_n=max(1, args.best_of_n),  # Run D: enable best-of-N within the learned branch
+        beta_zf=args.beta_zf,
     )
 
     # Use separate RNG streams so loading cached baselines does not change the
@@ -1358,13 +1373,13 @@ def main() -> None:
         window_len=args.window_len,
     )
 
-    print("Simple ESN-FB PMI signal/leakage RL precoder design run finished.")
+    print("Run-D ZF-anchored learned-only FB-vMF best-of-N RL precoder design run finished.")
     print(f"ZF average throughput         : {zf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"ESN-FB PMI signal/leakage RL throughput  : {rl_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"Run-D ZF-anchored FB-vMF best-of-N throughput: {rl_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Reward mode                   : {rl_cfg.reward_mode}")
-    print(f"ESN-FB PMI signal/leakage RL reward      : {rl_results['reward'].mean():.4f}")
-    print(f"ESN-FB throughput delta       : {rl_results['rate_delta'].mean():.4f}")
+    print(f"Run-D ZF-anchored FB-vMF best-of-N reward    : {rl_results['reward'].mean():.4f}")
+    print(f"Run-D throughput delta       : {rl_results['rate_delta'].mean():.4f}")
     print(f"Mean proxy-SINR ratio to ZF   : {rl_results['proxy_sinr_ratio'].mean():.4f}")
     print(f"Mean actual SINR ratio to ZF  : {rl_results['actual_sinr_ratio'].mean():.4f}")
     print(f"RL beats ZF fraction          : {rl_results['beat_zf'].mean():.4f}")
@@ -1374,10 +1389,11 @@ def main() -> None:
     print(f"Mean normalized PMI leakage       : {rl_results['leakage'].mean():.4f}")
     print(f"FB sampler acceptance rate    : {rl_results['fb_accept'].mean():.4f}")
     print(f"FB sampler avg attempts       : {rl_results['fb_attempts'].mean():.4f}")
-    print(f"Best-of-N candidates          : {rl_cfg.best_of_n}  (temporarily forced to 1)")
-    print(f"Mean selected candidate index : {rl_results['best_of_n_selected'].mean():.4f}  (DK slots always index 0)")
+    print(f"Best-of-N candidates          : {rl_cfg.best_of_n}  (Run D: ZF-anchored learned-branch best-of-N enabled)")
+    print(f"ZF anchoring beta             : {rl_cfg.beta_zf:.4f}")
+    print(f"Mean selected candidate index : {rl_results['best_of_n_selected'].mean():.4f}  (Run D: selected best ZF-anchored learned candidate)")
     print(f"Mean learned branch prob      : {rl_results['learned_policy_probability'].mean():.4f}")
-    print(f"Mean DK branch prob           : {rl_results['dk_policy_probability'].mean():.4f}")
+    print(f"Mean DK branch prob           : {rl_results['dk_policy_probability'].mean():.4f}  (Run D: DK disabled)")
     print(f"Selected learned branch frac  : {rl_results['selected_learned_branch'].mean():.4f}")
     print(f"Selected DK branch frac       : {rl_results['selected_dk_branch'].mean():.4f}")
     print(f"Fixed learned branch prob     : {rl_results['learned_policy_probability'][-1]:.4f}")
