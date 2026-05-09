@@ -35,13 +35,16 @@ class RLConfig:
     reservoir_size: int = 128
     spectral_radius: float = 0.8
     input_scale: float = 0.15
+    # Number of PMI time steps included in the WESN skip/readout connection.
+    # A value of 1 gives the one-step skip feature [Re{z_t}, Im{z_t}, y_t].
+    skip_window_length: int = 4
     # Deprecated/unused for SLNR-ratio shaping; denominator now uses noise power.
     leakage_lambda: float = 1.0
     signal_gamma: float = 0.5
     max_fb_resamples: int = 16
     leakage_norm_eps: float = 1e-12
     signal_norm_eps: float = 1e-12
-    reward_mode: str = "actual_sinr_log_ratio"
+    reward_mode: str = "rate_log_ratio"
     reward_sinr_eps: float = 1e-12
     best_of_n: int = 8
 
@@ -144,10 +147,11 @@ def compute_rl_reward(
       - throughput_delta: old reward, R_RL - R_ZF.
       - normalized_throughput_delta: (R_RL - R_ZF) / (|R_ZF| + eps).
       - actual_sinr_log_ratio: mean_k log((SINR_RL,k + eps)/(SINR_ZF,k + eps)).
+      - rate_log_ratio: sum_k log((1 + SINR_RL,k + eps)/(1 + SINR_ZF,k + eps)).
       - sinr_proxy_log_ratio: same log-ratio but using the simpler SINR proxy.
 
-    The default is actual_sinr_log_ratio so the policy is trained using the
-    true post-detection SINR returned by compute_slot_sum_rate().
+    The default is rate_log_ratio so the policy is trained using a smooth
+    objective that directly matches sum-rate improvement over ZF.
     """
     if reward_mode == "throughput_delta":
         return float(rate - zf_rate)
@@ -155,12 +159,14 @@ def compute_rl_reward(
         return float((rate - zf_rate) / (abs(zf_rate) + eps))
     if reward_mode == "actual_sinr_log_ratio":
         return float(np.mean(np.log((actual_sinr + eps) / (zf_actual_sinr + eps))))
+    if reward_mode == "rate_log_ratio":
+        return float(np.sum(np.log((1.0 + actual_sinr + eps) / (1.0 + zf_actual_sinr + eps))))
     if reward_mode == "sinr_proxy_log_ratio":
         return float(np.mean(np.log((proxy_sinr + eps) / (zf_proxy_sinr + eps))))
     raise ValueError(
         f"Unknown reward_mode={reward_mode!r}. Expected one of: "
         "throughput_delta, normalized_throughput_delta, "
-        "actual_sinr_log_ratio, sinr_proxy_log_ratio."
+        "actual_sinr_log_ratio, rate_log_ratio, sinr_proxy_log_ratio."
     )
 
 def pmi_features_from_channels(user_channels: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
@@ -592,23 +598,53 @@ def make_fixed_esn(
     return w_in, w_res
 
 
+def build_windowed_skip_features(pmi_features: np.ndarray, window_length: int) -> np.ndarray:
+    """Build padded input windows for WESN skip/readout connections.
+
+    pmi_features has shape [T, D_y], where each row y_t is already real-valued
+    because it contains [Re{PMI}, Im{PMI}]. The returned array has shape
+    [T, K_skip * D_y]. At early slots, the first available input is repeated on
+    the left, matching the padding convention used by configured_wesn_pred.py.
+
+    For K_skip=3, the skip feature at time t is [y_{t-2}, y_{t-1}, y_t],
+    with left padding for t < 2.
+    """
+    num_slots, feat_dim = pmi_features.shape
+    k_skip = max(1, int(window_length))
+
+    if k_skip == 1:
+        return pmi_features.astype(np.float64, copy=True)
+
+    out = np.zeros((num_slots, k_skip * feat_dim), dtype=np.float64)
+    for t in range(num_slots):
+        start = max(0, t - k_skip + 1)
+        win = pmi_features[start : t + 1]
+        if win.shape[0] < k_skip:
+            pad = np.repeat(win[0:1], k_skip - win.shape[0], axis=0)
+            win = np.concatenate([pad, win], axis=0)
+        out[t, :] = win.reshape(-1)
+    return out
+
+
 def compute_wesn_states(pmi_features: np.ndarray, rl_cfg: RLConfig, rng: np.random.Generator) -> np.ndarray:
     """Compute fixed WESN readout features from all-UE PMI features.
 
-    This uses the same reservoir state update as the vanilla ESN,
+    The reservoir update is the same as the vanilla ESN,
 
         z_t = tanh(W_in y_t + W_res z_{t-1}),
 
-    but uses the WESN/skip-readout feature
+    but the readout feature uses a windowed skip connection,
 
-        s_t = [Re{z_t}, Im{z_t}, y_t].
+        s_t = [Re{z_t}, Im{z_t}, y_{t-K+1}, ..., y_t],
 
-    In this script, y_t is already real-valued because pmi_features_from_channels()
-    concatenates Re{V_k} and Im{V_k}. Therefore, we append y_t directly rather
-    than splitting it again. Only W_out is trained by the RL algorithm.
+    where K = rl_cfg.skip_window_length. In this script, y_t is already
+    real-valued because pmi_features_from_channels() concatenates Re{V_k} and
+    Im{V_k}, so the windowed skip block appends these real vectors directly.
+    Only W_out is trained by the RL algorithm.
     """
     num_slots, feat_dim = pmi_features.shape
     nz = rl_cfg.reservoir_size
+    k_skip = max(1, int(rl_cfg.skip_window_length))
     w_in, w_res = make_fixed_esn(
         feat_dim=feat_dim,
         reservoir_size=nz,
@@ -617,12 +653,14 @@ def compute_wesn_states(pmi_features: np.ndarray, rl_cfg: RLConfig, rng: np.rand
         rng=rng,
     )
 
+    skip_features = build_windowed_skip_features(pmi_features, k_skip)
+
     z = np.zeros(nz, dtype=np.complex128)
-    states = np.zeros((num_slots, 2 * nz + feat_dim), dtype=np.float64)
+    states = np.zeros((num_slots, 2 * nz + k_skip * feat_dim), dtype=np.float64)
     for t in range(num_slots):
         y = pmi_features[t]
         z = split_tanh_np(w_in @ y + w_res @ z)
-        states[t, :] = np.concatenate([np.real(z), np.imag(z), y])
+        states[t, :] = np.concatenate([np.real(z), np.imag(z), skip_features[t]])
     return states
 
 
@@ -633,7 +671,7 @@ def vmf_log_prob_fixed_kappa_torch(
     return fixed_kappa * torch.sum(mu * x, dim=-1)
 
 
-def run_esn_policy_rl(
+def run_wesn_policy_rl(
     cfg: SimConfig,
     rl_cfg: RLConfig,
     channels: np.ndarray,
@@ -652,13 +690,13 @@ def run_esn_policy_rl(
 
     # Shared WESN readout feature generated from the PMI feedback of all UEs.
     # The reservoir update is unchanged from the vanilla ESN. The readout feature
-    # is augmented with a skip connection from the current PMI input.
+    # is augmented with a windowed skip connection from recent PMI inputs.
     wesn_states = compute_wesn_states(zf_baseline["pmi_features"], rl_cfg, rng)
     state_dim = wesn_states.shape[1]
 
     # W_out maps shared WESN readout features to all UE vMF mean logits,
-    # shape [K, D, 2*N_z + input_dim]. This is the only trainable policy
-    # parameter in this fixed-reservoir WESN setup.
+    # shape [K, D, 2*N_z + skip_window_length*input_dim]. This is the only
+    # trainable policy parameter in this fixed-reservoir WESN setup.
     w_out_init = rl_cfg.init_scale_out * rng.standard_normal((k, d, state_dim))
     w_out = torch.nn.Parameter(torch.tensor(w_out_init, dtype=torch.float64))
     optimizer = torch.optim.Adam([w_out], lr=rl_cfg.lr_out)
@@ -738,7 +776,7 @@ def run_esn_policy_rl(
         batch_indices = []
 
     for t in range(cfg.num_slots):
-        print(f"ESN-RL Slot {t + 1} / {cfg.num_slots}", end="\r")
+        print(f"WESN-RL Slot {t + 1} / {cfg.num_slots}", end="\r")
         s = wesn_states[t]
 
         # All users' vMF means are produced from the same shared WESN readout feature.
@@ -812,9 +850,9 @@ def run_esn_policy_rl(
             cand_rate, cand_actual_sinr = compute_slot_sum_rate(
                 channels[t], cand_beams, noise_power
             )
-            # The RL reward uses the true post-detection SINR when
-            # reward_mode="actual_sinr_log_ratio".  The PMI-only proxy is
-            # still computed and logged for diagnostics.
+            # The default RL reward uses the true post-detection SINR through
+            # reward_mode="rate_log_ratio".  The PMI-only proxy is still
+            # computed and logged for diagnostics.
             cand_proxy_sinr = compute_pmi_sinr_proxy_from_precoder(
                 q_vectors, cand_beams, noise_power, eps=rl_cfg.reward_sinr_eps
             )
@@ -1206,12 +1244,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--force-recompute-baselines", action="store_true")
 
-    # WESN knobs. The reservoir update is the same as the vanilla ESN;
-    # the readout is augmented with the current PMI input as a skip connection.
+    # WESN knobs. The reservoir update is the same as the vanilla ESN; the
+    # readout is augmented with a window of recent PMI inputs as skip connections.
     # W_in and W_res are fixed; only W_out is learned.
     parser.add_argument("--reservoir-size", type=int, default=128)
     parser.add_argument("--spectral-radius", type=float, default=0.8)
     parser.add_argument("--input-scale", type=float, default=0.15)
+    parser.add_argument(
+        "--skip-window-length",
+        type=int,
+        default=4,
+        help="Number of recent PMI feature vectors included in the WESN skip/readout connection. Use 1 for the one-step skip connection.",
+    )
 
     # RL/training knobs.
     parser.add_argument("--batch-size", type=int, default=128)
@@ -1229,11 +1273,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reward-mode",
         type=str,
-        default="actual_sinr_log_ratio",
+        default="rate_log_ratio",
         choices=[
             "throughput_delta",
             "normalized_throughput_delta",
             "actual_sinr_log_ratio",
+            "rate_log_ratio",
             "sinr_proxy_log_ratio",
         ],
         help="Scalar reward used for REINFORCE updates.",
@@ -1262,6 +1307,7 @@ def main() -> None:
         reservoir_size=args.reservoir_size,
         spectral_radius=args.spectral_radius,
         input_scale=args.input_scale,
+        skip_window_length=args.skip_window_length,
         leakage_lambda=args.leakage_lambda,
         signal_gamma=args.signal_gamma,
         max_fb_resamples=args.max_fb_resamples,
@@ -1299,7 +1345,7 @@ def main() -> None:
         cache_dir=baseline_cache_dir,
         force_recompute=args.force_recompute_baselines,
     )
-    rl_results = run_esn_policy_rl(cfg, rl_cfg, channels, zf_results, rng_rl)
+    rl_results = run_wesn_policy_rl(cfg, rl_cfg, channels, zf_results, rng_rl)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.output_dir / "zf_throughput_trace.npy", zf_results["throughput"])
@@ -1356,6 +1402,7 @@ def main() -> None:
     print(f"SLNR score uses raw PMI-only actual SLNR: yes")
     print(f"FB sampler acceptance rate    : {rl_results['fb_accept'].mean():.4f}")
     print(f"FB sampler avg attempts       : {rl_results['fb_attempts'].mean():.4f}")
+    print(f"WESN skip window length      : {rl_cfg.skip_window_length}")
     print(f"Best-of-N candidates          : {rl_cfg.best_of_n}")
     print(f"Mean selected candidate index : {rl_results['best_of_n_selected'].mean():.4f}")
 
