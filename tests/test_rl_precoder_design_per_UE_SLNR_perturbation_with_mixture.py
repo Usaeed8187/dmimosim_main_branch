@@ -2396,7 +2396,7 @@ def load_or_run_random_vmf_baseline(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched WESN phase-invariant PMI raw-SLNR RL")
-    parser.add_argument("--num-slots", type=int, default=50000)
+    parser.add_argument("--num-slots", type=int, default=100000)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
@@ -2475,7 +2475,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-oracle-pool-diagnostics", action="store_true", help="Expensively score all M^K full-precoder combinations from the candidate pools and log the best actual rate.")
     parser.add_argument("--initial-learned-policy-probability", type=float, default=0.8, help="Initial reuse probability for the learned SLNR-perturbation branch. The exact SLNR DK branch starts with probability 1-p.")
     parser.add_argument("--lr-mixture", type=float, default=3e-2, help="Learning rate for the trainable mixture/reuse probability logit.")
-    parser.add_argument("--positive-rate-bonus-lambda", type=float, default=2.0, help="Scale lambda for the positive rate-delta bonus: lambda * max(rate - reference_rate, 0)^p.")
+    parser.add_argument("--positive-rate-bonus-lambda", type=float, default=0.0, help="Scale lambda for the positive rate-delta bonus: lambda * max(rate - reference_rate, 0)^p.")
     parser.add_argument("--positive-rate-bonus-power", type=float, default=0.5, help="Exponent p for the positive rate-delta bonus. Default 0.5 amplifies small positive deltas.")
     return parser.parse_args()
 
