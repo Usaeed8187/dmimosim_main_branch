@@ -8,6 +8,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.optimize import minimize
 
 
 @dataclass
@@ -41,6 +42,21 @@ class OracleConfig:
     # increase in the tangent space around the SLNR beam.
     signal_beta_grid: tuple[float, ...] = (0.0, 0.02, 0.05, 0.10, 0.15, 0.20, 0.30, 0.50)
     include_negative_signal_steps: bool = False
+
+    # User-centered PMI-span oracle. For the current K=2 case, each UE beam
+    # is searched inside span{q_1, q_2} using
+    #   v_k(theta, phi) = cos(theta) q_k + exp(j phi) sin(theta) b_k,
+    # where b_k is the other user's PMI direction after removing its component
+    # parallel to q_k.
+    pmi_span_num_theta: int = 10
+    pmi_span_num_phi: int = 8
+    pmi_span_theta_max: float = float(np.pi / 2.0)
+    pmi_span_search_mode: str = "opt"  # "opt" or "grid"
+    pmi_span_opt_random_starts: int = 8
+    pmi_span_opt_maxiter: int = 80
+    pmi_span_heatmap_slots: int = 3
+    pmi_span_heatmap_num_theta: int = 40
+    pmi_span_heatmap_num_phi: int = 40
 
     # Runtime / plotting.
     window_len: int = 200
@@ -437,6 +453,304 @@ def build_two_direction_candidate_pools(
     return pools
 
 
+
+
+def user_centered_pmi_basis(
+    q_vectors: np.ndarray,
+    user_index: int,
+    eps: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Return (q_k, b_k) for the K=2 user-centered PMI-span basis."""
+    if q_vectors.shape[0] != 2:
+        raise ValueError("The user-centered PMI-span implementation currently assumes K=2.")
+    qk = unit_norm(q_vectors[user_index])
+    q_other = unit_norm(q_vectors[1 - user_index])
+    b_tilde = q_other - qk * np.vdot(qk, q_other)
+    b_norm = float(np.linalg.norm(b_tilde))
+    if b_norm < eps:
+        return qk, None
+    return qk, b_tilde / b_norm
+
+
+def pmi_span_beam_from_theta_phi(
+    q_vectors: np.ndarray,
+    user_index: int,
+    theta: float,
+    phi: float,
+) -> np.ndarray:
+    """Build v_k(theta, phi) inside the user-centered K=2 PMI span."""
+    qk, bk = user_centered_pmi_basis(q_vectors, user_index)
+    if bk is None:
+        return qk
+    return unit_norm(np.cos(theta) * qk + np.exp(1j * phi) * np.sin(theta) * bk)
+
+
+def theta_phi_from_user_centered_beam(
+    q_vectors: np.ndarray,
+    user_index: int,
+    beam: np.ndarray,
+    theta_max: float,
+    eps: float = 1e-12,
+) -> tuple[float, float]:
+    """Approximate user-centered (theta, phi) coordinates for a beam.
+
+    The beam is projected onto span{q_k, b_k}; global phase is removed by using
+    the q_k coefficient as the phase reference.
+    """
+    qk, bk = user_centered_pmi_basis(q_vectors, user_index)
+    if bk is None:
+        return 0.0, 0.0
+    v = unit_norm(beam)
+    c0 = np.vdot(qk, v)
+    c1 = np.vdot(bk, v)
+    norm_c = np.sqrt(float(np.abs(c0) ** 2 + np.abs(c1) ** 2))
+    if norm_c < eps:
+        return 0.0, 0.0
+    c0 = c0 / norm_c
+    c1 = c1 / norm_c
+    theta = float(np.arctan2(np.abs(c1), np.abs(c0)))
+    theta = float(np.clip(theta, 0.0, theta_max))
+    if np.abs(c1) < eps:
+        phi = 0.0
+    elif np.abs(c0) < eps:
+        phi = float(np.angle(c1) % (2.0 * np.pi))
+    else:
+        phi = float((np.angle(c1) - np.angle(c0)) % (2.0 * np.pi))
+    return theta, phi
+
+
+def pmi_span_rate_from_params(
+    params: np.ndarray,
+    user_channels: np.ndarray,
+    q_vectors: np.ndarray,
+    cfg: SimConfig,
+    noise_power: float,
+) -> float:
+    """Evaluate true sum-rate for K=2 PMI-span coordinates.
+
+    params = [theta_0, phi_0, theta_1, phi_1].
+    """
+    beams = np.zeros((cfg.num_tx_antennas, cfg.num_users), dtype=np.complex128)
+    for k in range(cfg.num_users):
+        theta = float(params[2 * k])
+        phi = float(params[2 * k + 1] % (2.0 * np.pi))
+        beams[:, k] = pmi_span_beam_from_theta_phi(q_vectors, k, theta, phi)
+    precoder = beams_to_precoder(beams, cfg.total_tx_power)
+    rate, _ = compute_slot_sum_rate(user_channels, precoder, noise_power)
+    return rate
+
+
+def pmi_span_params_from_precoder(
+    q_vectors: np.ndarray,
+    precoder: np.ndarray,
+    cfg: SimConfig,
+    theta_max: float,
+) -> np.ndarray:
+    params = np.zeros(2 * cfg.num_users, dtype=np.float64)
+    for k in range(cfg.num_users):
+        theta, phi = theta_phi_from_user_centered_beam(q_vectors, k, precoder[:, k], theta_max)
+        params[2 * k] = theta
+        params[2 * k + 1] = phi
+    return params
+
+
+def optimize_user_centered_pmi_span(
+    user_channels: np.ndarray,
+    q_vectors: np.ndarray,
+    zf_precoder: np.ndarray,
+    slnr_precoder: np.ndarray,
+    cfg: SimConfig,
+    oracle_cfg: OracleConfig,
+    noise_power: float,
+    rng: np.random.Generator,
+) -> tuple[float, np.ndarray, int, bool]:
+    """Multi-start bounded Powell optimization over K=2 PMI-span coordinates."""
+    if cfg.num_users != 2:
+        raise ValueError("PMI-span numerical optimization currently assumes K=2.")
+    theta_max = float(oracle_cfg.pmi_span_theta_max)
+    bounds = []
+    for _ in range(cfg.num_users):
+        bounds.append((0.0, theta_max))
+        bounds.append((0.0, 2.0 * np.pi))
+
+    starts: list[np.ndarray] = []
+    starts.append(np.zeros(2 * cfg.num_users, dtype=np.float64))
+    starts.append(pmi_span_params_from_precoder(q_vectors, slnr_precoder, cfg, theta_max))
+    starts.append(pmi_span_params_from_precoder(q_vectors, zf_precoder, cfg, theta_max))
+    for _ in range(max(0, int(oracle_cfg.pmi_span_opt_random_starts))):
+        x0 = np.zeros(2 * cfg.num_users, dtype=np.float64)
+        for k in range(cfg.num_users):
+            x0[2 * k] = rng.uniform(0.0, theta_max)
+            x0[2 * k + 1] = rng.uniform(0.0, 2.0 * np.pi)
+        starts.append(x0)
+
+    best_rate = -np.inf
+    best_params = starts[0].copy()
+    total_evals = 0
+    any_success = False
+
+    def objective(x: np.ndarray) -> float:
+        xx = np.array(x, dtype=np.float64, copy=True)
+        for k in range(cfg.num_users):
+            xx[2 * k] = np.clip(xx[2 * k], 0.0, theta_max)
+            xx[2 * k + 1] = xx[2 * k + 1] % (2.0 * np.pi)
+        return -pmi_span_rate_from_params(xx, user_channels, q_vectors, cfg, noise_power)
+
+    for x0 in starts:
+        start_rate = -objective(x0)
+        if start_rate > best_rate:
+            best_rate = float(start_rate)
+            best_params = x0.copy()
+        res = minimize(
+            objective,
+            x0=x0,
+            method="Powell",
+            bounds=bounds,
+            options={"maxiter": int(oracle_cfg.pmi_span_opt_maxiter), "xtol": 1e-4, "ftol": 1e-4, "disp": False},
+        )
+        total_evals += int(getattr(res, "nfev", 0))
+        any_success = any_success or bool(getattr(res, "success", False))
+        x_best = np.array(res.x, dtype=np.float64, copy=True)
+        for k in range(cfg.num_users):
+            x_best[2 * k] = np.clip(x_best[2 * k], 0.0, theta_max)
+            x_best[2 * k + 1] = x_best[2 * k + 1] % (2.0 * np.pi)
+        rate = -objective(x_best)
+        if rate > best_rate:
+            best_rate = float(rate)
+            best_params = x_best
+    return best_rate, best_params, total_evals, any_success
+
+
+def save_pmi_span_heatmaps_for_slot(
+    slot_index: int,
+    user_channels: np.ndarray,
+    q_vectors: np.ndarray,
+    best_params: np.ndarray,
+    cfg: SimConfig,
+    oracle_cfg: OracleConfig,
+    noise_power: float,
+) -> None:
+    """Save per-UE conditional theta/phi heatmaps.
+
+    For UE k, vary (theta_k, phi_k) while holding the other UE fixed at the
+    best PMI-span parameters found for this slot.
+    """
+    out = oracle_cfg.output_dir / "pmi_span_heatmaps"
+    out.mkdir(parents=True, exist_ok=True)
+    n_theta = max(2, int(oracle_cfg.pmi_span_heatmap_num_theta))
+    n_phi = max(2, int(oracle_cfg.pmi_span_heatmap_num_phi))
+    theta_grid = np.linspace(0.0, float(oracle_cfg.pmi_span_theta_max), n_theta)
+    phi_grid = np.linspace(0.0, 2.0 * np.pi, n_phi, endpoint=False)
+    for k in range(cfg.num_users):
+        heat = np.zeros((n_phi, n_theta), dtype=np.float64)
+        for ip, phi in enumerate(phi_grid):
+            for it, theta in enumerate(theta_grid):
+                params = best_params.copy()
+                params[2 * k] = theta
+                params[2 * k + 1] = phi
+                heat[ip, it] = pmi_span_rate_from_params(params, user_channels, q_vectors, cfg, noise_power)
+        best_theta = float(best_params[2 * k])
+        best_phi = float(best_params[2 * k + 1] % (2.0 * np.pi))
+        fig, ax = plt.subplots(figsize=(8, 5))
+        im = ax.imshow(
+            heat,
+            origin="lower",
+            aspect="auto",
+            extent=[0.0, float(oracle_cfg.pmi_span_theta_max), 0.0, 2.0 * np.pi],
+        )
+        ax.scatter([best_theta], [best_phi], marker="x", s=70, label="best point")
+        ax.set_title(f"PMI-span conditional rate heatmap, slot {slot_index}, UE {k}")
+        ax.set_xlabel(r"$\theta_k$")
+        ax.set_ylabel(r"$\phi_k$")
+        ax.legend(loc="best")
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label("Sum-rate [bits/s/Hz]")
+        fig.tight_layout()
+        fig.savefig(out / f"pmi_span_heatmap_slot{slot_index:04d}_ue{k}.png", dpi=160)
+        plt.close(fig)
+
+def build_user_centered_pmi_span_candidate_pools(
+    q_vectors: np.ndarray,
+    cfg: SimConfig,
+    oracle_cfg: OracleConfig,
+    eps: float = 1e-12,
+) -> list[np.ndarray]:
+    """User-centered PMI-span candidate pool for the K=2 case.
+
+    Under the rank-one motivation, the WMMSE beam is expected to live in the
+    span of the dominant PMI directions.  For K=2, that span is at most a
+    two-complex-dimensional subspace.  For each UE k, this function constructs
+    a user-centered basis:
+
+        first direction  : q_k
+        second direction : normalized component of q_other orthogonal to q_k
+
+    and then grids the unit-norm beam family
+
+        v_k(theta, phi) = cos(theta) q_k
+                          + exp(j phi) sin(theta) b_k,
+
+    where theta in [0, theta_max] controls how far the beam rotates away from
+    its own PMI direction and phi controls the relative complex phase.
+
+    This does not start from the SLNR beam.  It searches the PMI span directly.
+    """
+    if cfg.num_users != 2:
+        raise ValueError(
+            "The user-centered PMI-span oracle currently implements the K=2 parameterization. "
+            "For K>2, use an orthonormal-basis coefficient sampler/grid instead."
+        )
+
+    num_theta = max(1, int(oracle_cfg.pmi_span_num_theta))
+    num_phi = max(1, int(oracle_cfg.pmi_span_num_phi))
+    theta_max = float(oracle_cfg.pmi_span_theta_max)
+
+    theta_grid = np.linspace(0.0, theta_max, num_theta, endpoint=True)
+    phi_grid = np.linspace(0.0, 2.0 * np.pi, num_phi, endpoint=False)
+
+    pools: list[np.ndarray] = []
+    for k in range(cfg.num_users):
+        qk = unit_norm(q_vectors[k])
+        other = 1 - k
+        q_other = unit_norm(q_vectors[other])
+
+        # Remove the component of q_other that is parallel to qk:
+        #   b_tilde = q_other - qk (qk^H q_other).
+        # This creates the second local basis direction inside span{qk,q_other}.
+        b_tilde = q_other - qk * np.vdot(qk, q_other)
+        b_norm = float(np.linalg.norm(b_tilde))
+
+        cand_list: list[np.ndarray] = []
+        if b_norm < eps:
+            # The PMI vectors are collinear up to phase.  The PMI span is only
+            # one-dimensional, so there is only one physically meaningful beam
+            # direction up to global phase.
+            cand_list.append(qk)
+        else:
+            bk = b_tilde / b_norm
+            for theta in theta_grid:
+                if abs(float(theta)) < 1e-14:
+                    # At theta=0, all phi values produce the same qk direction,
+                    # so add it once to avoid duplicate candidates.
+                    cand_list.append(qk)
+                    continue
+                for phi in phi_grid:
+                    v = np.cos(theta) * qk + np.exp(1j * phi) * np.sin(theta) * bk
+                    cand_list.append(unit_norm(v))
+
+        # Remove any remaining near-duplicates in a phase-invariant way.
+        unique: list[np.ndarray] = []
+        for c in cand_list:
+            duplicate = False
+            for u in unique:
+                if np.abs(np.vdot(u, c)) > 1.0 - 1e-10:
+                    duplicate = True
+                    break
+            if not duplicate:
+                unique.append(c)
+        pools.append(np.stack(unique, axis=0))
+    return pools
+
 def oracle_best_rate_from_pools(
     user_channels: np.ndarray,
     candidate_pools: list[np.ndarray],
@@ -480,6 +794,7 @@ def save_plots(results: dict[str, np.ndarray], oracle_cfg: OracleConfig) -> None
     random_avg = moving_average(results["random_oracle_rate"], w)
     structured_avg = moving_average(results["structured_oracle_rate"], w)
     two_direction_avg = moving_average(results["two_direction_oracle_rate"], w)
+    pmi_span_avg = moving_average(results["pmi_span_oracle_rate"], w)
     x = np.arange(1, zf_avg.size + 1)
 
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -488,6 +803,7 @@ def save_plots(results: dict[str, np.ndarray], oracle_cfg: OracleConfig) -> None
     ax.plot(x, random_avg, lw=1.4, label="Random-perturbation oracle")
     ax.plot(x, structured_avg, lw=1.4, label="Structured leakage oracle")
     ax.plot(x, two_direction_avg, lw=1.4, label="Two-direction structured oracle")
+    ax.plot(x, pmi_span_avg, lw=1.4, label="User-centered PMI-span oracle")
     ax.set_title("Oracle Rate Across Time")
     ax.set_xlabel("Slot index")
     ax.set_ylabel("Sum-rate [bits/s/Hz]")
@@ -500,15 +816,18 @@ def save_plots(results: dict[str, np.ndarray], oracle_cfg: OracleConfig) -> None
     random_gain = results["random_oracle_rate"] - results["slnr_rate"]
     structured_gain = results["structured_oracle_rate"] - results["slnr_rate"]
     two_direction_gain = results["two_direction_oracle_rate"] - results["slnr_rate"]
+    pmi_span_gain = results["pmi_span_oracle_rate"] - results["slnr_rate"]
     random_gain_avg = moving_average(random_gain, w)
     structured_gain_avg = moving_average(structured_gain, w)
     two_direction_gain_avg = moving_average(two_direction_gain, w)
+    pmi_span_gain_avg = moving_average(pmi_span_gain, w)
     xg = np.arange(1, random_gain_avg.size + 1)
 
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.plot(xg, random_gain_avg, lw=1.4, label="Random oracle - SLNR")
     ax.plot(xg, structured_gain_avg, lw=1.4, label="Structured oracle - SLNR")
     ax.plot(xg, two_direction_gain_avg, lw=1.4, label="Two-direction oracle - SLNR")
+    ax.plot(xg, pmi_span_gain_avg, lw=1.4, label="PMI-span oracle - SLNR")
     ax.axhline(0.0, lw=1.0, linestyle="--")
     ax.set_title("Oracle Gain Over PMI-SLNR Across Time")
     ax.set_xlabel("Slot index")
@@ -531,9 +850,15 @@ def run_oracles(cfg: SimConfig, oracle_cfg: OracleConfig) -> dict[str, np.ndarra
     random_oracle_rate = np.zeros(cfg.num_slots, dtype=np.float64)
     structured_oracle_rate = np.zeros(cfg.num_slots, dtype=np.float64)
     two_direction_oracle_rate = np.zeros(cfg.num_slots, dtype=np.float64)
+    pmi_span_oracle_rate = np.zeros(cfg.num_slots, dtype=np.float64)
     random_best_combo = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.int64)
     structured_best_combo = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.int64)
     two_direction_best_combo = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.int64)
+    pmi_span_best_combo = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.int64)
+    pmi_span_pool_size = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.int64)
+    pmi_span_best_params = np.zeros((cfg.num_slots, 2 * cfg.num_users), dtype=np.float64)
+    pmi_span_num_evals = np.zeros(cfg.num_slots, dtype=np.int64)
+    pmi_span_opt_success = np.zeros(cfg.num_slots, dtype=bool)
 
     for t in range(cfg.num_slots):
         print(f"Oracle slot {t + 1} / {cfg.num_slots}", end="\r")
@@ -582,6 +907,67 @@ def run_oracles(cfg: SimConfig, oracle_cfg: OracleConfig) -> dict[str, np.ndarra
         two_direction_oracle_rate[t] = rate
         two_direction_best_combo[t] = np.array(combo, dtype=np.int64)
 
+        if oracle_cfg.pmi_span_search_mode == "grid":
+            pmi_span_pools = build_user_centered_pmi_span_candidate_pools(
+                q_vectors=q_vectors,
+                cfg=cfg,
+                oracle_cfg=oracle_cfg,
+            )
+            rate, combo, _ = oracle_best_rate_from_pools(
+                h_t, pmi_span_pools, cfg.total_tx_power, noise_power
+            )
+            pmi_span_oracle_rate[t] = rate
+            pmi_span_best_combo[t] = np.array(combo, dtype=np.int64)
+            pmi_span_pool_size[t] = np.array([pool.shape[0] for pool in pmi_span_pools], dtype=np.int64)
+
+            theta_grid = np.linspace(0.0, oracle_cfg.pmi_span_theta_max, oracle_cfg.pmi_span_num_theta, endpoint=True)
+            phi_grid = np.linspace(0.0, 2.0 * np.pi, oracle_cfg.pmi_span_num_phi, endpoint=False)
+            params = np.zeros(2 * cfg.num_users, dtype=np.float64)
+            for ku, ci in enumerate(combo):
+                if ci == 0:
+                    params[2 * ku] = 0.0
+                    params[2 * ku + 1] = 0.0
+                else:
+                    idx = int(ci) - 1
+                    theta_idx = 1 + idx // oracle_cfg.pmi_span_num_phi
+                    phi_idx = idx % oracle_cfg.pmi_span_num_phi
+                    theta_idx = min(theta_idx, oracle_cfg.pmi_span_num_theta - 1)
+                    params[2 * ku] = theta_grid[theta_idx]
+                    params[2 * ku + 1] = phi_grid[phi_idx]
+            pmi_span_best_params[t] = params
+            pmi_span_num_evals[t] = int(np.prod([pool.shape[0] for pool in pmi_span_pools]))
+            pmi_span_opt_success[t] = True
+        elif oracle_cfg.pmi_span_search_mode == "opt":
+            rate, params, nevals, success = optimize_user_centered_pmi_span(
+                user_channels=h_t,
+                q_vectors=q_vectors,
+                zf_precoder=p_zf,
+                slnr_precoder=p_slnr,
+                cfg=cfg,
+                oracle_cfg=oracle_cfg,
+                noise_power=noise_power,
+                rng=rng_oracle,
+            )
+            pmi_span_oracle_rate[t] = rate
+            pmi_span_best_combo[t] = -1
+            pmi_span_pool_size[t] = 0
+            pmi_span_best_params[t] = params
+            pmi_span_num_evals[t] = nevals
+            pmi_span_opt_success[t] = bool(success)
+        else:
+            raise ValueError(f"Unknown PMI-span search mode: {oracle_cfg.pmi_span_search_mode}")
+
+        if t < int(oracle_cfg.pmi_span_heatmap_slots):
+            save_pmi_span_heatmaps_for_slot(
+                slot_index=t,
+                user_channels=h_t,
+                q_vectors=q_vectors,
+                best_params=pmi_span_best_params[t],
+                cfg=cfg,
+                oracle_cfg=oracle_cfg,
+                noise_power=noise_power,
+            )
+
     print()
     return {
         "zf_rate": zf_rate,
@@ -589,9 +975,15 @@ def run_oracles(cfg: SimConfig, oracle_cfg: OracleConfig) -> dict[str, np.ndarra
         "random_oracle_rate": random_oracle_rate,
         "structured_oracle_rate": structured_oracle_rate,
         "two_direction_oracle_rate": two_direction_oracle_rate,
+        "pmi_span_oracle_rate": pmi_span_oracle_rate,
         "random_best_combo": random_best_combo,
         "structured_best_combo": structured_best_combo,
         "two_direction_best_combo": two_direction_best_combo,
+        "pmi_span_best_combo": pmi_span_best_combo,
+        "pmi_span_pool_size": pmi_span_pool_size,
+        "pmi_span_best_params": pmi_span_best_params,
+        "pmi_span_num_evals": pmi_span_num_evals,
+        "pmi_span_opt_success": pmi_span_opt_success,
     }
 
 
@@ -642,6 +1034,36 @@ def parse_args() -> argparse.Namespace:
         help="Comma-separated beta values for v(alpha,beta)=normalize(v_SLNR + alpha*u_leak + beta*u_sig). 0 is added if missing.",
     )
     parser.add_argument("--include-negative-signal-steps", action="store_true", default=False)
+    parser.add_argument(
+        "--pmi-span-num-theta",
+        type=int,
+        default=10,
+        help="Number of theta grid points for the user-centered PMI-span oracle.",
+    )
+    parser.add_argument(
+        "--pmi-span-num-phi",
+        type=int,
+        default=8,
+        help="Number of relative phase grid points for the user-centered PMI-span oracle.",
+    )
+    parser.add_argument(
+        "--pmi-span-theta-max",
+        type=float,
+        default=float(np.pi / 2.0),
+        help="Maximum theta value for the user-centered PMI-span oracle. Default pi/2 searches the full K=2 PMI-span arc family.",
+    )
+    parser.add_argument(
+        "--pmi-span-search-mode",
+        type=str,
+        choices=("opt", "grid"),
+        default="opt",
+        help="PMI-span search method. 'opt' uses multi-start Powell numerical optimization; 'grid' uses exhaustive theta/phi grid search.",
+    )
+    parser.add_argument("--pmi-span-opt-random-starts", type=int, default=8)
+    parser.add_argument("--pmi-span-opt-maxiter", type=int, default=80)
+    parser.add_argument("--pmi-span-heatmap-slots", type=int, default=3)
+    parser.add_argument("--pmi-span-heatmap-num-theta", type=int, default=40)
+    parser.add_argument("--pmi-span-heatmap-num-phi", type=int, default=40)
 
     parser.add_argument("--window-len", type=int, default=5)
     parser.add_argument("--output-dir", type=Path, default=Path("results/precoder_oracle_random_vs_structured"))
@@ -671,6 +1093,15 @@ def main() -> None:
         include_negative_leakage_steps=args.include_negative_leakage_steps,
         signal_beta_grid=parse_alpha_grid(args.signal_beta_grid),
         include_negative_signal_steps=args.include_negative_signal_steps,
+        pmi_span_num_theta=args.pmi_span_num_theta,
+        pmi_span_num_phi=args.pmi_span_num_phi,
+        pmi_span_theta_max=args.pmi_span_theta_max,
+        pmi_span_search_mode=args.pmi_span_search_mode,
+        pmi_span_opt_random_starts=args.pmi_span_opt_random_starts,
+        pmi_span_opt_maxiter=args.pmi_span_opt_maxiter,
+        pmi_span_heatmap_slots=args.pmi_span_heatmap_slots,
+        pmi_span_heatmap_num_theta=args.pmi_span_heatmap_num_theta,
+        pmi_span_heatmap_num_phi=args.pmi_span_heatmap_num_phi,
         window_len=args.window_len,
         output_dir=args.output_dir,
     )
@@ -688,6 +1119,7 @@ def main() -> None:
     random_mean = results["random_oracle_rate"].mean()
     structured_mean = results["structured_oracle_rate"].mean()
     two_direction_mean = results["two_direction_oracle_rate"].mean()
+    pmi_span_mean = results["pmi_span_oracle_rate"].mean()
 
     print("Oracle comparison run finished.")
     print(f"ZF average throughput                   : {results['zf_rate'].mean():.4f} bits/s/Hz")
@@ -695,12 +1127,28 @@ def main() -> None:
     print(f"Random SLNR-perturbation oracle throughput : {random_mean:.4f} bits/s/Hz")
     print(f"Structured leakage-correction oracle throughput: {structured_mean:.4f} bits/s/Hz")
     print(f"Two-direction structured oracle throughput     : {two_direction_mean:.4f} bits/s/Hz")
+    print(f"User-centered PMI-span oracle throughput       : {pmi_span_mean:.4f} bits/s/Hz")
     print(f"Random oracle gain over SLNR            : {random_mean - slnr_mean:.4f} bits/s/Hz")
     print(f"Structured oracle gain over SLNR        : {structured_mean - slnr_mean:.4f} bits/s/Hz")
     print(f"Two-direction oracle gain over SLNR     : {two_direction_mean - slnr_mean:.4f} bits/s/Hz")
+    print(f"User-centered PMI-span oracle gain over SLNR: {pmi_span_mean - slnr_mean:.4f} bits/s/Hz")
     print(f"Random oracle beats SLNR fraction       : {np.mean(results['random_oracle_rate'] > results['slnr_rate']):.4f}")
     print(f"Structured oracle beats SLNR fraction   : {np.mean(results['structured_oracle_rate'] > results['slnr_rate']):.4f}")
     print(f"Two-direction oracle beats SLNR fraction: {np.mean(results['two_direction_oracle_rate'] > results['slnr_rate']):.4f}")
+    print(f"User-centered PMI-span oracle beats SLNR fraction: {np.mean(results['pmi_span_oracle_rate'] > results['slnr_rate']):.4f}")
+    print(f"User-centered PMI-span search mode      : {oracle_cfg.pmi_span_search_mode}")
+    if oracle_cfg.pmi_span_search_mode == "grid":
+        print(f"User-centered PMI-span mean candidates/UE: {results['pmi_span_pool_size'].mean():.2f}")
+        print(f"User-centered PMI-span mean joint evals : {results['pmi_span_num_evals'].mean():.2f}")
+    else:
+        print(f"User-centered PMI-span opt random starts: {oracle_cfg.pmi_span_opt_random_starts}")
+        print(f"User-centered PMI-span opt maxiter      : {oracle_cfg.pmi_span_opt_maxiter}")
+        print(f"User-centered PMI-span mean evals/slot  : {results['pmi_span_num_evals'].mean():.2f}")
+        print(f"User-centered PMI-span opt success frac : {np.mean(results['pmi_span_opt_success']):.4f}")
+    print(f"PMI-span best theta mean per UE         : {np.mean(results['pmi_span_best_params'][:, 0::2], axis=0)}")
+    print(f"PMI-span best phi mean per UE           : {np.mean(results['pmi_span_best_params'][:, 1::2], axis=0)}")
+    if oracle_cfg.pmi_span_heatmap_slots > 0:
+        print(f"PMI-span heatmaps                       : {oracle_cfg.output_dir / 'pmi_span_heatmaps'}")
     print(f"Saved results and plots to              : {oracle_cfg.output_dir}")
     print(f"Rate plot                               : {oracle_cfg.output_dir / 'oracle_rate_across_time.png'}")
     print(f"Gain plot                               : {oracle_cfg.output_dir / 'oracle_gain_over_slnr_across_time.png'}")
