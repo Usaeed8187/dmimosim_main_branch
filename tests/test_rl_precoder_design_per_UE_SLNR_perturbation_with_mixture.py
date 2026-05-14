@@ -27,7 +27,7 @@ class SimConfig:
 class RLConfig:
     lr_out: float = 3e-2
     fixed_kappa: float = 3.0
-    reward_baseline_beta: float = 0.99
+    reward_baseline_beta: float = 0.99  # Deprecated/ignored: no moving-average advantage baseline is used.
     advantage_clip: float = 1.0
     grad_clip_norm: float = 1.0
     init_scale_out: float = 1e-2
@@ -97,10 +97,43 @@ class RLConfig:
     structured_leakage_alpha_grid: tuple[float, ...] = (
         0.0, 0.02, 0.05, 0.10, 0.15, 0.20, 0.30, 0.50, 0.80, 1.00
     )
-    # Direct-alpha policy: W_out outputs categorical logits over the
-    # structured alpha candidates directly, instead of outputting a beam-center
-    # mu that indirectly ranks candidates through |mu^H v(alpha)|^2.
+    # Direct categorical PMI-span policy. For K=2, each UE candidate is
+    #   v_k(theta,phi)=cos(theta) q_k + exp(j phi) sin(theta) b_k,
+    # where b_k is the other UE's PMI vector after removing the component
+    # parallel to q_k. W_out outputs logits over this theta/phi grid.
     alpha_slnr_prior_weight: float = 0.0
+    pmi_span_num_theta: int = 8
+    pmi_span_num_phi: int = 8
+    pmi_span_theta_max: float = float(np.pi / 2.0)
+    # Continuous joint Gaussian PMI-span policy. The WESN outputs the mean of
+    # a 2K-dimensional raw Gaussian action. For K=2, the raw action has four
+    # coordinates [u_theta0, u_phi0, u_theta1, u_phi1]. These raw coordinates
+    # are mapped to bounded PMI-span angles using sigmoids:
+    #   theta_k = theta_max * sigmoid(u_theta,k)
+    #   phi_k   = 2*pi      * sigmoid(u_phi,k).
+    # Exploration standard deviations are fixed for now.
+    gaussian_raw_std_theta: float = 0.50
+    gaussian_raw_std_phi: float = 0.75
+    # Structured angle-step policy.  The Gaussian action is now a raw 4D
+    # step-size variable u_alpha, not a raw angle residual.  The executed
+    # angles are
+    #   x = x_SLNR + (alpha_max * tanh(u_alpha)) ⊙ d_proxy,
+    # where d_proxy is the normalized PMI-only proxy-rate gradient evaluated
+    # at the SLNR angle center.
+    alpha_step_max_theta: float = 0.25
+    alpha_step_max_phi: float = 0.75
+    # Discrete diagonal alpha-step policy.  Each of the 4 coordinates chooses
+    # one multiplier from this grid.  The executed angle step is
+    #   delta_x_i = alpha_step_max_i * alpha_level_i * d_proxy_i.
+    alpha_level_grid: tuple[float, ...] = (-1.0, -0.5, -0.25, -0.1, 0.0, 0.1, 0.25, 0.5, 1.0)
+    # Optional fixed prior favoring the zero-alpha/SLNR action at initialization.
+    # W_out still learns additive logits over the same discrete levels.
+    alpha_zero_logit_bias: float = 2.0
+    # Deprecated constant initial physical-angle center, retained only so older
+    # command lines do not break. The active policy uses a slot-dependent
+    # PMI-SLNR angle center instead of a constant bias.
+    gaussian_init_theta: float = 0.40
+    gaussian_init_phi: float = float(np.pi)
 
 
 def complex_gaussian(shape: tuple[int, ...], rng: np.random.Generator) -> np.ndarray:
@@ -392,6 +425,247 @@ def probability_to_logit(p: float, eps: float = 1e-6) -> float:
     return float(np.log(p / (1.0 - p)))
 
 
+def angle_to_raw_sigmoid_coordinate(value: float, max_value: float, eps: float = 1e-6) -> float:
+    """Convert a bounded angle value to the corresponding raw sigmoid coordinate.
+
+    If angle = max_value * sigmoid(raw), then this returns raw.
+    """
+    ratio = float(value) / max(float(max_value), eps)
+    ratio = float(np.clip(ratio, eps, 1.0 - eps))
+    return float(np.log(ratio / (1.0 - ratio)))
+
+
+def build_initial_gaussian_raw_bias(rl_cfg: RLConfig, num_users: int) -> np.ndarray:
+    """Deprecated constant raw bias initializer retained for compatibility.
+
+    The active Gaussian PMI-span policy now uses a slot-dependent, PMI-based
+    leakage-nulling center, not this constant oracle-like bias.
+    """
+    raw_theta = angle_to_raw_sigmoid_coordinate(
+        value=rl_cfg.gaussian_init_theta,
+        max_value=rl_cfg.pmi_span_theta_max,
+    )
+    raw_phi = angle_to_raw_sigmoid_coordinate(
+        value=rl_cfg.gaussian_init_phi,
+        max_value=2.0 * np.pi,
+    )
+    return np.tile(np.array([raw_theta, raw_phi], dtype=np.float64), int(num_users))
+
+
+def wrap_angle_0_2pi(x: float) -> float:
+    return float(np.mod(float(x), 2.0 * np.pi))
+
+
+def pmi_leakage_nulling_theta_phi_center(
+    q_vectors: np.ndarray,
+    theta_max: float,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Return causal PMI-span center angles that null PMI overlap for K=2.
+
+    For UE k, with q_o denoting the other user's PMI vector, write
+
+        q_o = c q_k + beta b_k,
+
+    where b_k is the normalized component of q_o orthogonal to q_k and
+    c = q_k^H q_o.  The PMI-span beam is
+
+        v_k(theta, phi) = cos(theta) q_k + exp(j phi) sin(theta) b_k.
+
+    Choosing
+
+        tan(theta) = |c| / beta,
+        phi = angle(-q_o^H q_k),
+
+    makes q_o^H v_k approximately zero.  This gives a state-dependent,
+    leakage-aware center using only current PMI vectors, so SLNR remains only
+    an external baseline and is not inserted as a learned action.
+    """
+    if q_vectors.shape[0] != 2:
+        raise ValueError("The PMI leakage-nulling center currently implements K=2 only.")
+
+    centers = np.zeros((2, 2), dtype=np.float64)
+    for k in range(2):
+        qk = unit_norm(q_vectors[k])
+        qo = unit_norm(q_vectors[1 - k])
+
+        # q_o^H q_k is the coefficient appearing directly in q_o^H v_k.
+        c_other_h_own = np.vdot(qo, qk)
+        abs_c = float(np.abs(c_other_h_own))
+        beta = float(np.sqrt(max(1.0 - abs_c**2, 0.0)))
+
+        if beta < eps or abs_c < eps:
+            theta = 0.0
+            phi = 0.0
+        else:
+            theta = float(np.arctan2(abs_c, beta))
+            theta = float(np.clip(theta, 0.0, float(theta_max)))
+            phi = wrap_angle_0_2pi(np.angle(-c_other_h_own))
+
+        centers[k, 0] = theta
+        centers[k, 1] = phi
+    return centers
+
+
+def pmi_slnr_theta_phi_center(
+    q_vectors: np.ndarray,
+    slnr_precoder: np.ndarray,
+    theta_max: float,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Return PMI-span coordinates of the PMI-SLNR precoder for K=2.
+
+    For each UE k, the Gaussian policy uses the user-centered PMI-span beam
+
+        v_k(theta, phi) = cos(theta) q_k + exp(j phi) sin(theta) b_k,
+
+    where b_k is the component of the other user's PMI direction orthogonal to
+    q_k.  This function projects the already-computed PMI-SLNR beam onto this
+    same {q_k, b_k} coordinate system and returns its physical [theta, phi]
+    angles.  The resulting center is causal because the SLNR beam is built from
+    the current PMI vectors only; it is not inserted as a selectable candidate.
+    """
+    if q_vectors.shape[0] != 2:
+        raise ValueError("The PMI-SLNR angle center currently implements K=2 only.")
+
+    centers = np.zeros((2, 2), dtype=np.float64)
+    for k in range(2):
+        qk = unit_norm(q_vectors[k])
+        qo = unit_norm(q_vectors[1 - k])
+
+        b_tilde = qo - qk * np.vdot(qk, qo)
+        b_norm = float(np.linalg.norm(b_tilde))
+        if b_norm < eps:
+            centers[k, 0] = 0.0
+            centers[k, 1] = 0.0
+            continue
+        bk = b_tilde / b_norm
+
+        # Remove the equal-power amplitude and arbitrary global phase.  The
+        # global phase is chosen so q_k^H v is real/nonnegative, matching the
+        # theta/phi parameterization used by user_centered_pmi_span_beam_from_theta_phi().
+        v = unit_norm(slnr_precoder[:, k])
+        c0 = np.vdot(qk, v)
+        if np.abs(c0) > eps:
+            v = np.exp(-1j * np.angle(c0)) * v
+
+        a0 = np.vdot(qk, v)
+        a1 = np.vdot(bk, v)
+        theta = float(np.arctan2(np.abs(a1), np.abs(a0)))
+        theta = float(np.clip(theta, 0.0, float(theta_max)))
+        phi = wrap_angle_0_2pi(np.angle(a1)) if np.abs(a1) > eps else 0.0
+
+        centers[k, 0] = theta
+        centers[k, 1] = phi
+    return centers
+
+
+
+def pmi_proxy_sum_rate_from_theta_phi(
+    q_vectors: np.ndarray,
+    theta_phi: np.ndarray,
+    total_tx_power: float,
+    noise_power: float,
+    eps: float = 1e-12,
+) -> float:
+    """PMI-only proxy sum-rate for a PMI-span angle vector.
+
+    This uses only the dominant PMI vectors q_k and the same equal-power
+    normalization as the executed precoder.  It is used only to compute a causal
+    direction in angle space; the RL reward is still computed from the actual
+    channel and the executed precoder.
+    """
+    num_users = q_vectors.shape[0]
+    num_tx_antennas = q_vectors.shape[1]
+    tp = np.asarray(theta_phi, dtype=np.float64).reshape(num_users, 2)
+    beams = np.zeros((num_tx_antennas, num_users), dtype=np.complex128)
+    for k in range(num_users):
+        beam_k = user_centered_pmi_span_beam_from_theta_phi(
+            q_vectors=q_vectors,
+            user_index=k,
+            theta=float(tp[k, 0]),
+            phi=float(tp[k, 1]),
+        )
+        beams[:, k] = np.sqrt(total_tx_power / max(num_users, 1)) * beam_k
+    proxy_sinr = compute_pmi_sinr_proxy_from_precoder(q_vectors, beams, noise_power, eps=eps)
+    return float(np.sum(np.log1p(proxy_sinr)))
+
+
+def apply_angle_step_from_flat(
+    center_flat: np.ndarray,
+    step_flat: np.ndarray,
+    num_users: int,
+    theta_max: float,
+) -> np.ndarray:
+    """Apply a flat 4D angle step, clipping theta and wrapping phi."""
+    x = np.asarray(center_flat, dtype=np.float64).reshape(num_users, 2).copy()
+    step = np.asarray(step_flat, dtype=np.float64).reshape(num_users, 2)
+    x[:, 0] = np.clip(x[:, 0] + step[:, 0], 0.0, float(theta_max))
+    x[:, 1] = np.mod(x[:, 1] + step[:, 1], 2.0 * np.pi)
+    return x
+
+
+def pmi_proxy_rate_gradient_direction_theta_phi(
+    q_vectors: np.ndarray,
+    center_theta_phi: np.ndarray,
+    total_tx_power: float,
+    noise_power: float,
+    theta_max: float,
+    eps: float = 1e-12,
+    fd_step_theta: float = 1e-4,
+    fd_step_phi: float = 1e-4,
+) -> np.ndarray:
+    """Return normalized 4D gradient direction of a PMI-only proxy rate.
+
+    The gradient is with respect to the physical angle vector
+    [theta0, phi0, theta1, phi1].  It is evaluated at the SLNR angle center.
+    This provides a causal, geometry-aware direction; the WESN learns only the
+    diagonal step sizes along this direction.
+    """
+    num_users = q_vectors.shape[0]
+    center = np.asarray(center_theta_phi, dtype=np.float64).reshape(num_users, 2)
+    flat = center.reshape(-1)
+    grad = np.zeros_like(flat)
+    for i in range(flat.size):
+        delta = fd_step_theta if (i % 2 == 0) else fd_step_phi
+        step = np.zeros_like(flat)
+        step[i] = delta
+        plus = apply_angle_step_from_flat(flat, step, num_users, theta_max)
+        minus = apply_angle_step_from_flat(flat, -step, num_users, theta_max)
+        r_plus = pmi_proxy_sum_rate_from_theta_phi(
+            q_vectors=q_vectors,
+            theta_phi=plus,
+            total_tx_power=total_tx_power,
+            noise_power=noise_power,
+            eps=eps,
+        )
+        r_minus = pmi_proxy_sum_rate_from_theta_phi(
+            q_vectors=q_vectors,
+            theta_phi=minus,
+            total_tx_power=total_tx_power,
+            noise_power=noise_power,
+            eps=eps,
+        )
+        grad[i] = (r_plus - r_minus) / max(2.0 * delta, eps)
+    nrm = float(np.linalg.norm(grad))
+    if nrm < eps or not np.all(np.isfinite(grad)):
+        return np.zeros_like(flat)
+    return grad / nrm
+
+def theta_phi_to_raw_gaussian_action(
+    theta_phi: np.ndarray,
+    num_users: int,
+    theta_max: float,
+) -> np.ndarray:
+    """Convert physical PMI-span angles [theta, phi] to raw sigmoid coordinates."""
+    tp = np.asarray(theta_phi, dtype=np.float64).reshape(num_users, 2)
+    raw = np.zeros((num_users, 2), dtype=np.float64)
+    for k in range(num_users):
+        raw[k, 0] = angle_to_raw_sigmoid_coordinate(tp[k, 0], theta_max)
+        raw[k, 1] = angle_to_raw_sigmoid_coordinate(wrap_angle_0_2pi(tp[k, 1]), 2.0 * np.pi)
+    return raw.reshape(-1)
+
+
 def real_to_complex_beam(x: np.ndarray, total_tx_power: float, num_users: int) -> np.ndarray:
     nt = x.size // 2
     return np.sqrt(total_tx_power / num_users) * (x[:nt] + 1j * x[nt:])
@@ -610,6 +884,26 @@ def parse_nonnegative_alpha_grid(s: str) -> tuple[float, ...]:
     if 0.0 not in vals:
         vals = [0.0] + vals
     return tuple(sorted(set(vals)))
+
+
+def parse_alpha_level_grid(s: str) -> tuple[float, ...]:
+    """Parse comma-separated alpha-level multipliers for the angle-step policy.
+
+    The levels are dimensionless multipliers applied to alpha_step_max_theta/phi.
+    We force 0.0 to be present so the exact SLNR-center action remains available.
+    """
+    vals: list[float] = []
+    for item in s.split(","):
+        item = item.strip()
+        if item:
+            vals.append(float(item))
+    if not vals:
+        vals = [-1.0, -0.5, -0.25, -0.1, 0.0, 0.1, 0.25, 0.5, 1.0]
+    vals = sorted(set(vals))
+    if 0.0 not in vals:
+        vals.append(0.0)
+        vals = sorted(set(vals))
+    return tuple(vals)
 
 
 def positive_alpha_values_for_candidate_count(
@@ -1061,121 +1355,132 @@ def compute_pmi_sinr_proxy_from_precoder(
     return out
 
 
-def sample_fisher_bingham_signal_leakage(
-    alpha_logits: np.ndarray,
-    kappa: float,
+def pmi_span_num_candidates(rl_cfg: RLConfig) -> int:
+    """Number of user-centered PMI-span candidates per UE for K=2.
+
+    Candidate 0 is an exact PMI-SLNR anchor. Candidate 1 is own PMI
+    (theta=0), and the rest are the theta/phi grid points.
+    """
+    ntheta = max(1, int(rl_cfg.pmi_span_num_theta))
+    nphi = max(1, int(rl_cfg.pmi_span_num_phi))
+    return 2 + max(0, ntheta - 1) * nphi
+
+
+def build_user_centered_pmi_span_candidate_pool_real(
+    q_vectors: np.ndarray,
+    user_index: int,
+    rl_cfg: RLConfig,
+    slnr_anchor: np.ndarray | None = None,
+    eps: float = 1e-12,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build a fixed-size real-packed PMI-span candidate pool for one UE.
+
+    For K=2, candidate beams are
+        v_k(theta, phi) = cos(theta) q_k + exp(j phi) sin(theta) b_k,
+    where b_k is q_other with the component parallel to q_k removed.
+
+    Candidate 0 is the exact PMI-SLNR anchor when provided. This makes the
+    learned branch's candidate set contain the baseline exactly, rather than
+    relying on the theta/phi grid to hit it.
+
+    Returns candidate_pool [M, 2*N_t] and theta_phi [M, 2].
+    """
+    if q_vectors.shape[0] != 2:
+        raise ValueError("The user-centered PMI-span RL policy currently implements K=2 only.")
+    qk = unit_norm(q_vectors[user_index])
+    q_other = unit_norm(q_vectors[1 - user_index])
+    ntheta = max(1, int(rl_cfg.pmi_span_num_theta))
+    nphi = max(1, int(rl_cfg.pmi_span_num_phi))
+    theta_grid = np.linspace(0.0, float(rl_cfg.pmi_span_theta_max), ntheta, endpoint=True)
+    phi_grid = np.linspace(0.0, 2.0 * np.pi, nphi, endpoint=False)
+
+    b_tilde = q_other - qk * np.vdot(qk, q_other)
+    b_norm = float(np.linalg.norm(b_tilde))
+    bk = np.zeros_like(qk) if b_norm < eps else b_tilde / b_norm
+
+    def coords_in_user_basis(v_in: np.ndarray) -> tuple[float, float]:
+        if b_norm < eps:
+            return 0.0, 0.0
+        v = unit_norm(v_in)
+        a0 = np.vdot(qk, v)
+        if np.abs(a0) > eps:
+            v = np.exp(-1j * np.angle(a0)) * v
+        c0 = np.vdot(qk, v)
+        c1 = np.vdot(bk, v)
+        theta = float(np.arctan2(np.abs(c1), np.abs(c0)))
+        phi = float(np.mod(np.angle(c1), 2.0 * np.pi)) if np.abs(c1) > eps else 0.0
+        return theta, phi
+
+    cand: list[np.ndarray] = []
+    params: list[tuple[float, float]] = []
+    if slnr_anchor is None:
+        cand.append(qk)
+        params.append((0.0, 0.0))
+    else:
+        cand.append(unit_norm(slnr_anchor))
+        params.append(coords_in_user_basis(slnr_anchor))
+
+    # Exact own-PMI candidate, independent of phi.
+    cand.append(qk)
+    params.append((0.0, 0.0))
+    for theta in theta_grid[1:]:
+        for phi in phi_grid:
+            v = qk if b_norm < eps else np.cos(theta) * qk + np.exp(1j * phi) * np.sin(theta) * bk
+            cand.append(unit_norm(v))
+            params.append((float(theta), float(phi)))
+    return np.stack([complex_unit_to_real(c) for c in cand], axis=0), np.array(params, dtype=np.float64)
+
+
+def sample_user_centered_pmi_span_policy(
+    candidate_logits: np.ndarray,
     signal_mat: np.ndarray,
     leakage_mat: np.ndarray,
     signal_gamma: float,
     slnr_noise_power: float,
     rng: np.random.Generator,
-    max_resamples: int,
-    signal_norm_eps: float,
     leakage_norm_eps: float,
-    pmi_center: np.ndarray,
+    q_vectors: np.ndarray,
+    user_index: int,
     candidate_temperature: float,
-    normalize_candidate_scores: bool,
-    uniform_candidate_frac: float,
-    pmi_candidate_frac: float,
-    slnr_candidate_frac: float,
-    wesn_candidate_frac: float,
-    candidate_proposal_kappa: float,
-    slnr_residual_scale: float,
-    include_exact_anchor_candidates: bool,
-    structured_leakage_alpha_grid: tuple[float, ...],
-    slnr_center_override: np.ndarray | None = None,
+    rl_cfg: RLConfig,
+    slnr_anchor_complex: np.ndarray | None = None,
 ) -> tuple[
-    np.ndarray, float, float, int, bool, np.ndarray, np.ndarray, np.ndarray, int, dict[str, float], np.ndarray
+    np.ndarray, float, float, int, bool, np.ndarray, np.ndarray, np.ndarray, int, dict[str, float], np.ndarray, np.ndarray
 ]:
-    """Candidate-based structured leakage-correction PMI-SLNR policy sampler.
+    """Sample one beam from the user-centered PMI-span categorical policy.
 
-    The old mixed spherical-cap/vMF candidate pool is replaced by a deterministic
-    one-direction structured pool.  Each candidate starts from the exact SLNR
-    beam and takes a nonnegative step along the PMI leakage-reducing tangent
-    direction.
-
-    The WESN now learns alpha directly.  For each UE, W_out produces a vector
-    of categorical logits over the structured alpha candidates.  Candidate i is
-
-        v_i = normalize(v_SLNR + alpha_i u_leak).
-
-    The categorical selector is therefore
-
-        pi(i | s, C) ∝ exp(logit_alpha_i / tau),
-
-    optionally plus a fixed PMI-SLNR prior if alpha_slnr_prior_weight is set
-    outside this sampler.  This removes the earlier indirect beam-center score
-    kappa |mu^H v_i|^2.
+    WESN outputs one logit per theta/phi candidate. Conditioned on the current
+    PMI vectors and deterministic candidate pool, REINFORCE uses the categorical
+    log-probability of the selected index.
     """
-    num_candidates = max(1, int(max_resamples))
-    alpha_logits = np.asarray(alpha_logits, dtype=np.float64).reshape(-1)
-    if alpha_logits.size != num_candidates:
-        raise ValueError(f"alpha_logits has size {alpha_logits.size}, expected {num_candidates}")
-    dim = pmi_center.size
-    pmi_center = unit_norm(pmi_center)
+    candidate_pool, theta_phi = build_user_centered_pmi_span_candidate_pool_real(
+        q_vectors=q_vectors,
+        user_index=user_index,
+        rl_cfg=rl_cfg,
+        slnr_anchor=slnr_anchor_complex,
+    )
+    num_candidates = candidate_pool.shape[0]
+    logits_raw = np.asarray(candidate_logits, dtype=np.float64).reshape(-1)
+    if logits_raw.size != num_candidates:
+        raise ValueError(f"candidate_logits has size {logits_raw.size}, expected {num_candidates}")
+
     noise_floor = max(float(slnr_noise_power), leakage_norm_eps)
-
-    if slnr_center_override is None:
-        slnr_center = generalized_slnr_direction_real(signal_mat, leakage_mat, noise_floor)
-    else:
-        slnr_center = unit_norm(slnr_center_override)
-
-    # Structured one-direction positive leakage-correction pool. Candidate 0 is
-    # alpha=0, i.e., the exact SLNR anchor.  All other candidates are positive
-    # steps along the leakage-reducing tangent direction.
-    alphas = positive_alpha_values_for_candidate_count(
-        structured_leakage_alpha_grid,
-        num_candidates,
-    )
-    u_leak = leakage_reducing_tangent_direction_real(
-        slnr_center=slnr_center,
-        leakage_mat=leakage_mat,
-        eps=leakage_norm_eps,
-    )
-
-    candidate_pool = np.zeros((num_candidates, dim), dtype=np.float64)
-    source_pool = np.full(num_candidates, 3, dtype=np.int64)  # 2=SLNR alpha=0, 3=structured leakage step
-    if u_leak is None:
-        for i in range(num_candidates):
-            candidate_pool[i] = slnr_center
-            source_pool[i] = 2
-    else:
-        for i, alpha in enumerate(alphas):
-            candidate_pool[i] = unit_norm(slnr_center + float(alpha) * u_leak)
-            source_pool[i] = 2 if abs(float(alpha)) < 1e-14 else 3
-
-    # Backward-compatible diagnostics.  The old mixed-proposal counts no longer
-    # apply; all nonzero-alpha candidates are structured leakage-step candidates.
-    n_uniform = 0
-    n_pmi = 0
-    n_slnr = int(np.sum(np.abs(alphas) < 1e-14))
-    n_wesn = int(num_candidates - n_slnr)
     signal_pool = np.zeros(num_candidates, dtype=np.float64)
     leakage_pool = np.zeros(num_candidates, dtype=np.float64)
-    phase_score_pool = np.zeros(num_candidates, dtype=np.float64)
     slnr_score_pool = np.zeros(num_candidates, dtype=np.float64)
-
     for i in range(num_candidates):
         x = candidate_pool[i]
         g = raw_quadratic_score(x, signal_mat)
         ell = raw_quadratic_score(x, leakage_mat)
         signal_pool[i] = g
         leakage_pool[i] = ell
-        # For backward-compatible diagnostics, store the direct WESN alpha logit
-        # in phase_score_pool.  It is no longer a phase/beam-center score.
-        phase_score_pool[i] = alpha_logits[i]
         slnr_score_pool[i] = signal_gamma * g / max(ell + noise_floor, leakage_norm_eps)
 
-    # Direct-alpha policy.  By default this uses only WESN alpha logits.
-    # A PMI-SLNR prior can be added in the torch training path through
-    # alpha_slnr_prior_weight; the numpy sampler mirrors the default direct mode.
-    policy_score_pool = alpha_logits.copy()
-    logits = policy_score_pool / max(float(candidate_temperature), leakage_norm_eps)
+    logits = logits_raw / max(float(candidate_temperature), leakage_norm_eps)
     stable_logits = logits - np.max(logits)
     probs = np.exp(stable_logits)
     probs = probs / max(float(np.sum(probs)), leakage_norm_eps)
     selected_idx = int(rng.choice(num_candidates, p=probs))
-
     x_selected = candidate_pool[selected_idx]
     empirical_mean = np.sum(probs[:, None] * candidate_pool, axis=0)
 
@@ -1185,25 +1490,17 @@ def sample_fisher_bingham_signal_leakage(
         "entropy": entropy,
         "entropy_norm": entropy / max(np.log(num_candidates), leakage_norm_eps),
         "effective_candidates": eff_num,
-        "selected_policy_score": float(policy_score_pool[selected_idx]),
-        "best_policy_score": float(np.max(policy_score_pool)),
-        "mean_policy_score": float(np.mean(policy_score_pool)),
-        "selected_minus_mean_policy_score": float(policy_score_pool[selected_idx] - np.mean(policy_score_pool)),
-        "phase_score_mean": float(np.mean(phase_score_pool)),
-        "phase_score_std": float(np.std(phase_score_pool)),
+        "selected_policy_score": float(logits_raw[selected_idx]),
+        "best_policy_score": float(np.max(logits_raw)),
+        "mean_policy_score": float(np.mean(logits_raw)),
+        "selected_minus_mean_policy_score": float(logits_raw[selected_idx] - np.mean(logits_raw)),
+        "phase_score_mean": float(np.mean(logits_raw)),
+        "phase_score_std": float(np.std(logits_raw)),
         "slnr_score_mean": float(np.mean(slnr_score_pool)),
         "slnr_score_std": float(np.std(slnr_score_pool)),
-        "policy_score_std": float(np.std(policy_score_pool)),
-        "selected_source": float(source_pool[selected_idx]),
-        "uniform_count": float(n_uniform),
-        "pmi_count": float(n_pmi),
-        "slnr_count": float(n_slnr),
-        "wesn_count": float(n_wesn),
+        "policy_score_std": float(np.std(logits_raw)),
+        "selected_source": 2.0 if selected_idx == 0 else 4.0,
     }
-
-    # attempts is retained as a diagnostic field. It stores the 1-based selected
-    # candidate index; accepted is always True because this is a selector, not an
-    # accept/reject sampler.
     return (
         x_selected,
         float(signal_pool[selected_idx]),
@@ -1215,7 +1512,8 @@ def sample_fisher_bingham_signal_leakage(
         slnr_score_pool,
         selected_idx,
         diag,
-        slnr_center,
+        candidate_pool[0],
+        theta_phi[selected_idx],
     )
 
 def _sample_weight_vmf(dim: int, kappa: float, rng: np.random.Generator) -> float:
@@ -1361,6 +1659,75 @@ def vmf_log_prob_fixed_kappa_torch(
     return fixed_kappa * torch.sum(mu * x, dim=-1)
 
 
+def sigmoid_np(x: np.ndarray) -> np.ndarray:
+    """Numerically stable sigmoid for numpy arrays."""
+    x = np.asarray(x, dtype=np.float64)
+    out = np.empty_like(x)
+    pos = x >= 0
+    out[pos] = 1.0 / (1.0 + np.exp(-x[pos]))
+    exp_x = np.exp(x[~pos])
+    out[~pos] = exp_x / (1.0 + exp_x)
+    return out
+
+
+def raw_gaussian_action_to_theta_phi(
+    raw_action: np.ndarray, num_users: int, theta_max: float
+) -> np.ndarray:
+    """Map unconstrained raw Gaussian action to bounded [theta, phi] angles.
+
+    raw_action has shape [2*K] and is interpreted as
+    [u_theta0, u_phi0, u_theta1, u_phi1, ...].  The returned array has
+    shape [K, 2], with theta in [0, theta_max] and phi in [0, 2*pi].
+    """
+    raw = np.asarray(raw_action, dtype=np.float64).reshape(num_users, 2)
+    sig = sigmoid_np(raw)
+    theta = float(theta_max) * sig[:, 0]
+    phi = 2.0 * np.pi * sig[:, 1]
+    return np.stack([theta, phi], axis=1)
+
+
+def user_centered_pmi_span_beam_from_theta_phi(
+    q_vectors: np.ndarray,
+    user_index: int,
+    theta: float,
+    phi: float,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Build v_k(theta,phi) in the K=2 user-centered PMI span.
+
+    v_k(theta, phi) = cos(theta) q_k + exp(j phi) sin(theta) b_k,
+    where b_k is the other UE's PMI vector after removing the component
+    parallel to q_k.
+    """
+    if q_vectors.shape[0] != 2:
+        raise ValueError("The 4D Gaussian PMI-span policy currently implements K=2 only.")
+    qk = unit_norm(q_vectors[user_index])
+    q_other = unit_norm(q_vectors[1 - user_index])
+    b_tilde = q_other - qk * np.vdot(qk, q_other)
+    b_norm = float(np.linalg.norm(b_tilde))
+    if b_norm < eps:
+        return qk
+    bk = b_tilde / b_norm
+    v = np.cos(float(theta)) * qk + np.exp(1j * float(phi)) * np.sin(float(theta)) * bk
+    return unit_norm(v)
+
+
+def gaussian_raw_log_prob_torch(
+    raw_action: torch.Tensor,
+    raw_mean: torch.Tensor,
+    std_per_dim: torch.Tensor,
+) -> torch.Tensor:
+    """Log probability of a diagonal Gaussian raw action.
+
+    raw_action and raw_mean have shape [B, 2K]. std_per_dim has shape [2K].
+    Returns log pi(a|s) with shape [B].
+    """
+    std = torch.clamp(std_per_dim, min=1e-12).unsqueeze(0)
+    z = (raw_action - raw_mean) / std
+    log_probs = -0.5 * (z**2 + 2.0 * torch.log(std) + np.log(2.0 * np.pi))
+    return torch.sum(log_probs, dim=-1)
+
+
 def run_wesn_policy_rl(
     cfg: SimConfig,
     rl_cfg: RLConfig,
@@ -1369,33 +1736,45 @@ def run_wesn_policy_rl(
     slnr_baseline: dict[str, np.ndarray],
     rng: np.random.Generator,
 ) -> dict[str, np.ndarray]:
+    """Run a structured 4D diagonal discrete-alpha policy in PMI-span angle space.
+
+    The center is the current PMI-SLNR precoder converted to [theta, phi]
+    coordinates.  A causal PMI-only proxy-rate gradient supplies a 4D direction
+    d_t at that center.  The WESN outputs categorical logits over a fixed set
+    of alpha levels for each coordinate.  The executed angles are
+
+        x_t = x_SLNR,t + (alpha_max * alpha_level) ⊙ d_t,
+
+    with theta clipped and phi wrapped.  REINFORCE uses the summed
+    log-probability of the four selected alpha levels.
+    """
+    if cfg.num_users != 2:
+        raise ValueError("The 4D diagonal Gaussian PMI-span policy currently assumes K=2.")
+
     noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
     k = cfg.num_users
     d = 2 * cfg.num_tx_antennas
-    # The SLNR sampler uses raw PMI-only quadratic scores for a unit-norm
-    # complex beam v_k: |q_k^H v_k|^2 / (sum_j |q_j^H v_k|^2 + sigma2_eff).
-    # Since the transmitted beam is sqrt(P_user) * v_k, the equivalent
-    # unit-beam noise term is sigma2_eff = noise_power / P_user.
+    action_dim = 2 * k
+    alpha_levels_np = np.array(rl_cfg.alpha_level_grid, dtype=np.float64)
+    num_alpha_levels = int(alpha_levels_np.size)
+    if num_alpha_levels < 2:
+        raise ValueError("alpha_level_grid must contain at least two levels.")
+    zero_level_index = int(np.argmin(np.abs(alpha_levels_np)))
+    alpha_levels_torch = torch.tensor(alpha_levels_np, dtype=torch.float64)
     per_user_tx_power = cfg.total_tx_power / max(k, 1)
     slnr_noise_power = noise_power / max(per_user_tx_power, rl_cfg.reward_sinr_eps)
 
-    # Shared WESN readout feature generated from the PMI feedback of all UEs.
-    # The reservoir update is unchanged from the vanilla ESN. The readout feature
-    # is augmented with a windowed skip connection from recent PMI inputs.
     wesn_states = compute_wesn_states(zf_baseline["pmi_features"], rl_cfg, rng)
     state_dim = wesn_states.shape[1]
 
-    # W_out maps shared WESN readout features directly to per-UE alpha logits,
-    # shape [K, M, 2*N_z + skip_window_length*input_dim], where M is the
-    # number of structured leakage-step alpha candidates.  This replaces the
-    # earlier high-dimensional beam-center output mu in R^{2N_t}.
-    num_alpha_candidates = max(1, int(rl_cfg.max_fb_resamples))
-    w_out_init = rl_cfg.init_scale_out * rng.standard_normal((k, num_alpha_candidates, state_dim))
+    # W_out now learns categorical logits over discrete alpha levels for each
+    # of the 4 coordinates.  The action is not an arbitrary angle residual; it
+    # chooses coordinate-wise step multipliers along a causal PMI-proxy-rate
+    # gradient direction evaluated at the current PMI-SLNR angle center.
+    num_logits = action_dim * num_alpha_levels
+    w_out_init = rl_cfg.init_scale_out * rng.standard_normal((num_logits, state_dim))
     w_out = torch.nn.Parameter(torch.tensor(w_out_init, dtype=torch.float64))
 
-    # Trainable slot-level mixture/reuse probability.
-    #   branch = DK_SLNR with probability 1 - sigmoid(mixture_logit)
-    #   branch = learned SLNR-perturbation with probability sigmoid(mixture_logit)
     mixture_logit = torch.nn.Parameter(
         torch.tensor(
             probability_to_logit(rl_cfg.initial_learned_policy_probability),
@@ -1411,10 +1790,18 @@ def run_wesn_policy_rl(
 
     if rl_cfg.best_of_n != 1:
         raise ValueError(
-            "Exact on-policy training with the candidate-based phase-invariant "
-            "sampler requires --best-of-n 1. Use --max-fb-resamples to control "
-            "the number of candidate beam directions per UE."
+            "The discrete alpha-level policy is implemented as exact one-sample "
+            "on-policy REINFORCE. Keep --best-of-n 1 for now."
         )
+
+    alpha_max_np = np.tile(
+        np.array([rl_cfg.alpha_step_max_theta, rl_cfg.alpha_step_max_phi], dtype=np.float64),
+        k,
+    )
+    # Each UE has two independent categorical alpha choices: theta and phi.
+    # Store the entropy per UE as the sum of the two coordinate entropies.
+    uniform_alpha_entropy_per_coord = float(np.log(num_alpha_levels))
+    categorical_entropy_per_user = 2.0 * uniform_alpha_entropy_per_coord
 
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     reward_trace = np.zeros(cfg.num_slots, dtype=np.float64)
@@ -1440,15 +1827,15 @@ def run_wesn_policy_rl(
     actual_sinr_ratio_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     signal_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     leakage_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
-    fb_attempts_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
-    fb_accept_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    fb_attempts_trace = np.ones((cfg.num_slots, k), dtype=np.float64)
+    fb_accept_trace = np.ones((cfg.num_slots, k), dtype=np.float64)
     best_of_n_score_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     best_of_n_selected_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     empirical_mean_norm_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     centered_update_norm_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
-    candidate_entropy_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
-    candidate_entropy_norm_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
-    candidate_effective_count_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    candidate_entropy_trace = np.full((cfg.num_slots, k), categorical_entropy_per_user, dtype=np.float64)
+    candidate_entropy_norm_trace = np.ones((cfg.num_slots, k), dtype=np.float64)
+    candidate_effective_count_trace = np.ones((cfg.num_slots, k), dtype=np.float64)
     candidate_selected_score_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     candidate_best_score_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     candidate_mean_score_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
@@ -1458,86 +1845,67 @@ def run_wesn_policy_rl(
     candidate_slnr_score_mean_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     candidate_slnr_score_std_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     candidate_policy_score_std_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
-    candidate_selected_source_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    candidate_selected_source_trace = np.full((cfg.num_slots, k), 4.0, dtype=np.float64)
+    pmi_span_selected_theta_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    pmi_span_selected_phi_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    pmi_center_theta_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    pmi_center_phi_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    pmi_mean_theta_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    pmi_mean_phi_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     learned_policy_probability_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     dk_policy_probability_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     selected_learned_branch_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     selected_dk_branch_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     mixture_logit_trace = np.zeros(cfg.num_slots, dtype=np.float64)
 
-    reward_baseline: float | None = None
+    # Explicit discrete-alpha diagnostics.  The selected/mean alpha traces use
+    # the dimensionless alpha levels in rl_cfg.alpha_level_grid, not the
+    # physical angle steps.  alpha_prob_trace stores the full categorical
+    # probability vector for each coordinate [theta0, phi0, theta1, phi1].
+    selected_alpha_level_trace = np.zeros((cfg.num_slots, action_dim), dtype=np.float64)
+    mean_alpha_level_trace = np.zeros((cfg.num_slots, action_dim), dtype=np.float64)
+    alpha_prob_trace = np.zeros((cfg.num_slots, action_dim, num_alpha_levels), dtype=np.float64)
+
+    # No moving-average advantage baseline: the policy-gradient weight is the
+    # instantaneous reward itself (optionally clipped by advantage_clip).
     batch_s: list[np.ndarray] = []
-    batch_candidate_pools: list[np.ndarray] = []
-    batch_slnr_score_pools: list[np.ndarray] = []
-    batch_selected_indices: list[np.ndarray] = []
-    batch_slnr_centers: list[np.ndarray] = []
-    batch_q_real: list[np.ndarray] = []
+    batch_alpha_indices: list[np.ndarray] = []
     batch_branch_is_learned: list[float] = []
     batch_adv: list[float] = []
     batch_indices: list[int] = []
 
     def flush_batch() -> None:
-        nonlocal batch_s, batch_candidate_pools, batch_slnr_score_pools, batch_selected_indices, batch_slnr_centers, batch_q_real, batch_branch_is_learned, batch_adv, batch_indices
+        nonlocal batch_s, batch_alpha_indices, batch_branch_is_learned, batch_adv, batch_indices
         if not batch_s:
             return
 
         s_batch = torch.tensor(np.stack(batch_s, axis=0), dtype=torch.float64)
-        candidate_pool_batch = torch.tensor(np.stack(batch_candidate_pools, axis=0), dtype=torch.float64)
-        slnr_score_pool_batch = torch.tensor(np.stack(batch_slnr_score_pools, axis=0), dtype=torch.float64)
-        selected_index_batch = torch.tensor(np.stack(batch_selected_indices, axis=0), dtype=torch.long)
-        slnr_center_batch = torch.tensor(np.stack(batch_slnr_centers, axis=0), dtype=torch.float64)
-        q_real_batch = torch.tensor(np.stack(batch_q_real, axis=0), dtype=torch.float64)
+        alpha_index_batch = torch.tensor(np.stack(batch_alpha_indices, axis=0), dtype=torch.long)
         branch_is_learned_batch = torch.tensor(np.array(batch_branch_is_learned), dtype=torch.float64)
         adv_batch = torch.tensor(np.array(batch_adv), dtype=torch.float64)
 
-        # Recompute log probabilities under the current W_out for REINFORCE.
-        # Direct-alpha logits shape: [B, K, M], where M indexes the structured
-        # leakage-step alpha candidates.
-        alpha_logits = torch.einsum("kmn,bn->bkm", w_out, s_batch)
-
-        # Exact conditional log-probability for the direct-alpha structured
-        # policy.  The realized candidate pools are fixed; W_out directly scores
-        # alpha candidates instead of producing a beam center mu.
-        log_probs_all = alpha_candidate_log_probs_torch(
-            alpha_logits=alpha_logits,
-            slnr_scores=slnr_score_pool_batch,
-            candidate_temperature=rl_cfg.candidate_temperature,
-            normalize_candidate_scores=rl_cfg.normalize_candidate_scores,
-            alpha_slnr_prior_weight=rl_cfg.alpha_slnr_prior_weight,
+        alpha_logits_batch = torch.einsum("ln,bn->bl", w_out, s_batch).reshape(
+            -1, action_dim, num_alpha_levels
         )
-        per_user_log_prob = torch.gather(
-            log_probs_all, dim=-1, index=selected_index_batch.unsqueeze(-1)
-        ).squeeze(-1)
-        learned_branch_log_prob = torch.sum(per_user_log_prob, dim=1)
+        if rl_cfg.alpha_zero_logit_bias != 0.0:
+            zero_prior = torch.zeros_like(alpha_logits_batch)
+            zero_prior[:, :, zero_level_index] = float(rl_cfg.alpha_zero_logit_bias)
+            alpha_logits_batch = alpha_logits_batch + zero_prior
+        alpha_log_probs_batch = torch.log_softmax(
+            alpha_logits_batch / max(float(rl_cfg.candidate_temperature), 1e-12), dim=-1
+        )
+        learned_branch_log_prob = torch.gather(
+            alpha_log_probs_batch, dim=-1, index=alpha_index_batch.unsqueeze(-1)
+        ).squeeze(-1).sum(dim=-1)
 
-        # Exact two-branch hybrid policy log-probability. The DK branch is the
-        # deterministic exact cached SLNR precoder, so its conditional action
-        # log-probability is zero; only the branch reuse probability contributes.
         p_learned = torch.sigmoid(mixture_logit)
         log_p_learned = torch.log(torch.clamp(p_learned, min=1e-12))
         log_p_dk = torch.log(torch.clamp(1.0 - p_learned, min=1e-12))
         branch_log_prob = branch_is_learned_batch * log_p_learned + (1.0 - branch_is_learned_batch) * log_p_dk
         joint_log_prob = branch_log_prob + branch_is_learned_batch * learned_branch_log_prob
         rl_loss = -torch.mean(adv_batch * joint_log_prob)
-
-        # Joint PMI-only full-precoder auxiliary loss.  This ranks sampled
-        # complete candidate precoders using a PMI-only proxy sum-rate.  No
-        # additional environment interaction is used; unexecuted candidates get
-        # proxy targets only, while rl_loss remains driven by the actually
-        # executed precoder reward.
-        if rl_cfg.joint_pmi_aux_loss_weight > 0.0:
-            joint_pmi_aux_loss = joint_pmi_proxy_aux_loss_torch(
-                log_probs_all=log_probs_all,
-                candidate_pool=candidate_pool_batch,
-                q_real=q_real_batch,
-                noise_floor=slnr_noise_power,
-                temperature=rl_cfg.joint_pmi_aux_temperature,
-                num_joint_candidates=rl_cfg.num_joint_pmi_aux_candidates,
-            )
-            loss = rl_loss + rl_cfg.joint_pmi_aux_loss_weight * joint_pmi_aux_loss
-        else:
-            joint_pmi_aux_loss = torch.zeros((), dtype=torch.float64)
-            loss = rl_loss
+        joint_pmi_aux_loss = torch.zeros((), dtype=torch.float64)
+        loss = rl_loss
 
         optimizer.zero_grad()
         loss.backward()
@@ -1546,20 +1914,15 @@ def run_wesn_policy_rl(
 
         loss_value = float(loss.detach().cpu().item())
         rl_loss_value = float(rl_loss.detach().cpu().item())
-        joint_pmi_aux_loss_value = float(joint_pmi_aux_loss.detach().cpu().item())
         grad_norm_value = float(grad_norm.detach().cpu().item())
         for idx in batch_indices:
             loss_trace[idx] = loss_value
             rl_loss_trace[idx] = rl_loss_value
-            joint_pmi_aux_loss_trace[idx] = joint_pmi_aux_loss_value
+            joint_pmi_aux_loss_trace[idx] = 0.0
             grad_norm_trace[idx] = grad_norm_value
 
         batch_s = []
-        batch_candidate_pools = []
-        batch_slnr_score_pools = []
-        batch_selected_indices = []
-        batch_slnr_centers = []
-        batch_q_real = []
+        batch_alpha_indices = []
         batch_branch_is_learned = []
         batch_adv = []
         batch_indices = []
@@ -1567,19 +1930,10 @@ def run_wesn_policy_rl(
     for t in range(cfg.num_slots):
         print(f"WESN-RL Slot {t + 1} / {cfg.num_slots}", end="\r")
         s = wesn_states[t]
-
-        # All users' direct alpha logits are produced from the same shared WESN
-        # readout feature.  Shape: [K, M].
         s_t = torch.tensor(s, dtype=torch.float64)
-        with torch.no_grad():
-            alpha_logits_t = torch.einsum("kmn,n->km", w_out, s_t)
-            alpha_logits_np = alpha_logits_t.detach().cpu().numpy()
 
-        # Emulate the limited-feedback information available to the policy.
-        # The sampler uses only dominant right singular vectors / PMI directions,
-        # not full channel Gram matrices H_k^H H_k.
         q_vectors = pmi_dominant_vectors_from_channels(channels[t])
-        q_real_sample = np.stack([complex_unit_to_real(q_vectors[ku]) for ku in range(k)], axis=0)
+
         signal_mats, leakage_mats = build_pmi_signal_and_leakage_matrices_real(q_vectors)
 
         zf_rate = float(zf_baseline["throughput"][t])
@@ -1595,6 +1949,34 @@ def run_wesn_policy_rl(
             q_vectors, slnr_precoder_t, noise_power, eps=rl_cfg.reward_sinr_eps
         )
 
+        center_theta_phi = pmi_slnr_theta_phi_center(
+            q_vectors=q_vectors,
+            slnr_precoder=slnr_precoder_t,
+            theta_max=rl_cfg.pmi_span_theta_max,
+            eps=rl_cfg.leakage_norm_eps,
+        )
+        # Causal direction in physical [theta0, phi0, theta1, phi1] space:
+        # normalized PMI-only proxy-rate gradient at the SLNR angle center.
+        angle_direction_np = pmi_proxy_rate_gradient_direction_theta_phi(
+            q_vectors=q_vectors,
+            center_theta_phi=center_theta_phi,
+            total_tx_power=cfg.total_tx_power,
+            noise_power=noise_power,
+            theta_max=rl_cfg.pmi_span_theta_max,
+            eps=rl_cfg.reward_sinr_eps,
+        )
+        center_flat_np = center_theta_phi.reshape(-1)
+        with torch.no_grad():
+            alpha_logits_t = torch.einsum("ln,n->l", w_out, s_t).reshape(action_dim, num_alpha_levels)
+            if rl_cfg.alpha_zero_logit_bias != 0.0:
+                alpha_logits_t[:, zero_level_index] += float(rl_cfg.alpha_zero_logit_bias)
+            alpha_log_probs_t = torch.log_softmax(
+                alpha_logits_t / max(float(rl_cfg.candidate_temperature), 1e-12), dim=-1
+            )
+            alpha_probs_np = torch.exp(alpha_log_probs_t).detach().cpu().numpy()
+            alpha_logits_np = alpha_logits_t.detach().cpu().numpy()
+            alpha_mean_level_np = alpha_probs_np @ alpha_levels_np
+
         if rl_cfg.reward_reference == "slnr":
             ref_rate = slnr_rate
             ref_actual_sinr = slnr_actual_sinr
@@ -1606,9 +1988,6 @@ def run_wesn_policy_rl(
         else:
             raise ValueError(f"Unknown reward_reference={rl_cfg.reward_reference!r}")
 
-        # Slot-level branch-first hybrid mixture policy.
-        # DK branch: exact cached PMI-SLNR precoder.
-        # Learned branch: current WESN SLNR-perturbation candidate policy.
         with torch.no_grad():
             p_learned_np = float(torch.sigmoid(mixture_logit).detach().cpu().item())
         slot_from_learned = bool(rng.uniform(0.0, 1.0) < p_learned_np)
@@ -1619,304 +1998,159 @@ def run_wesn_policy_rl(
         mixture_logit_trace[t] = float(mixture_logit.detach().cpu().item())
 
         if slot_from_learned:
-            # Best-of-N full-precoder selection. Each candidate is a complete
-            # K-column precoder generated by the current per-UE PMI-only
-            # signal/leakage sampler. We score each full candidate using the
-            # same scalar reward used for the policy-gradient update and keep
-            # the best candidate for execution/training.
-            best_score = -np.inf
-            best_candidate_index = 0
-            best_beams = None
-            best_x_sample = None
-            best_signal = None
-            best_leakage = None
-            best_attempts = None
-            best_accept = None
-            best_emp_mean = None
-            best_candidate_pool = None
-            best_slnr_score_pool = None
-            best_selected_indices = None
-            best_slnr_centers = None
-            best_diag = None
-            best_rate = None
-            best_actual_sinr = None
-            best_proxy_sinr = None
-            best_reward = None
-
-            for cand_idx in range(max(1, rl_cfg.best_of_n)):
-                cand_beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
-                cand_x_sample = np.zeros((k, d), dtype=np.float64)
-                cand_signal = np.zeros(k, dtype=np.float64)
-                cand_leakage = np.zeros(k, dtype=np.float64)
-                cand_attempts = np.zeros(k, dtype=np.float64)
-                cand_accept = np.zeros(k, dtype=np.float64)
-                cand_emp_mean = np.zeros((k, d), dtype=np.float64)
-                cand_candidate_pool = np.zeros((k, max(1, rl_cfg.max_fb_resamples), d), dtype=np.float64)
-                cand_slnr_score_pool = np.zeros((k, max(1, rl_cfg.max_fb_resamples)), dtype=np.float64)
-                cand_selected_indices = np.zeros(k, dtype=np.int64)
-                cand_slnr_centers = np.zeros((k, d), dtype=np.float64)
-                cand_diag = {
-                    "entropy": np.zeros(k, dtype=np.float64),
-                    "entropy_norm": np.zeros(k, dtype=np.float64),
-                    "effective_candidates": np.zeros(k, dtype=np.float64),
-                    "selected_policy_score": np.zeros(k, dtype=np.float64),
-                    "best_policy_score": np.zeros(k, dtype=np.float64),
-                    "mean_policy_score": np.zeros(k, dtype=np.float64),
-                    "selected_minus_mean_policy_score": np.zeros(k, dtype=np.float64),
-                    "phase_score_mean": np.zeros(k, dtype=np.float64),
-                    "phase_score_std": np.zeros(k, dtype=np.float64),
-                    "slnr_score_mean": np.zeros(k, dtype=np.float64),
-                    "slnr_score_std": np.zeros(k, dtype=np.float64),
-                    "policy_score_std": np.zeros(k, dtype=np.float64),
-                    "selected_source": np.zeros(k, dtype=np.float64),
-                }
-
-                for ku in range(k):
-                    (
-                        xk,
-                        sig,
-                        ell,
-                        attempts,
-                        accepted,
-                        emp_mean,
-                        candidate_pool,
-                        slnr_score_pool,
-                        selected_idx,
-                        diag,
-                        slnr_residual_center,
-                    ) = sample_fisher_bingham_signal_leakage(
-                        alpha_logits=alpha_logits_np[ku],
-                        kappa=rl_cfg.fixed_kappa,
-                        signal_mat=signal_mats[ku],
-                        leakage_mat=leakage_mats[ku],
-                        signal_gamma=rl_cfg.signal_gamma,
-                        slnr_noise_power=slnr_noise_power,
-                        rng=rng,
-                        max_resamples=rl_cfg.max_fb_resamples,
-                        signal_norm_eps=rl_cfg.signal_norm_eps,
-                        leakage_norm_eps=rl_cfg.leakage_norm_eps,
-                        pmi_center=complex_unit_to_real(q_vectors[ku]),
-                        candidate_temperature=rl_cfg.candidate_temperature,
-                        normalize_candidate_scores=rl_cfg.normalize_candidate_scores,
-                        uniform_candidate_frac=rl_cfg.uniform_candidate_frac,
-                        pmi_candidate_frac=rl_cfg.pmi_candidate_frac,
-                        slnr_candidate_frac=rl_cfg.slnr_candidate_frac,
-                        wesn_candidate_frac=rl_cfg.wesn_candidate_frac,
-                        candidate_proposal_kappa=rl_cfg.candidate_proposal_kappa,
-                        slnr_residual_scale=rl_cfg.slnr_residual_scale,
-                        include_exact_anchor_candidates=rl_cfg.include_exact_anchor_candidates,
-                        structured_leakage_alpha_grid=rl_cfg.structured_leakage_alpha_grid,
-                        slnr_center_override=complex_unit_to_real(slnr_precoder_t[:, ku]),
-                    )
-                    cand_x_sample[ku] = xk
-                    cand_signal[ku] = sig
-                    cand_leakage[ku] = ell
-                    cand_attempts[ku] = attempts
-                    cand_accept[ku] = 1.0 if accepted else 0.0
-                    cand_emp_mean[ku] = emp_mean
-                    cand_candidate_pool[ku] = candidate_pool
-                    cand_slnr_score_pool[ku] = slnr_score_pool
-                    cand_selected_indices[ku] = selected_idx
-                    cand_slnr_centers[ku] = complex_unit_to_real(slnr_precoder_t[:, ku])
-                    for diag_key in cand_diag:
-                        cand_diag[diag_key][ku] = diag[diag_key]
-                    cand_beams[:, ku] = real_to_complex_beam(cand_x_sample[ku], cfg.total_tx_power, k)
-
-                cand_rate, cand_actual_sinr = compute_slot_sum_rate(
-                    channels[t], cand_beams, noise_power
-                )
-                # The default RL reward uses the true post-detection SINR through
-                # reward_mode="rate_log_ratio".  The PMI-only proxy is still
-                # computed and logged for diagnostics.
-                cand_proxy_sinr = compute_pmi_sinr_proxy_from_precoder(
-                    q_vectors, cand_beams, noise_power, eps=rl_cfg.reward_sinr_eps
-                )
-                base_cand_reward = compute_rl_reward(
-                    reward_mode=rl_cfg.reward_mode,
-                    rate=cand_rate,
-                    zf_rate=ref_rate,
-                    actual_sinr=cand_actual_sinr,
-                    zf_actual_sinr=ref_actual_sinr,
-                    proxy_sinr=cand_proxy_sinr,
-                    zf_proxy_sinr=ref_proxy_sinr,
-                    eps=rl_cfg.reward_sinr_eps,
-                )
-                cand_reward = add_positive_rate_delta_bonus(
-                    base_reward=base_cand_reward,
-                    rate=cand_rate,
-                    ref_rate=ref_rate,
-                    bonus_lambda=rl_cfg.positive_rate_bonus_lambda,
-                    bonus_power=rl_cfg.positive_rate_bonus_power,
-                )
-
-                if cand_reward > best_score:
-                    best_score = cand_reward
-                    best_candidate_index = cand_idx
-                    best_beams = cand_beams
-                    best_x_sample = cand_x_sample
-                    best_signal = cand_signal
-                    best_leakage = cand_leakage
-                    best_attempts = cand_attempts
-                    best_accept = cand_accept
-                    best_emp_mean = cand_emp_mean
-                    best_candidate_pool = cand_candidate_pool
-                    best_slnr_score_pool = cand_slnr_score_pool
-                    best_selected_indices = cand_selected_indices
-                    best_slnr_centers = cand_slnr_centers
-                    best_diag = cand_diag
-                    best_rate = cand_rate
-                    best_actual_sinr = cand_actual_sinr
-                    best_proxy_sinr = cand_proxy_sinr
-                    best_reward = cand_reward
-
-        else:
-            # Exact domain-knowledge branch: use the cached PMI-SLNR precoder
-            # without perturbation. This gives the hybrid policy a safe reuse
-            # action and lets the learned branch specialize in slots where
-            # perturbing SLNR is actually beneficial.
-            best_score = 0.0
-            best_candidate_index = 0
-            best_beams = slnr_precoder_t.copy()
-            best_x_sample = np.stack(
-                [complex_unit_to_real(slnr_precoder_t[:, ku]) for ku in range(k)],
-                axis=0,
+            selected_alpha_indices = np.array([
+                int(rng.choice(num_alpha_levels, p=alpha_probs_np[i]))
+                for i in range(action_dim)
+            ], dtype=np.int64)
+            selected_alpha_levels = alpha_levels_np[selected_alpha_indices]
+            alpha_action = alpha_max_np * selected_alpha_levels
+            alpha_mean = alpha_max_np * alpha_mean_level_np
+            theta_phi = apply_angle_step_from_flat(
+                center_flat_np,
+                alpha_action * angle_direction_np,
+                num_users=k,
+                theta_max=rl_cfg.pmi_span_theta_max,
             )
-            best_signal = np.zeros(k, dtype=np.float64)
-            best_leakage = np.zeros(k, dtype=np.float64)
-            best_attempts = np.ones(k, dtype=np.float64)
-            best_accept = np.ones(k, dtype=np.float64)
-            best_emp_mean = best_x_sample.copy()
-            m_count = max(1, rl_cfg.max_fb_resamples)
-            best_candidate_pool = np.zeros((k, m_count, d), dtype=np.float64)
-            best_slnr_score_pool = np.zeros((k, m_count), dtype=np.float64)
-            best_selected_indices = np.zeros(k, dtype=np.int64)
-            best_slnr_centers = best_x_sample.copy()
+            mean_theta_phi = apply_angle_step_from_flat(
+                center_flat_np,
+                alpha_mean * angle_direction_np,
+                num_users=k,
+                theta_max=rl_cfg.pmi_span_theta_max,
+            )
+
+            beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
+            x_sample = np.zeros((k, d), dtype=np.float64)
+            mean_x_sample = np.zeros((k, d), dtype=np.float64)
+            signal = np.zeros(k, dtype=np.float64)
+            leakage = np.zeros(k, dtype=np.float64)
             for ku in range(k):
-                best_candidate_pool[ku, 0] = best_x_sample[ku]
-                best_signal[ku] = raw_quadratic_score(best_x_sample[ku], signal_mats[ku])
-                best_leakage[ku] = raw_quadratic_score(best_x_sample[ku], leakage_mats[ku])
-                ell = best_leakage[ku]
-                g = best_signal[ku]
-                best_slnr_score_pool[ku, 0] = rl_cfg.signal_gamma * g / max(ell + slnr_noise_power, rl_cfg.leakage_norm_eps)
-            best_diag = {
-                "entropy": np.zeros(k, dtype=np.float64),
-                "entropy_norm": np.zeros(k, dtype=np.float64),
-                "effective_candidates": np.ones(k, dtype=np.float64),
-                "selected_policy_score": np.zeros(k, dtype=np.float64),
-                "best_policy_score": np.zeros(k, dtype=np.float64),
-                "mean_policy_score": np.zeros(k, dtype=np.float64),
-                "selected_minus_mean_policy_score": np.zeros(k, dtype=np.float64),
-                "phase_score_mean": np.zeros(k, dtype=np.float64),
-                "phase_score_std": np.zeros(k, dtype=np.float64),
-                "slnr_score_mean": np.zeros(k, dtype=np.float64),
-                "slnr_score_std": np.zeros(k, dtype=np.float64),
-                "policy_score_std": np.zeros(k, dtype=np.float64),
-                "selected_source": np.full(k, 2.0, dtype=np.float64),
-            }
-            best_rate = slnr_rate
-            best_actual_sinr = slnr_actual_sinr
-            best_proxy_sinr = slnr_proxy_sinr
-            base_best_reward = compute_rl_reward(
+                beam_k = user_centered_pmi_span_beam_from_theta_phi(
+                    q_vectors=q_vectors,
+                    user_index=ku,
+                    theta=float(theta_phi[ku, 0]),
+                    phi=float(theta_phi[ku, 1]),
+                )
+                mean_beam_k = user_centered_pmi_span_beam_from_theta_phi(
+                    q_vectors=q_vectors,
+                    user_index=ku,
+                    theta=float(mean_theta_phi[ku, 0]),
+                    phi=float(mean_theta_phi[ku, 1]),
+                )
+                x_sample[ku] = complex_unit_to_real(beam_k)
+                mean_x_sample[ku] = complex_unit_to_real(mean_beam_k)
+                beams[:, ku] = real_to_complex_beam(x_sample[ku], cfg.total_tx_power, k)
+                signal[ku] = raw_quadratic_score(x_sample[ku], signal_mats[ku])
+                leakage[ku] = raw_quadratic_score(x_sample[ku], leakage_mats[ku])
+
+            rate, actual_sinr = compute_slot_sum_rate(channels[t], beams, noise_power)
+            proxy_sinr = compute_pmi_sinr_proxy_from_precoder(
+                q_vectors, beams, noise_power, eps=rl_cfg.reward_sinr_eps
+            )
+            base_reward = compute_rl_reward(
                 reward_mode=rl_cfg.reward_mode,
-                rate=best_rate,
+                rate=rate,
                 zf_rate=ref_rate,
-                actual_sinr=best_actual_sinr,
+                actual_sinr=actual_sinr,
                 zf_actual_sinr=ref_actual_sinr,
-                proxy_sinr=best_proxy_sinr,
+                proxy_sinr=proxy_sinr,
                 zf_proxy_sinr=ref_proxy_sinr,
                 eps=rl_cfg.reward_sinr_eps,
             )
-            best_reward = add_positive_rate_delta_bonus(
-                base_reward=base_best_reward,
-                rate=best_rate,
+            reward = add_positive_rate_delta_bonus(
+                base_reward=base_reward,
+                rate=rate,
                 ref_rate=ref_rate,
                 bonus_lambda=rl_cfg.positive_rate_bonus_lambda,
                 bonus_power=rl_cfg.positive_rate_bonus_power,
             )
-
-        assert best_beams is not None
-        beams = best_beams
-        x_sample = best_x_sample
-        signal_trace[t] = best_signal
-        leakage_trace[t] = best_leakage
-        fb_attempts_trace[t] = best_attempts
-        fb_accept_trace[t] = best_accept
-        emp_mean_sample = best_emp_mean
-        candidate_pool_sample = best_candidate_pool
-        slnr_score_pool_sample = best_slnr_score_pool
-        selected_indices_sample = best_selected_indices
-        slnr_centers_sample = best_slnr_centers
-        diag_sample = best_diag
-
-        # Cheap oracle diagnostic: if exact anchors are enabled, candidate index 0
-        # is the cached PMI-SLNR beam for every UE. This should match the cached
-        # SLNR baseline throughput almost exactly; otherwise the candidate pool
-        # is not reproducing the baseline.
-        if rl_cfg.include_exact_anchor_candidates and candidate_pool_sample is not None:
-            oracle_slnr_beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
+            emp_mean_sample = mean_x_sample
+            selected_theta_phi = theta_phi
+            best_score = reward
+            alpha_indices_for_training = selected_alpha_indices
+            selected_alpha_for_trace = selected_alpha_levels
+            mean_alpha_for_trace = alpha_mean_level_np
+        else:
+            beams = slnr_precoder_t.copy()
+            x_sample = np.stack([complex_unit_to_real(slnr_precoder_t[:, ku]) for ku in range(k)], axis=0)
+            signal = np.zeros(k, dtype=np.float64)
+            leakage = np.zeros(k, dtype=np.float64)
             for ku in range(k):
-                oracle_slnr_beams[:, ku] = real_to_complex_beam(
-                    candidate_pool_sample[ku, 0], cfg.total_tx_power, k
-                )
-            oracle_slnr_anchor_rate_trace[t], _ = compute_slot_sum_rate(
-                channels[t], oracle_slnr_beams, noise_power
+                signal[ku] = raw_quadratic_score(x_sample[ku], signal_mats[ku])
+                leakage[ku] = raw_quadratic_score(x_sample[ku], leakage_mats[ku])
+            rate = slnr_rate
+            actual_sinr = slnr_actual_sinr
+            proxy_sinr = slnr_proxy_sinr
+            base_reward = compute_rl_reward(
+                reward_mode=rl_cfg.reward_mode,
+                rate=rate,
+                zf_rate=ref_rate,
+                actual_sinr=actual_sinr,
+                zf_actual_sinr=ref_actual_sinr,
+                proxy_sinr=proxy_sinr,
+                zf_proxy_sinr=ref_proxy_sinr,
+                eps=rl_cfg.reward_sinr_eps,
             )
+            reward = add_positive_rate_delta_bonus(
+                base_reward=base_reward,
+                rate=rate,
+                ref_rate=ref_rate,
+                bonus_lambda=rl_cfg.positive_rate_bonus_lambda,
+                bonus_power=rl_cfg.positive_rate_bonus_power,
+            )
+            emp_mean_sample = x_sample.copy()
+            selected_theta_phi = np.zeros((k, 2), dtype=np.float64)
+            best_score = reward
+            alpha_indices_for_training = np.full(action_dim, zero_level_index, dtype=np.int64)
+            selected_alpha_for_trace = np.zeros(action_dim, dtype=np.float64)
+            mean_alpha_for_trace = alpha_mean_level_np
 
-        # Expensive optional diagnostic: score all M^K full-precoder combinations
-        # from the per-UE candidate pools and record the best actual rate. For
-        # K=2, M=32 this is 1024 rate evaluations per slot, so keep it off for
-        # long runs unless explicitly requested.
-        if rl_cfg.enable_oracle_pool_diagnostics and candidate_pool_sample is not None:
-            from itertools import product
-            m_count = candidate_pool_sample.shape[1]
-            best_pool_rate = -np.inf
-            for combo in product(range(m_count), repeat=k):
-                pool_beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
-                for ku, ci in enumerate(combo):
-                    pool_beams[:, ku] = real_to_complex_beam(
-                        candidate_pool_sample[ku, ci], cfg.total_tx_power, k
-                    )
-                pool_rate, _ = compute_slot_sum_rate(channels[t], pool_beams, noise_power)
-                if pool_rate > best_pool_rate:
-                    best_pool_rate = pool_rate
-            oracle_best_pool_rate_trace[t] = best_pool_rate
-        candidate_entropy_trace[t] = diag_sample["entropy"]
-        candidate_entropy_norm_trace[t] = diag_sample["entropy_norm"]
-        candidate_effective_count_trace[t] = diag_sample["effective_candidates"]
-        candidate_selected_score_trace[t] = diag_sample["selected_policy_score"]
-        candidate_best_score_trace[t] = diag_sample["best_policy_score"]
-        candidate_mean_score_trace[t] = diag_sample["mean_policy_score"]
-        candidate_selected_minus_mean_score_trace[t] = diag_sample["selected_minus_mean_policy_score"]
-        candidate_phase_score_mean_trace[t] = diag_sample["phase_score_mean"]
-        candidate_phase_score_std_trace[t] = diag_sample["phase_score_std"]
-        candidate_slnr_score_mean_trace[t] = diag_sample["slnr_score_mean"]
-        candidate_slnr_score_std_trace[t] = diag_sample["slnr_score_std"]
-        candidate_policy_score_std_trace[t] = diag_sample["policy_score_std"]
-        candidate_selected_source_trace[t] = diag_sample["selected_source"]
+        selected_alpha_level_trace[t] = np.asarray(selected_alpha_for_trace, dtype=np.float64).reshape(-1)
+        mean_alpha_level_trace[t] = np.asarray(mean_alpha_for_trace, dtype=np.float64).reshape(-1)
+        alpha_prob_trace[t] = alpha_probs_np
+
+        signal_trace[t] = signal
+        leakage_trace[t] = leakage
         empirical_mean_norm_trace[t] = np.linalg.norm(emp_mean_sample, axis=1)
         centered_update_norm_trace[t] = np.linalg.norm(x_sample - emp_mean_sample, axis=1)
-        rate = float(best_rate)
-        actual_sinr = best_actual_sinr
-        proxy_sinr = best_proxy_sinr
-        reward = float(best_reward)
-        best_of_n_score_trace[t] = best_score
-        best_of_n_selected_trace[t] = best_candidate_index
+        pmi_span_selected_theta_trace[t] = selected_theta_phi[:, 0]
+        pmi_span_selected_phi_trace[t] = selected_theta_phi[:, 1]
+        pmi_center_theta_trace[t] = center_theta_phi[:, 0]
+        pmi_center_phi_trace[t] = center_theta_phi[:, 1]
+        pmi_mean_theta_trace[t] = mean_theta_phi[:, 0]
+        pmi_mean_phi_trace[t] = mean_theta_phi[:, 1]
+        selected_alpha_2d = np.asarray(selected_alpha_for_trace, dtype=np.float64).reshape(k, 2)
+        mean_alpha_2d = np.asarray(mean_alpha_for_trace, dtype=np.float64).reshape(k, 2)
+        candidate_selected_score_trace[t] = selected_alpha_2d[:, 0]
+        candidate_mean_score_trace[t] = mean_alpha_2d[:, 0]
+        candidate_selected_minus_mean_score_trace[t] = selected_alpha_2d[:, 0] - mean_alpha_2d[:, 0]
+        candidate_phase_score_mean_trace[t] = mean_alpha_2d[:, 1]
+        candidate_phase_score_std_trace[t] = selected_alpha_2d[:, 1]
+        candidate_slnr_score_mean_trace[t] = mean_alpha_2d[:, 0]
+        candidate_slnr_score_std_trace[t] = selected_alpha_2d[:, 0]
 
-        if reward_baseline is None:
-            reward_baseline = reward
-        advantage = reward - reward_baseline
+        # Categorical-alpha diagnostics: entropy/effective count per UE, summing
+        # over theta/phi coordinates for entropy and averaging effective counts.
+        ent_per_coord = -np.sum(alpha_probs_np * np.log(np.maximum(alpha_probs_np, 1e-12)), axis=1)
+        eff_per_coord = 1.0 / np.maximum(np.sum(alpha_probs_np**2, axis=1), 1e-12)
+        ent_2d = ent_per_coord.reshape(k, 2)
+        eff_2d = eff_per_coord.reshape(k, 2)
+        candidate_entropy_trace[t] = np.sum(ent_2d, axis=1)
+        candidate_entropy_norm_trace[t] = np.sum(ent_2d, axis=1) / max(2.0 * np.log(num_alpha_levels), 1e-12)
+        candidate_effective_count_trace[t] = np.mean(eff_2d, axis=1)
+        candidate_policy_score_std_trace[t] = np.std(alpha_logits_np.reshape(k, 2, num_alpha_levels), axis=-1).mean(axis=1)
+
+        # No moving-average baseline is subtracted.  The REINFORCE weight is
+        # the instantaneous reward relative to the selected reference baseline
+        # (ZF or SLNR), optionally clipped for numerical stability.
+        advantage = float(reward)
         if rl_cfg.advantage_clip > 0:
             advantage = float(np.clip(advantage, -rl_cfg.advantage_clip, rl_cfg.advantage_clip))
+        reward_baseline_value = 0.0
 
-        reward_baseline = (
-            rl_cfg.reward_baseline_beta * reward_baseline
-            + (1.0 - rl_cfg.reward_baseline_beta) * reward
-        )
-
-        throughput[t] = rate
-        reward_trace[t] = reward
-        rate_delta_trace[t] = rate - zf_rate
-        rate_delta_slnr_trace[t] = rate - slnr_rate
+        throughput[t] = float(rate)
+        reward_trace[t] = float(reward)
+        rate_delta_trace[t] = float(rate) - zf_rate
+        rate_delta_slnr_trace[t] = float(rate) - slnr_rate
         proxy_sinr_trace[t] = proxy_sinr
         zf_proxy_sinr_trace[t] = zf_proxy_sinr
         proxy_sinr_ratio_trace[t] = proxy_sinr / np.maximum(zf_proxy_sinr, rl_cfg.reward_sinr_eps)
@@ -1924,17 +2158,15 @@ def run_wesn_policy_rl(
         proxy_sinr_ratio_slnr_trace[t] = proxy_sinr / np.maximum(slnr_proxy_sinr, rl_cfg.reward_sinr_eps)
         actual_sinr_ratio_slnr_trace[t] = actual_sinr / np.maximum(slnr_actual_sinr, rl_cfg.reward_sinr_eps)
         advantage_trace[t] = advantage
-        baseline_trace[t] = reward_baseline
+        baseline_trace[t] = reward_baseline_value
         beat_zf_trace[t] = 1.0 if rate > zf_rate else 0.0
         beat_slnr_trace[t] = 1.0 if rate > slnr_rate else 0.0
         beam_similarity_trace[t] = beam_similarity(beams, zf_baseline["precoders"][t])
+        best_of_n_score_trace[t] = best_score
+        best_of_n_selected_trace[t] = 0.0
 
         batch_s.append(s)
-        batch_candidate_pools.append(candidate_pool_sample)
-        batch_slnr_score_pools.append(slnr_score_pool_sample)
-        batch_selected_indices.append(selected_indices_sample)
-        batch_slnr_centers.append(slnr_centers_sample)
-        batch_q_real.append(q_real_sample)
+        batch_alpha_indices.append(alpha_indices_for_training)
         batch_branch_is_learned.append(1.0 if slot_from_learned else 0.0)
         batch_adv.append(advantage)
         batch_indices.append(t)
@@ -1994,6 +2226,16 @@ def run_wesn_policy_rl(
         "selected_learned_branch": selected_learned_branch_trace,
         "selected_dk_branch": selected_dk_branch_trace,
         "mixture_logit": mixture_logit_trace,
+        "pmi_span_selected_theta": pmi_span_selected_theta_trace,
+        "pmi_span_selected_phi": pmi_span_selected_phi_trace,
+        "pmi_center_theta": pmi_center_theta_trace,
+        "pmi_center_phi": pmi_center_phi_trace,
+        "pmi_mean_theta": pmi_mean_theta_trace,
+        "pmi_mean_phi": pmi_mean_phi_trace,
+        "selected_alpha_level": selected_alpha_level_trace,
+        "mean_alpha_level": mean_alpha_level_trace,
+        "alpha_prob": alpha_prob_trace,
+        "alpha_levels": alpha_levels_np,
         "wesn_states": wesn_states,
     }
 
@@ -2031,6 +2273,10 @@ def save_plots(
     learned_policy_probability = rl_results.get("learned_policy_probability", None)
     dk_policy_probability = rl_results.get("dk_policy_probability", None)
     selected_learned_branch = rl_results.get("selected_learned_branch", None)
+    selected_alpha_level = rl_results.get("selected_alpha_level", None)
+    mean_alpha_level = rl_results.get("mean_alpha_level", None)
+    alpha_prob = rl_results.get("alpha_prob", None)
+    alpha_levels = rl_results.get("alpha_levels", None)
 
     zf_avg = moving_average(zf_throughput, window_len)
     slnr_avg = moving_average(slnr_throughput, window_len)
@@ -2059,7 +2305,7 @@ def save_plots(
 
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
     ax1.plot(x_tput, zf_avg, lw=1.5, label="ZF baseline")
-    ax1.plot(x_tput, slnr_avg, lw=1.5, label="PMI-SLNR baseline")
+    ax1.plot(x_tput, slnr_avg, lw=1.5, label="SLNR baseline")
     # ax1.plot(x_tput, random_vmf_avg, lw=1.5, label="Random vMF baseline")
     ax1.plot(x_tput, rl_avg, lw=1.5, label="WESN")
     ax1.set_title("Throughput Across Time")
@@ -2231,7 +2477,7 @@ def save_plots(
 
     if learned_policy_probability_avg is not None and dk_policy_probability_avg is not None:
         fig12, ax12 = plt.subplots(figsize=(8, 4.5))
-        ax12.plot(np.arange(1, learned_policy_probability_avg.size + 1), learned_policy_probability_avg, lw=1.5, label="Learned SLNR-perturbation branch")
+        ax12.plot(np.arange(1, learned_policy_probability_avg.size + 1), learned_policy_probability_avg, lw=1.5, label="Learned PMI-span branch")
         ax12.plot(np.arange(1, dk_policy_probability_avg.size + 1), dk_policy_probability_avg, lw=1.5, label="Exact SLNR DK branch")
         ax12.set_title("Hybrid Mixture Branch Probabilities Across Time")
         ax12.set_xlabel("Slot index")
@@ -2246,7 +2492,7 @@ def save_plots(
     if selected_learned_branch_avg is not None:
         fig13, ax13 = plt.subplots(figsize=(8, 4.5))
         ax13.plot(np.arange(1, selected_learned_branch_avg.size + 1), selected_learned_branch_avg, lw=1.5)
-        ax13.set_title("Fraction of Executed Slots from Learned SLNR-Perturbation Branch")
+        ax13.set_title("Fraction of Executed Slots from Learned PMI-Span Branch")
         ax13.set_xlabel("Slot index")
         ax13.set_ylabel("Moving-average fraction")
         ax13.set_ylim(0.0, 1.0)
@@ -2254,6 +2500,99 @@ def save_plots(
         fig13.tight_layout()
         fig13.savefig(output_dir / "hybrid_mixture_executed_learned_branch.png", dpi=150)
         plt.close(fig13)
+
+    pmi_theta = rl_results.get("pmi_span_selected_theta", None)
+    pmi_phi = rl_results.get("pmi_span_selected_phi", None)
+    if pmi_theta is not None and pmi_phi is not None:
+        fig14, ax14 = plt.subplots(figsize=(8, 4.5))
+        for ku in range(pmi_theta.shape[1]):
+            theta_avg = moving_average(pmi_theta[:, ku], window_len)
+            ax14.plot(np.arange(1, theta_avg.size + 1), theta_avg, lw=1.5, label=f"UE {ku}")
+        ax14.set_title("Selected PMI-Span Theta Across Time")
+        ax14.set_xlabel("Slot index")
+        ax14.set_ylabel(r"$	heta_k$")
+        ax14.grid(True, alpha=0.35)
+        ax14.legend(loc="best")
+        fig14.tight_layout()
+        fig14.savefig(output_dir / "pmi_span_selected_theta_across_time.png", dpi=150)
+        plt.close(fig14)
+
+        fig15, ax15 = plt.subplots(figsize=(8, 4.5))
+        for ku in range(pmi_phi.shape[1]):
+            phi_avg = moving_average(pmi_phi[:, ku], window_len)
+            ax15.plot(np.arange(1, phi_avg.size + 1), phi_avg, lw=1.5, label=f"UE {ku}")
+        ax15.set_title("Selected PMI-Span Phi Across Time")
+        ax15.set_xlabel("Slot index")
+        ax15.set_ylabel(r"$\phi_k$")
+        ax15.grid(True, alpha=0.35)
+        ax15.legend(loc="best")
+        fig15.tight_layout()
+        fig15.savefig(output_dir / "pmi_span_selected_phi_across_time.png", dpi=150)
+        plt.close(fig15)
+
+
+    # ------------------------------------------------------------------
+    # Discrete-alpha diagnostics.
+    # 1) Histogram: how often each coordinate selected each alpha level.
+    # 2) Probability heatmaps: how the WESN categorical distribution over
+    #    alpha levels evolves over time for each coordinate.
+    # ------------------------------------------------------------------
+    if selected_alpha_level is not None and alpha_levels is not None:
+        coord_labels = [r"$\theta_0$", r"$\phi_0$", r"$\theta_1$", r"$\phi_1$"]
+        alpha_levels_arr = np.asarray(alpha_levels, dtype=np.float64)
+        selected_alpha_arr = np.asarray(selected_alpha_level, dtype=np.float64)
+
+        fig_alpha_hist, axes_alpha_hist = plt.subplots(2, 2, figsize=(9, 6), sharey=True)
+        axes_alpha_hist = axes_alpha_hist.reshape(-1)
+        for coord_idx, ax in enumerate(axes_alpha_hist):
+            counts = np.array([
+                np.mean(np.isclose(selected_alpha_arr[:, coord_idx], level))
+                for level in alpha_levels_arr
+            ], dtype=np.float64)
+            ax.bar(np.arange(alpha_levels_arr.size), counts)
+            ax.set_title(f"Selected alpha levels: {coord_labels[coord_idx]}")
+            ax.set_xticks(np.arange(alpha_levels_arr.size))
+            ax.set_xticklabels([f"{a:g}" for a in alpha_levels_arr], rotation=45)
+            ax.set_ylabel("Selection fraction")
+            ax.grid(True, alpha=0.3)
+        fig_alpha_hist.tight_layout()
+        fig_alpha_hist.savefig(output_dir / "alpha_level_selection_histograms.png", dpi=150)
+        plt.close(fig_alpha_hist)
+
+    if alpha_prob is not None and alpha_levels is not None:
+        coord_labels = [r"$\theta_0$", r"$\phi_0$", r"$\theta_1$", r"$\phi_1$"]
+        alpha_levels_arr = np.asarray(alpha_levels, dtype=np.float64)
+        alpha_prob_arr = np.asarray(alpha_prob, dtype=np.float64)
+
+        def moving_average_2d(trace_2d: np.ndarray, win: int) -> np.ndarray:
+            if win <= 1 or win > trace_2d.shape[0]:
+                return trace_2d.copy()
+            kernel = np.ones(win, dtype=np.float64) / win
+            return np.stack([
+                np.convolve(trace_2d[:, m], kernel, mode="valid")
+                for m in range(trace_2d.shape[1])
+            ], axis=1)
+
+        heatmap_window = max(1, int(window_len))
+        for coord_idx in range(alpha_prob_arr.shape[1]):
+            prob_smooth = moving_average_2d(alpha_prob_arr[:, coord_idx, :], heatmap_window)
+            fig_alpha_prob, ax_alpha_prob = plt.subplots(figsize=(9, 4.8))
+            im = ax_alpha_prob.imshow(
+                prob_smooth.T,
+                origin="lower",
+                aspect="auto",
+                interpolation="nearest",
+            )
+            ax_alpha_prob.set_title(f"Alpha-level probability heatmap: {coord_labels[coord_idx]}")
+            ax_alpha_prob.set_xlabel("Slot index")
+            ax_alpha_prob.set_ylabel("Alpha level")
+            ax_alpha_prob.set_yticks(np.arange(alpha_levels_arr.size))
+            ax_alpha_prob.set_yticklabels([f"{a:g}" for a in alpha_levels_arr])
+            fig_alpha_prob.colorbar(im, ax=ax_alpha_prob, label="Probability")
+            fig_alpha_prob.tight_layout()
+            safe_name = ["theta0", "phi0", "theta1", "phi1"][coord_idx]
+            fig_alpha_prob.savefig(output_dir / f"alpha_probability_heatmap_{safe_name}.png", dpi=150)
+            plt.close(fig_alpha_prob)
 
 def sim_cache_metadata(cfg: SimConfig) -> dict[str, float | int]:
     """Metadata that determines whether cached channel-dependent baselines are valid."""
@@ -2396,12 +2735,12 @@ def load_or_run_random_vmf_baseline(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched WESN phase-invariant PMI raw-SLNR RL")
-    parser.add_argument("--num-slots", type=int, default=100000)
+    parser.add_argument("--num-slots", type=int, default=20000)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE_SLNR_perturbation_with_mixture"))
-    parser.add_argument("--window-len", type=int, default=5000)
+    parser.add_argument("--window-len", type=int, default=1000)
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--force-recompute-baselines", action="store_true")
 
@@ -2422,7 +2761,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr-out", type=float, default=3e-2)
     parser.add_argument("--fixed-kappa", type=float, default=3.0)
-    parser.add_argument("--reward-baseline-beta", type=float, default=0.99)
+    parser.add_argument("--reward-baseline-beta", type=float, default=0.99, help="Deprecated/ignored: no moving-average advantage baseline is used.")
     parser.add_argument("--advantage-clip", type=float, default=1.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--init-scale-out", type=float, default=1e-2)
@@ -2467,14 +2806,25 @@ def parse_args() -> argparse.Namespace:
         default="0,0.02,0.05,0.10,0.15,0.20,0.30,0.50,0.80,1.00",
         help="Comma-separated nonnegative alpha values for structured candidates v(alpha)=normalize(v_SLNR + alpha*u_leak). Negative values are ignored in this RL version.",
     )
-    parser.add_argument("--alpha-slnr-prior-weight", type=float, default=0.0, help="Optional fixed PMI-SLNR prior weight added to WESN direct-alpha logits. Default 0 means WESN learns alpha logits directly.")
+    parser.add_argument("--alpha-slnr-prior-weight", type=float, default=0.0, help="Optional fixed PMI-SLNR prior weight added to WESN candidate logits. Default 0 means WESN learns candidate logits directly.")
+    parser.add_argument("--pmi-span-num-theta", type=int, default=8, help="Number of theta grid points for the user-centered PMI-span RL policy. Theta=0 is included once.")
+    parser.add_argument("--pmi-span-num-phi", type=int, default=8, help="Number of relative phase grid points for the user-centered PMI-span RL policy.")
+    parser.add_argument("--pmi-span-theta-max", type=float, default=float(np.pi / 2.0), help="Maximum theta for the PMI-span policy. Default pi/2 searches the full K=2 user-centered PMI-span family.")
+    parser.add_argument("--gaussian-raw-std-theta", type=float, default=0.30, help="Fixed raw-coordinate exploration std for theta coordinates in the 4D diagonal Gaussian policy.")
+    parser.add_argument("--gaussian-raw-std-phi", type=float, default=0.30, help="Fixed raw-coordinate exploration std for phi coordinates in the 4D diagonal Gaussian policy.")
+    parser.add_argument("--alpha-step-max-theta", type=float, default=0.25, help="Maximum physical theta step used by alpha_max * tanh(u_alpha) along the PMI proxy-gradient direction.")
+    parser.add_argument("--alpha-step-max-phi", type=float, default=0.75, help="Maximum physical phi step used by alpha_max * alpha_level along the PMI proxy-gradient direction.")
+    parser.add_argument("--alpha-level-grid", type=str, default="-1,-0.5,-0.25,-0.1,0,0.1,0.25,0.5,1", help="Comma-separated dimensionless alpha levels for the discrete angle-step policy. 0 is added automatically if missing.")
+    parser.add_argument("--alpha-zero-logit-bias", type=float, default=2.0, help="Fixed logit bias added to the zero-alpha level so the initial policy favors the exact SLNR-center action.")
+    parser.add_argument("--gaussian-init-theta", type=float, default=0.40, help="Initial physical theta mean for each UE before conversion to raw sigmoid coordinates.")
+    parser.add_argument("--gaussian-init-phi", type=float, default=float(np.pi), help="Initial physical phi mean for each UE before conversion to raw sigmoid coordinates.")
     parser.add_argument("--no-exact-anchor-candidates", action="store_true", help="Disable deterministic exact SLNR / SLNR-residual / PMI candidates in the candidate pool.")
     parser.add_argument("--joint-pmi-aux-loss-weight", type=float, default=0.0, help="Weight of the joint PMI-only full-precoder auxiliary ranking loss. Use 0 to disable.")
     parser.add_argument("--joint-pmi-aux-temperature", type=float, default=0.5, help="Softmax temperature used to convert joint PMI proxy rates into auxiliary target weights.")
     parser.add_argument("--num-joint-pmi-aux-candidates", type=int, default=32, help="Number of full-precoder candidate combinations sampled per slot for the joint PMI auxiliary loss.")
     parser.add_argument("--enable-oracle-pool-diagnostics", action="store_true", help="Expensively score all M^K full-precoder combinations from the candidate pools and log the best actual rate.")
-    parser.add_argument("--initial-learned-policy-probability", type=float, default=0.8, help="Initial reuse probability for the learned SLNR-perturbation branch. The exact SLNR DK branch starts with probability 1-p.")
-    parser.add_argument("--lr-mixture", type=float, default=3e-2, help="Learning rate for the trainable mixture/reuse probability logit.")
+    parser.add_argument("--initial-learned-policy-probability", type=float, default=1.0, help="Initial reuse probability for the learned SLNR-perturbation branch. The exact SLNR DK branch starts with probability 1-p.")
+    parser.add_argument("--lr-mixture", type=float, default=0, help="Learning rate for the trainable mixture/reuse probability logit.")
     parser.add_argument("--positive-rate-bonus-lambda", type=float, default=0.0, help="Scale lambda for the positive rate-delta bonus: lambda * max(rate - reference_rate, 0)^p.")
     parser.add_argument("--positive-rate-bonus-power", type=float, default=0.5, help="Exponent p for the positive rate-delta bonus. Default 0.5 amplifies small positive deltas.")
     return parser.parse_args()
@@ -2520,6 +2870,17 @@ def main() -> None:
         include_exact_anchor_candidates=not args.no_exact_anchor_candidates,
         structured_leakage_alpha_grid=parse_nonnegative_alpha_grid(args.structured_leakage_alpha_grid),
         alpha_slnr_prior_weight=args.alpha_slnr_prior_weight,
+        pmi_span_num_theta=args.pmi_span_num_theta,
+        pmi_span_num_phi=args.pmi_span_num_phi,
+        pmi_span_theta_max=args.pmi_span_theta_max,
+        gaussian_raw_std_theta=args.gaussian_raw_std_theta,
+        gaussian_raw_std_phi=args.gaussian_raw_std_phi,
+        alpha_step_max_theta=args.alpha_step_max_theta,
+        alpha_step_max_phi=args.alpha_step_max_phi,
+        alpha_level_grid=parse_alpha_level_grid(args.alpha_level_grid),
+        alpha_zero_logit_bias=args.alpha_zero_logit_bias,
+        gaussian_init_theta=args.gaussian_init_theta,
+        gaussian_init_phi=args.gaussian_init_phi,
         joint_pmi_aux_loss_weight=args.joint_pmi_aux_loss_weight,
         enable_oracle_pool_diagnostics=args.enable_oracle_pool_diagnostics,
         joint_pmi_aux_temperature=args.joint_pmi_aux_temperature,
@@ -2619,6 +2980,16 @@ def main() -> None:
     np.save(args.output_dir / "hybrid_mixture_selected_learned_branch_trace.npy", rl_results["selected_learned_branch"])
     np.save(args.output_dir / "hybrid_mixture_selected_dk_branch_trace.npy", rl_results["selected_dk_branch"])
     np.save(args.output_dir / "hybrid_mixture_logit_trace.npy", rl_results["mixture_logit"])
+    np.save(args.output_dir / "pmi_span_selected_theta_trace.npy", rl_results["pmi_span_selected_theta"])
+    np.save(args.output_dir / "pmi_span_selected_phi_trace.npy", rl_results["pmi_span_selected_phi"])
+    np.save(args.output_dir / "pmi_center_theta_trace.npy", rl_results["pmi_center_theta"])
+    np.save(args.output_dir / "pmi_center_phi_trace.npy", rl_results["pmi_center_phi"])
+    np.save(args.output_dir / "pmi_mean_theta_trace.npy", rl_results["pmi_mean_theta"])
+    np.save(args.output_dir / "pmi_mean_phi_trace.npy", rl_results["pmi_mean_phi"])
+    np.save(args.output_dir / "selected_alpha_level_trace.npy", rl_results["selected_alpha_level"])
+    np.save(args.output_dir / "mean_alpha_level_trace.npy", rl_results["mean_alpha_level"])
+    np.save(args.output_dir / "alpha_prob_trace.npy", rl_results["alpha_prob"])
+    np.save(args.output_dir / "alpha_levels.npy", rl_results["alpha_levels"])
     np.save(args.output_dir / "wesn_states_trace.npy", rl_results["wesn_states"])
 
     save_plots(
@@ -2632,7 +3003,7 @@ def main() -> None:
 
     print("Simple WESN-FB PMI raw-SLNR RL precoder design run finished.")
     print(f"ZF average throughput         : {zf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"PMI-SLNR baseline throughput  : {slnr_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"SLNR baseline throughput  : {slnr_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"WESN-FB PMI raw-SLNR RL throughput  : {rl_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Reward mode                   : {rl_cfg.reward_mode}")
@@ -2649,14 +3020,14 @@ def main() -> None:
     print(f"RL beats SLNR fraction        : {rl_results['beat_slnr'].mean():.4f}")
     print(f"Mean beam similarity to ZF    : {rl_results['beam_similarity_to_zf'].mean():.4f}")
     print(f"Mean grad norm                : {rl_results['grad_norm'].mean():.4f}")
-    print(f"Oracle exact candidate-SLNR throughput: {np.nanmean(rl_results['oracle_slnr_anchor_rate']):.4f}")
+    print("Oracle exact candidate-SLNR throughput: not computed (SLNR is not in learned Gaussian action)")
     print(f"True cached SLNR throughput          : {slnr_results['throughput'].mean():.4f}")
     if np.any(np.isfinite(rl_results['oracle_best_pool_rate'])):
         print(f"Oracle best candidate-pool throughput: {np.nanmean(rl_results['oracle_best_pool_rate']):.4f}")
     print(f"Mean raw PMI desired signal: {rl_results['signal'].mean():.4f}")
     print(f"Mean raw PMI leakage       : {rl_results['leakage'].mean():.4f}")
-    print(f"Direct-alpha sampler       : yes (WESN outputs logits over structured leakage alpha candidates)")
-    print(f"Hybrid mixture policy      : yes (exact SLNR DK branch + learned SLNR-perturbation branch)")
+    print(f"PMI-span discrete alpha policy: yes (WESN outputs logits over alpha levels for [theta0, phi0, theta1, phi1])")
+    print(f"Hybrid mixture policy      : yes (exact SLNR DK branch + learned PMI-span branch)")
     print(f"Initial learned branch prob: {rl_cfg.initial_learned_policy_probability:.4f}")
     print(f"Mean learned branch prob   : {rl_results['learned_policy_probability'].mean():.4f}")
     print(f"Final learned branch prob  : {rl_results['learned_policy_probability'][-1]:.4f}")
@@ -2665,16 +3036,27 @@ def main() -> None:
     print(f"Selected DK SLNR branch frac: {rl_results['selected_dk_branch'].mean():.4f}")
     print(f"Mean mixture logit         : {rl_results['mixture_logit'].mean():.4f}")
     print(f"Mixture logit LR           : {rl_cfg.lr_mixture:.4e}")
-    print(f"Structured leakage search  : yes (positive one-direction leakage-reduction steps from SLNR)")
-    print(f"Leakage alpha grid         : {rl_cfg.structured_leakage_alpha_grid}")
-    print(f"WESN alpha policy          : direct categorical logits over alpha grid")
-    print(f"Alpha SLNR prior weight    : {rl_cfg.alpha_slnr_prior_weight:.4f}")
-    print(f"Exact anchor candidates    : {rl_cfg.include_exact_anchor_candidates}")
-    print(f"Candidate update           : conditional log-softmax with stop-gradient residual candidate proposal)")
-    print(f"Candidate temperature      : {rl_cfg.candidate_temperature:.4f}")
+    print(f"User-centered PMI-span search: yes")
+    print(f"PMI-span theta points      : not used by Gaussian policy")
+    print(f"PMI-span phi points        : not used by Gaussian policy")
+    print(f"PMI-span action dimension  : {2 * cfg.num_users}")
+    print(f"WESN PMI-span policy       : joint 4D diagonal discrete alpha-level policy around PMI-SLNR angle center")
+    print(f"PMI-SLNR prior weight      : {rl_cfg.alpha_slnr_prior_weight:.4f}")
+    print("Exact SLNR anchor candidates: False (SLNR baseline only; not a learned Gaussian action)")
+    print(f"Policy update              : REINFORCE on sampled 4D categorical alpha levels")
+    print(f"Alpha levels               : {rl_cfg.alpha_level_grid}")
+    print(f"Alpha zero logit bias      : {rl_cfg.alpha_zero_logit_bias:.4f}")
+    print(f"Alpha softmax temperature  : {rl_cfg.candidate_temperature:.4f}")
+    print(f"Alpha step max [theta, phi]: [{rl_cfg.alpha_step_max_theta:.4f}, {rl_cfg.alpha_step_max_phi:.4f}]")
+    print("PMI-SLNR angle center      : yes (slot-dependent center from current PMI-SLNR precoder)")
+    print("Proxy-rate gradient direction: yes (PMI-only gradient at SLNR angle center)")
+    print(f"Mean SLNR-center theta per UE: {rl_results['pmi_center_theta'].mean(axis=0)}")
+    print(f"Mean SLNR-center phi per UE  : {rl_results['pmi_center_phi'].mean(axis=0)}")
+    print(f"Mean deterministic-alpha theta per UE: {rl_results['pmi_mean_theta'].mean(axis=0)}")
+    print(f"Mean deterministic-alpha phi per UE  : {rl_results['pmi_mean_phi'].mean(axis=0)}")
     print(f"Normalize candidate scores : {rl_cfg.normalize_candidate_scores}")
-    print(f"Candidate proposal fractions [uniform, PMI, SLNR, WESN]: ignored for structured leakage search")
-    print(f"Candidate proposal kappa   : ignored for structured leakage search")
+    print(f"Candidate proposal fractions [uniform, PMI, SLNR, WESN]: ignored for Gaussian PMI-span policy")
+    print(f"Candidate proposal kappa   : ignored for Gaussian PMI-span policy")
     print(f"Joint PMI aux loss weight  : {rl_cfg.joint_pmi_aux_loss_weight:.4f}")
     print(f"Oracle pool diagnostics    : {rl_cfg.enable_oracle_pool_diagnostics}")
     print(f"Joint PMI aux temperature  : {rl_cfg.joint_pmi_aux_temperature:.4f}")
@@ -2687,12 +3069,14 @@ def main() -> None:
     print(f"SLNR score uses raw PMI-only actual SLNR: yes")
     print(f"Candidate sampler selection rate: {rl_results['fb_accept'].mean():.4f}")
     print(f"Mean selected per-UE candidate index: {rl_results['fb_attempts'].mean():.4f}")
-    print(f"Mean candidate normalized entropy: {rl_results['candidate_entropy_norm'].mean():.4f}")
-    print(f"Mean effective candidates    : {rl_results['candidate_effective_count'].mean():.4f}")
-    print(f"Mean selected score - pool mean: {rl_results['candidate_selected_minus_mean_score'].mean():.4f}")
-    print(f"Mean candidate alpha-logit std: {rl_results['candidate_phase_score_std'].mean():.4f}")
-    print(f"Mean candidate SLNR score std : {rl_results['candidate_slnr_score_std'].mean():.4f}")
-    print(f"Selected source fractions [uniform, PMI, SLNR, structured leakage]: {(rl_results['candidate_selected_source'] == 0).mean():.4f}, {(rl_results['candidate_selected_source'] == 1).mean():.4f}, {(rl_results['candidate_selected_source'] == 2).mean():.4f}, {(rl_results['candidate_selected_source'] == 3).mean():.4f}")
+    print(f"Mean alpha categorical entropy : {rl_results['candidate_entropy'].mean():.4f}")
+    print(f"Mean selected alpha levels [theta0, phi0, theta1, phi1]: {rl_results['selected_alpha_level'].mean(axis=0)}")
+    print(f"Mean deterministic alpha levels [theta0, phi0, theta1, phi1]: {rl_results['mean_alpha_level'].mean(axis=0)}")
+    print(f"Mean selected theta-alpha minus mean: {rl_results['candidate_selected_minus_mean_score'].mean():.4f}")
+    print(f"Mean selected phi-alpha level       : {rl_results['candidate_phase_score_std'].mean():.4f}")
+    print(f"Selected source fractions [PMI-span Gaussian]: {(rl_results['candidate_selected_source'] == 4).mean():.4f}")
+    print(f"Mean selected PMI-span theta per UE: {rl_results['pmi_span_selected_theta'].mean(axis=0)}")
+    print(f"Mean selected PMI-span phi per UE  : {rl_results['pmi_span_selected_phi'].mean(axis=0)}")
     print(f"WESN skip window length      : {rl_cfg.skip_window_length}")
     print(f"Best-of-N candidates          : {rl_cfg.best_of_n}")
     print(f"Mean selected candidate index : {rl_results['best_of_n_selected'].mean():.4f}")

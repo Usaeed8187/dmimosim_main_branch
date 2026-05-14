@@ -123,6 +123,8 @@ channelmamba_checkpoint = None
 channelmamba_mode = "train"  # train | eval | auto
 channelmamba_train_drop_indices = None
 start_slot_idx_override = None
+configured_wesn_split_mode = "within_drop"  # within_drop | across_drops
+configured_wesn_train_drop_indices = None
 channelmamba_device = "cuda"
 channelmamba_enable_tf32 = True
 channelmamba_epochs = 10
@@ -178,6 +180,7 @@ def parse_arguments():
     global rl_checkpoint, rl_evaluation_only
     global channelmamba_checkpoint, channelmamba_mode, channelmamba_train_drop_indices
     global start_slot_idx_override
+    global configured_wesn_split_mode, configured_wesn_train_drop_indices
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -224,6 +227,13 @@ def parse_arguments():
         
         if len(arguments) >= 16:
             start_slot_idx_override = int(arguments[15])
+
+        if len(arguments) >= 17:
+            configured_wesn_split_mode = str(arguments[16]).lower()
+
+        if len(arguments) >= 18:
+            wesn_train_drop_tokens = [tok.strip() for tok in str(arguments[17]).split(",") if tok.strip()]
+            configured_wesn_train_drop_indices = wesn_train_drop_tokens if wesn_train_drop_tokens else None
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -326,6 +336,8 @@ def run_simulation():
     cfg.channelmamba_mode = channelmamba_mode
     cfg.channelmamba_checkpoint = channelmamba_checkpoint
     cfg.channelmamba_train_drop_indices = channelmamba_train_drop_indices
+    cfg.configured_wesn_split_mode = configured_wesn_split_mode
+    cfg.configured_wesn_train_drop_indices = configured_wesn_train_drop_indices
     cfg.channelmamba_allow_mismatch_reset = False
     cfg.channelmamba_checkpoint_metadata = {
         "mobility": mobility,
@@ -471,22 +483,29 @@ def run_simulation():
 
         folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
         os.makedirs(folder_path, exist_ok=True)
+        result_suffix = ""
+        if str(cfg.channel_prediction_method) == "configured_wesn":
+            split_mode = str(getattr(cfg, "configured_wesn_split_mode", "within_drop")).lower()
+            if split_mode == "across_drops":
+                result_suffix = "_drop_split"
+            else:
+                result_suffix = "_time_split"
 
         if cfg.csi_prediction:
             
             if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, result_suffix))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, result_suffix))
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
                     nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
                     ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13], chan_pred_nmse=chan_pred_nmse)
         else:
             if cfg.scheduling:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, result_suffix))
             else:
-                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on))
+                file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, result_suffix))
 
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 

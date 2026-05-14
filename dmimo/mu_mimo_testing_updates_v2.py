@@ -815,9 +815,15 @@ def sim_mu_mimo_all(
         slot_indices = slot_indices_all[offline_cycles:]
 
     if is_configured_wesn:
+        configured_wesn_split_mode = str(getattr(cfg, "configured_wesn_split_mode", "within_drop")).lower()
+        if configured_wesn_split_mode not in ("within_drop", "across_drops"):
+            raise ValueError(
+                f"Unsupported configured_wesn_split_mode='{configured_wesn_split_mode}'. "
+                "Expected 'within_drop' or 'across_drops'."
+            )
         if slot_indices_all.size <= 1:
             raise ValueError("Configured WESN requires at least two cycles (offline + online).")
-        if eval_on_online_segment_only:
+        if eval_on_online_segment_only and configured_wesn_split_mode == "within_drop":
             slot_indices = slot_indices_all[offline_cycles:]
 
         # Reset UE selection. Start with all TX and RX UEs selected.
@@ -882,25 +888,76 @@ def sim_mu_mimo_all(
         freq_cov_mat = getattr(cfg, "freq_cov_mat", None)
         lmmse_interpolator = getattr(cfg, "lmmse_interpolator", None)
         lmmse_use_rx_snr_for_nvar = getattr(cfg, "lmmse_use_rx_snr_for_nvar", True)
-        offline_histories = []
-        offline_err_histories = []
+        if configured_wesn_split_mode == "within_drop":
+            first_slot_idx = slot_indices_all[offline_cycles]
+            rc_predictor.history_len = offline_slot_indices.size
+            h_hist, err_hist = rc_predictor.get_csi_history_with_err_var(
+                first_slot_idx,
+                cfg.csi_delay,
+                rg_csi,
+                dmimo_chans,
+                cfo_vals=cfg.random_cfo_vals,
+                sto_vals=cfg.random_sto_vals,
+                estimated_channels_dir=cfg.estimated_channels_dir,
+                freq_cov_mat=freq_cov_mat,
+                lmmse_interpolator=lmmse_interpolator,
+                use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+            )
+            offline_history = np.asarray(h_hist)
+            offline_err_history = np.asarray(err_hist)
+        else:
+            train_drop_indices = getattr(cfg, "configured_wesn_train_drop_indices", None)
+            if train_drop_indices is None:
+                train_drop_indices = [str(cfg.drop_idx)]
+            else:
+                train_drop_indices = [str(d) for d in train_drop_indices]
 
-        first_slot_idx = slot_indices_all[offline_cycles]
-        rc_predictor.history_len = offline_slot_indices.size
-        h_hist, err_hist = rc_predictor.get_csi_history_with_err_var(
-            first_slot_idx,
-            cfg.csi_delay,
-            rg_csi,
-            dmimo_chans,
-            cfo_vals=cfg.random_cfo_vals,
-            sto_vals=cfg.random_sto_vals,
-            estimated_channels_dir=cfg.estimated_channels_dir,
-            freq_cov_mat=freq_cov_mat,
-            lmmse_interpolator=lmmse_interpolator,
-            use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
-        )
-        offline_history = np.asarray(h_hist)
-        offline_err_history = np.asarray(err_hist)
+            print(f"[configured_wesn] drop={cfg.drop_idx}: pooled offline train drops={train_drop_indices}")
+            pooled_h_hist_per_drop = []
+            pooled_err_hist_per_drop = []
+            original_ns3_folder = cfg.ns3_folder
+            original_estimated_channels_dir = cfg.estimated_channels_dir
+            old_history_len = int(rc_predictor.history_len)
+            try:
+                for train_drop_idx in train_drop_indices:
+                    cfg.ns3_folder = f"ns3/channels_{cfg.mobility}_{train_drop_idx}/"
+                    cfg.estimated_channels_dir = f"ns3/channel_estimates_{cfg.mobility}_drop_{train_drop_idx}"
+                    dmimo_chans_train = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+                    per_drop_h_hist = []
+                    per_drop_err_hist = []
+                    rc_predictor.history_len = 1
+                    rc_predictor.reset_csi_history()
+                    for hist_slot_idx in slot_indices_all:
+                        h_hist_one, err_hist_one = rc_predictor.get_csi_history_with_err_var(
+                            int(hist_slot_idx),
+                            cfg.csi_delay,
+                            rg_csi,
+                            dmimo_chans_train,
+                            cfo_vals=cfg.random_cfo_vals,
+                            sto_vals=cfg.random_sto_vals,
+                            estimated_channels_dir=cfg.estimated_channels_dir,
+                            freq_cov_mat=freq_cov_mat,
+                            lmmse_interpolator=lmmse_interpolator,
+                            use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+                        )
+                        per_drop_h_hist.append(np.asarray(h_hist_one))
+                        per_drop_err_hist.append(np.asarray(err_hist_one))
+                    if per_drop_h_hist:
+                        pooled_h_hist_per_drop.append(np.concatenate(per_drop_h_hist, axis=0))
+                        pooled_err_hist_per_drop.append(np.concatenate(per_drop_err_hist, axis=0))
+            finally:
+                cfg.ns3_folder = original_ns3_folder
+                cfg.estimated_channels_dir = original_estimated_channels_dir
+                rc_predictor.history_len = old_history_len
+                rc_predictor.reset_csi_history()
+
+            if len(pooled_h_hist_per_drop) == 0 or len(pooled_err_hist_per_drop) == 0:
+                raise ValueError(
+                    f"Configured WESN pooled training produced no CSI history blocks for drops={train_drop_indices}."
+                )
+            offline_history = np.concatenate(pooled_h_hist_per_drop, axis=0)
+            offline_err_history = np.concatenate(pooled_err_hist_per_drop, axis=0)
+            slot_indices = slot_indices_all
         cfg.configured_wesn_predictors = build_configured_predictors_simple(
             offline_history,
             rc_config,
