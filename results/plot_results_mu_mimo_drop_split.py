@@ -23,9 +23,10 @@ plt.rcParams.update({
 })
 
 STYLE = {
-    "configured_wesn": {"label": "Configured WESN (drop split 50/50)", "marker": "^", "color": "tab:green"},
+    "configured_wesn": {"label": "Configured WESN", "marker": "^", "color": "tab:green"},
     "two_mode": {"label": "Two-Mode WESN", "marker": "o", "color": "tab:blue"},
     "kalman_filter": {"label": "Kalman Filter", "marker": "s", "color": "tab:orange"},
+    "channelmamba": {"label": "ChannelMamba", "marker": "D", "color": "tab:red"},
     "outdated_csi": {"label": "Outdated CSI", "marker": "x", "color": "0.45"},
 }
 
@@ -42,6 +43,11 @@ def load_point(base_dir: Path, mobility: str, drop: int, rx_ues: int, tx_ues: in
         ],
         "kalman_filter": [
             f"{prefix}_prediction_kalman_filter_pmi_quantization_True.npz",
+        ],
+        "channelmamba": [
+            f"{prefix}_prediction_channelmamba_pmi_quantization_True.npz",
+            f"{prefix}_prediction_channelmamba_pmi_quantization_True_imitation_none_steps_0.npz",
+            f"{prefix}_prediction_channelmamba_pmi_quantization_True_drop_split.npz",
         ],
         "outdated_csi": [
             f"{prefix}_perfect_CSI_False_pmi_quantization_True.npz",
@@ -74,7 +80,7 @@ def main() -> None:
     tx_vals = [int(x) for x in args.tx_ues.split(",")]
     base = Path(args.base_dir)
 
-    methods = ["configured_wesn", "two_mode", "kalman_filter", "outdated_csi"]
+    methods = ["configured_wesn", "two_mode", "kalman_filter", "channelmamba", "outdated_csi"]
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(5.6, 3.8))
@@ -100,7 +106,7 @@ def main() -> None:
     ax.minorticks_on()
     ax.tick_params(direction="in", top=True, right=True, length=5)
     ax.tick_params(which="minor", direction="in", top=True, right=True, length=2.5)
-    ax.legend(frameon=False, loc="upper left", ncol=2, fontsize=9, handlelength=1.8, borderaxespad=0.2)
+    ax.legend(frameon=False, loc="upper left", ncol=1, fontsize=9, handlelength=1.8, borderaxespad=0.2)
     fig.tight_layout(pad=0.2)
     out_base, _ = str(Path(args.output)).rsplit(".", 1)
     fig.savefig(out_base + ".pdf", bbox_inches="tight")

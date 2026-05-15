@@ -122,6 +122,8 @@ return_first_slot_only = True
 channelmamba_checkpoint = None
 channelmamba_mode = "train"  # train | eval | auto
 channelmamba_train_drop_indices = None
+channelmamba_split_mode = "drop_split"  # drop_split | time_split
+channelmamba_train_time_ratio = 1.0
 start_slot_idx_override = None
 configured_wesn_split_mode = "within_drop"  # within_drop | across_drops
 configured_wesn_train_drop_indices = None
@@ -179,6 +181,7 @@ def parse_arguments():
     global csi_quantization_on, link_adapt
     global rl_checkpoint, rl_evaluation_only
     global channelmamba_checkpoint, channelmamba_mode, channelmamba_train_drop_indices
+    global channelmamba_split_mode, channelmamba_train_time_ratio
     global start_slot_idx_override
     global configured_wesn_split_mode, configured_wesn_train_drop_indices
 
@@ -225,7 +228,7 @@ def parse_arguments():
             train_drop_tokens = [tok.strip() for tok in str(arguments[14]).split(",") if tok.strip()]
             channelmamba_train_drop_indices = train_drop_tokens if train_drop_tokens else None
         
-        if len(arguments) >= 16:
+        if len(arguments) >= 16 and str(arguments[15]).strip() != "":
             start_slot_idx_override = int(arguments[15])
 
         if len(arguments) >= 17:
@@ -234,6 +237,12 @@ def parse_arguments():
         if len(arguments) >= 18:
             wesn_train_drop_tokens = [tok.strip() for tok in str(arguments[17]).split(",") if tok.strip()]
             configured_wesn_train_drop_indices = wesn_train_drop_tokens if wesn_train_drop_tokens else None
+
+        if len(arguments) >= 19:
+            channelmamba_split_mode = str(arguments[18]).lower()
+
+        if len(arguments) >= 20 and str(arguments[19]).strip() != "":
+            channelmamba_train_time_ratio = float(arguments[19])
 
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
@@ -336,6 +345,8 @@ def run_simulation():
     cfg.channelmamba_mode = channelmamba_mode
     cfg.channelmamba_checkpoint = channelmamba_checkpoint
     cfg.channelmamba_train_drop_indices = channelmamba_train_drop_indices
+    cfg.channelmamba_split_mode = channelmamba_split_mode
+    cfg.channelmamba_train_time_ratio = channelmamba_train_time_ratio
     cfg.configured_wesn_split_mode = configured_wesn_split_mode
     cfg.configured_wesn_train_drop_indices = configured_wesn_train_drop_indices
     cfg.channelmamba_allow_mismatch_reset = False
@@ -490,6 +501,12 @@ def run_simulation():
                 result_suffix = "_drop_split"
             else:
                 result_suffix = "_time_split"
+        elif str(cfg.channel_prediction_method) == "channelmamba":
+            cm_split_mode = str(getattr(cfg, "channelmamba_split_mode", "drop_split")).lower()
+            if cm_split_mode == "time_split":
+                result_suffix = "_time_split"
+            else:
+                result_suffix = "_drop_split"
 
         if cfg.csi_prediction:
             

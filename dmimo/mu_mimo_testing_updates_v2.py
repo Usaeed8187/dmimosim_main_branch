@@ -1070,6 +1070,24 @@ def sim_mu_mimo_all(
         else:
             train_drop_indices = [str(d) for d in train_drop_indices]
 
+        channelmamba_split_mode = str(getattr(cfg, "channelmamba_split_mode", "drop_split")).lower()
+        channelmamba_train_time_ratio = float(getattr(cfg, "channelmamba_train_time_ratio", 1.0))
+        if not (0.0 < channelmamba_train_time_ratio <= 1.0):
+            raise ValueError(
+                f"channelmamba_train_time_ratio must be in (0, 1], got {channelmamba_train_time_ratio}."
+            )
+        if channelmamba_split_mode == "time_split":
+            num_timeline = int(channelmamba_slots.size)
+            train_timeline_count = int(np.floor(num_timeline * channelmamba_train_time_ratio))
+            train_timeline_count = max(1, min(train_timeline_count, num_timeline))
+            train_channelmamba_slots = channelmamba_slots[:train_timeline_count]
+            print(
+                f"[channelmamba] drop={cfg.drop_idx}: time-split training timeline "
+                f"count={train_timeline_count}/{num_timeline} (ratio={channelmamba_train_time_ratio})."
+            )
+        else:
+            train_channelmamba_slots = channelmamba_slots
+
         if channelmamba_mode in ("train", "auto"):
             if channelmamba_mode == "train":
                 print(f"[channelmamba] drop={cfg.drop_idx}: training and optionally saving to {cfg.channelmamba_checkpoint}")
@@ -1090,7 +1108,7 @@ def sim_mu_mimo_all(
                     rc_predictor.history_len = 1
                     rc_predictor.reset_csi_history()
                     per_drop_blocks = []
-                    for hist_slot_idx in channelmamba_slots:
+                    for hist_slot_idx in train_channelmamba_slots:
                         # With history_len=1, querying at first_slot_idx=(hist_slot_idx + csi_delay)
                         # returns exactly the CSI estimate at hist_slot_idx.
                         h_hist_one, _ = rc_predictor.get_csi_history_with_err_var(
