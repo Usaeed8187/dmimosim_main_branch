@@ -126,6 +126,22 @@ class ResultLoader:
         except (IndexError, ValueError):
             return None
         
+    @staticmethod
+    def _append_suffix(path: str, suffix: str) -> str:
+        if not suffix:
+            return path
+        if path.endswith(".npz"):
+            return f"{path[:-4]}{suffix}.npz"
+        return f"{path}{suffix}"
+
+    def _suffixes_for_scenario(self, scenario: Scenario) -> List[str]:
+        if scenario.prediction_method == "configured_wesn":
+            # Backward compatibility: early time-split runs had no suffix.
+            return ["_time_split", ""]
+        if scenario.prediction_method == "channelmamba":
+            return ["_time_split"]
+        return [""]
+    
     def _prediction_patterns(
         self,
         prefix: str,
@@ -174,14 +190,17 @@ class ResultLoader:
         )
 
         candidates: List[str] = []
+        suffixes = self._suffixes_for_scenario(scenario)
         for pattern in patterns:
-            full_pattern = os.path.join(folder, pattern)
-            if "*" in pattern:
-                matches = glob.glob(full_pattern)
-                matches.sort()
-                candidates.extend(matches)
-            else:
-                candidates.append(full_pattern)
+            for suffix in suffixes:
+                suffixed_pattern = self._append_suffix(pattern, suffix)
+                full_pattern = os.path.join(folder, suffixed_pattern)
+                if "*" in suffixed_pattern:
+                    matches = glob.glob(full_pattern)
+                    matches.sort()
+                    candidates.extend(matches)
+                else:
+                    candidates.append(full_pattern)
         return candidates
 
     def _find_file(
@@ -444,18 +463,6 @@ STYLE = {
         "marker": "D",
         "label": "ChannelMamba",
     },
-    "ChannelMamba (TP)": {
-        "color": "tab:red",
-        "marker": "D",
-        "linestyle": "--",
-        "label": "ChannelMamba (TP)",
-    },
-    "ChannelMamba (SP)": {
-        "color": "tab:red",
-        "marker": "d",
-        "linestyle": "-",
-        "label": "ChannelMamba (SP)",
-    },
     "Outdated CSI": {
         "color": "0.45",
         "marker": "x",
@@ -508,7 +515,7 @@ def plot_metric(
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
-    ax.set_ylim(top=27)
+    # ax.set_ylim(top=27)
     ax.grid(True, which="major", linestyle="-", linewidth=0.35, alpha=0.25)
     ax.minorticks_on()
     ax.tick_params(direction="in", top=True, right=True, length=5)
@@ -614,7 +621,7 @@ def main() -> None:
             "Root directory containing per-drop results."
         ),
     )
-    parser.add_argument("--mobility", default="highest_mobility", help="Mobility string used in the folder names.")
+    parser.add_argument("--mobility", default="high_mobility", help="Mobility string used in the folder names.")
     parser.add_argument(
         "--drops",
         type=int,
@@ -750,20 +757,7 @@ def main() -> None:
         (s for s in cfg.scenarios if s.prediction_method == "channelmamba"),
         None,
     )
-    channelmamba_seen_agg = (
-        aggregate_metrics(
-            loader,
-            [channelmamba_scenario],
-            cfg.rx_ues,
-            cfg.tx_ues,
-            cfg.modulation_orders,
-            cfg.code_rates,
-            drops=cfg.channelmamba_seen_drops,
-        )
-        if channelmamba_scenario is not None
-        else {}
-    )
-    channelmamba_all_agg = (
+    channelmamba_time_split_agg = (
         aggregate_metrics(
             loader,
             [channelmamba_scenario],
@@ -804,26 +798,22 @@ def main() -> None:
         ber_tx_series.append((scenario.label, scenario_values))
         coded_ber_tx_series.append((scenario.label, coded_scenario_values))
     if channelmamba_scenario is not None:
-        for curve_label, cm_agg in (
-            ("ChannelMamba (TP)", channelmamba_seen_agg),
-            ("ChannelMamba (SP)", channelmamba_all_agg),
-        ):
-            scenario_values = []
-            coded_scenario_values = []
-            for tx in cfg.tx_ues:
-                datapoint = _average_metric(
-                    cm_agg,
-                    channelmamba_scenario,
-                    cfg.fixed_rx_for_tx_sweep,
-                    tx,
-                    cfg.ber_modulation_order,
-                    float(cfg.ber_code_rate),
-                )
-                scenario_values.append(datapoint.uncoded_ber if datapoint else np.nan)
-                coded_scenario_values.append(datapoint.coded_ber if datapoint else np.nan)
-            ber_tx_series.append((curve_label, scenario_values))
-            coded_ber_tx_series.append((curve_label, coded_scenario_values))
-    
+        scenario_values = []
+        coded_scenario_values = []
+        for tx in cfg.tx_ues:
+            datapoint = _average_metric(
+                channelmamba_time_split_agg,
+                channelmamba_scenario,
+                cfg.fixed_rx_for_tx_sweep,
+                tx,
+                cfg.ber_modulation_order,
+                float(cfg.ber_code_rate),
+            )
+            scenario_values.append(datapoint.uncoded_ber if datapoint else np.nan)
+            coded_scenario_values.append(datapoint.coded_ber if datapoint else np.nan)
+        ber_tx_series.append(("ChannelMamba", scenario_values))
+        coded_ber_tx_series.append(("ChannelMamba", coded_scenario_values))
+
     semilogy_metric(
         tx_display,
         ber_tx_series,
@@ -867,25 +857,21 @@ def main() -> None:
         coded_ber_rx_series.append((scenario.label, coded_scenario_values))
 
     if channelmamba_scenario is not None:
-        for curve_label, cm_agg in (
-            ("ChannelMamba (TP)", channelmamba_seen_agg),
-            ("ChannelMamba (SP)", channelmamba_all_agg),
-        ):
-            scenario_values = []
-            coded_scenario_values = []
-            for rx in cfg.rx_ues:
-                datapoint = _average_metric(
-                    cm_agg,
-                    channelmamba_scenario,
-                    rx,
-                    cfg.fixed_tx_for_rx_sweep,
-                    cfg.ber_modulation_order,
-                    float(cfg.ber_code_rate),
-                )
-                scenario_values.append(datapoint.uncoded_ber if datapoint else np.nan)
-                coded_scenario_values.append(datapoint.coded_ber if datapoint else np.nan)
-            ber_rx_series.append((curve_label, scenario_values))
-            coded_ber_rx_series.append((curve_label, coded_scenario_values))
+        scenario_values = []
+        coded_scenario_values = []
+        for rx in cfg.rx_ues:
+            datapoint = _average_metric(
+                channelmamba_time_split_agg,
+                channelmamba_scenario,
+                rx,
+                cfg.fixed_tx_for_rx_sweep,
+                cfg.ber_modulation_order,
+                float(cfg.ber_code_rate),
+            )
+            scenario_values.append(datapoint.uncoded_ber if datapoint else np.nan)
+            coded_scenario_values.append(datapoint.coded_ber if datapoint else np.nan)
+        ber_rx_series.append(("ChannelMamba", scenario_values))
+        coded_ber_rx_series.append(("ChannelMamba", coded_scenario_values))
 
     semilogy_metric(
         rx_display,
@@ -931,22 +917,18 @@ def main() -> None:
         best_mcs_tx[scenario] = scenario_best_mcs
 
     if channelmamba_scenario is not None:
-        for curve_label, cm_agg in (
-            ("ChannelMamba (TP)", channelmamba_seen_agg),
-            ("ChannelMamba (SP)", channelmamba_all_agg),
-        ):
-            scenario_thr = []
-            for tx in cfg.tx_ues:
-                best_throughput, _ = select_best_mcs(
-                    cm_agg,
-                    channelmamba_scenario,
-                    cfg.fixed_rx_for_tx_sweep,
-                    tx,
-                    cfg.modulation_orders,
-                    cfg.code_rates,
-                )
-                scenario_thr.append(best_throughput if best_throughput is not None else np.nan)
-            thr_tx_series.append((curve_label, scenario_thr))
+        scenario_thr = []
+        for tx in cfg.tx_ues:
+            best_throughput, _ = select_best_mcs(
+                channelmamba_time_split_agg,
+                channelmamba_scenario,
+                cfg.fixed_rx_for_tx_sweep,
+                tx,
+                cfg.modulation_orders,
+                cfg.code_rates,
+            )
+            scenario_thr.append(best_throughput if best_throughput is not None else np.nan)
+        thr_tx_series.append(("ChannelMamba", scenario_thr))
     
     plot_metric(
         tx_display,
@@ -982,22 +964,18 @@ def main() -> None:
         best_mcs_rx[scenario] = scenario_best_mcs
 
     if channelmamba_scenario is not None:
-        for curve_label, cm_agg in (
-            ("ChannelMamba (TP)", channelmamba_seen_agg),
-            ("ChannelMamba (SP)", channelmamba_all_agg),
-        ):
-            scenario_thr = []
-            for rx in cfg.rx_ues:
-                best_throughput, _ = select_best_mcs(
-                    cm_agg,
-                    channelmamba_scenario,
-                    rx,
-                    cfg.fixed_tx_for_rx_sweep,
-                    cfg.modulation_orders,
-                    cfg.code_rates,
-                )
-                scenario_thr.append(best_throughput if best_throughput is not None else np.nan)
-            thr_rx_series.append((curve_label, scenario_thr))
+        scenario_thr = []
+        for rx in cfg.rx_ues:
+            best_throughput, _ = select_best_mcs(
+                channelmamba_time_split_agg,
+                channelmamba_scenario,
+                rx,
+                cfg.fixed_tx_for_rx_sweep,
+                cfg.modulation_orders,
+                cfg.code_rates,
+            )
+            scenario_thr.append(best_throughput if best_throughput is not None else np.nan)
+        thr_rx_series.append(("ChannelMamba", scenario_thr))
     
     plot_metric(
         rx_display,
