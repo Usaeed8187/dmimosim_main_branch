@@ -31,7 +31,7 @@ def load_point(base_dir: Path, mobility: str, drop: int, rx_ues: int, tx_ues: in
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--base-dir", default="results/channels_multiple_mu_mimo")
-    p.add_argument("--mobility", default="higher_mobility")
+    p.add_argument("--mobility", default="highest_mobility")
     p.add_argument("--test-drops", default="11-20")
     p.add_argument("--rx-ues", type=int, default=4)
     p.add_argument("--tx-ues", default="2,4,6,8,10")
