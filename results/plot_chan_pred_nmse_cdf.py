@@ -87,13 +87,18 @@ def _candidate_paths(
     quant_str = str(quantization)
     if scenario.prediction:
         assert scenario.prediction_method is not None
-        patterns = [
-            f"{prefix}_prediction_{scenario.prediction_method}_pmi_quantization_{quant_str}.npz",
-            (
-                f"{prefix}_prediction_{scenario.prediction_method}_"
-                f"pmi_quantization_{quant_str}_imitation_none_steps_0.npz"
-            ),
-        ]
+        if scenario.prediction_method == "channelmamba":
+            patterns = [
+                f"{prefix}_prediction_channelmamba_pmi_quantization_{quant_str}_time_split.npz",
+            ]
+        else:
+            patterns = [
+                f"{prefix}_prediction_{scenario.prediction_method}_pmi_quantization_{quant_str}.npz",
+                (
+                    f"{prefix}_prediction_{scenario.prediction_method}_"
+                    f"pmi_quantization_{quant_str}_imitation_none_steps_0.npz"
+                ),
+            ]
     else:
         patterns = [
             f"{prefix}_perfect_CSI_False_pmi_quantization_{quant_str}.npz",
@@ -219,6 +224,7 @@ def _plot_cdf(
         "Two-Mode WESN": "tab:blue",
         "Configured WESN": "tab:green",
         "Kalman Filter": "tab:orange",
+        "ChannelMamba": "tab:red",
     }
 
     mobility_display = {
@@ -472,6 +478,7 @@ def main() -> None:
         # Scenario(label="Two-mode WESN", prediction=True, prediction_method="two_mode"),
         Scenario(label="Configured WESN", prediction=True, prediction_method="configured_wesn"),
         Scenario(label="Kalman Filter", prediction=True, prediction_method="kalman_filter"),
+        # Scenario(label="ChannelMamba", prediction=True, prediction_method="channelmamba"),
     ]
 
     prefix = _build_filename_prefix(
