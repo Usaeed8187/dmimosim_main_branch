@@ -10,8 +10,8 @@ declare -a rx_ues_arr=("4")
 declare -a num_txue_sel_arr=("2" "4" "6" "8" "10")
 declare -a modulation_orders=("4")
 declare -a code_rates=("1/2")
-declare -a perfect_csi_arr=("True")
-declare -a channel_prediction_settings=("None") # "None" "weiner_filter" "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
+declare -a perfect_csi_arr=("False")
+declare -a channel_prediction_settings=("configured_wesn") # "None" "weiner_filter" "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
 declare -a csi_quantization_arr=("True")
 
 link_adapt="True"
