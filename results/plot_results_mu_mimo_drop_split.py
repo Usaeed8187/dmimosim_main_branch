@@ -45,8 +45,6 @@ def load_point(base_dir: Path, mobility: str, drop: int, rx_ues: int, tx_ues: in
             f"{prefix}_prediction_kalman_filter_pmi_quantization_True.npz",
         ],
         "channelmamba": [
-            f"{prefix}_prediction_channelmamba_pmi_quantization_True.npz",
-            f"{prefix}_prediction_channelmamba_pmi_quantization_True_imitation_none_steps_0.npz",
             f"{prefix}_prediction_channelmamba_pmi_quantization_True_drop_split.npz",
         ],
         "outdated_csi": [
@@ -91,6 +89,10 @@ def main() -> None:
             vals = [load_point(base, args.mobility, d, args.rx_ues, tx, method) for d in drops]
             vals = [v for v in vals if v is not None]
             y.append(float(np.mean(vals)) if vals else np.nan)
+        if method == "kalman_filter":
+            # y[2] = 19.0635
+            # y[3] = 20.399
+            hold = 1
         ax.plot(
             np.asarray(tx_vals) + 1,
             y,

@@ -2,16 +2,16 @@
 
 # Array of arguments
 # declare -a mobilities=("low_mobility" "medium_mobility" "high_mobility")
-declare -a mobilities=("high_mobility" "higher_mobility" "highest_mobility")
+declare -a mobilities=("higher_mobility" "highest_mobility" "high_mobility")
 # declare -a drop_idx=("26" "27" "28" "29" "30" "31" "32" "33" "34" "35" "36" "37" "38" "39" "43" "44" "45")
 # declare -a drop_idx=("1")
 declare -a drop_idx=($(seq 1 20))
-declare -a rx_ues_arr=("4")
+declare -a rx_ues_arr=("5")
 declare -a num_txue_sel_arr=("2" "4" "6" "8" "10")
 declare -a modulation_orders=("4")
 declare -a code_rates=("1/2")
 declare -a perfect_csi_arr=("False")
-declare -a channel_prediction_settings=("configured_wesn") # "None" "weiner_filter" "two_mode". If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
+declare -a channel_prediction_settings=("configured_wesn" "kalman_filter") # If "None", cfg.csi_prediction = False. otherwise, cfg.csi_prediction = True and cfg.channel_prediction_method is changed accordingly.
 declare -a csi_quantization_arr=("True")
 
 link_adapt="True"

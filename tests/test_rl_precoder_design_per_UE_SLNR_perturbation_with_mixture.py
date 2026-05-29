@@ -8,7 +8,13 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import os
+import sys
 
+dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
+sys.path.append(dmimo_root)
+
+from dmimo.mimo.quantized_CSI_feedback import quantized_CSI_feedback
 
 @dataclass
 class SimConfig:
@@ -19,8 +25,32 @@ class SimConfig:
     num_slots: int = 2000
     snr_db: float = 10.0
     temporal_correlation: float = 0.95
+    # Channel generation model. toy_ar1 keeps the original independent AR(1)
+    # coefficients. sionna_umi/sionna_uma/sionna_rma use Sionna TR 38.901
+    # geometry-based stochastic channels to obtain more realistic temporal
+    # evolution, cross-antenna correlation, and topology-dependent UE links.
+    channel_model: str = "toy_ar1"
+    carrier_frequency_hz: float = 3.5e9
+    subcarrier_spacing_hz: float = 30e3
+    slot_duration_s: float = 1e-3
+    ue_speed_kmh: float = 30.0
+    bs_height_m: float = 25.0
+    ue_height_m: float = 1.5
+    cell_radius_m: float = 100.0
+    min_ue_distance_m: float = 10.0
+    sionna_scenario: str = "umi"
+    sionna_o2i_model: str = "low"
+    sionna_enable_pathloss: bool = False
+    sionna_enable_shadow_fading: bool = False
     seed: int = 7
     total_tx_power: float = 1.0
+    # PMI feedback source used by the toy RL testbench.
+    # right_singular_vectors keeps the original unquantized-SVD behavior.
+    # type_ii calls dmimo.mimo.quantized_CSI_feedback to reconstruct Type-II PMI.
+    pmi_feedback_mode: str = "right_singular_vectors"
+    type_ii_feedback_architecture: str = "dMIMO_phase2_type_II_CB2"
+    type_ii_nfft: int = 512
+    type_ii_num_ofdm_symbols: int = 14
 
 
 @dataclass
@@ -154,45 +184,45 @@ def normalize_columns_equal_power(precoder: np.ndarray, total_tx_power: float) -
     return out
 
 
+def normalize_pmi_q_vectors(q_vectors: np.ndarray) -> np.ndarray:
+    """Normalize a [num_users, num_tx_antennas] PMI direction matrix."""
+    q_vectors = np.asarray(q_vectors, dtype=np.complex128)
+    norms = np.maximum(np.linalg.norm(q_vectors, axis=1, keepdims=True), 1e-12)
+    return q_vectors / norms
+
+
+def build_zf_precoder_from_q_vectors(q_vectors: np.ndarray, total_tx_power: float) -> np.ndarray:
+    """Build a ZF precoder from one PMI direction per UE."""
+    q_vectors = normalize_pmi_q_vectors(q_vectors)
+    z_matrix = q_vectors.conj()
+    return normalize_columns_equal_power(np.linalg.pinv(z_matrix), total_tx_power)
+
 def build_zf_precoder_from_pmi(
     full_vk_list: list[np.ndarray], streams_per_user: int, total_tx_power: float
 ) -> np.ndarray:
-    selected_rows = []
-    for vk in full_vk_list:
-        selected_rows.append(vk[:, :streams_per_user].conj().T)
-    z_matrix = np.vstack(selected_rows)
-    return normalize_columns_equal_power(np.linalg.pinv(z_matrix), total_tx_power)
+    if streams_per_user != 1:
+        raise ValueError("PMI-only ZF baseline currently assumes one stream per UE.")
+    q_vectors = np.stack([vk[:, 0] for vk in full_vk_list], axis=0)
+    return build_zf_precoder_from_q_vectors(q_vectors, total_tx_power)
 
 
-
-
-def build_slnr_precoder_from_pmi(
-    full_vk_list: list[np.ndarray],
-    streams_per_user: int,
+def build_slnr_precoder_from_q_vectors(
+    q_vectors: np.ndarray,
     total_tx_power: float,
     noise_power: float,
 ) -> np.ndarray:
-    """Build a PMI-only SLNR precoder.
+    """Build a PMI-only SLNR precoder from one PMI direction per UE.
 
-    For each UE k, only the dominant PMI/right-singular-vector direction q_k is
-    used.  The beam direction is obtained from the rank-one SLNR problem
+    For each UE k, only q_k is used. The beam direction is obtained from
 
         max_v |q_k^H v|^2 / (sum_{j != k} |q_j^H v|^2 + sigma_eff^2),
 
     where sigma_eff^2 is the noise power normalized by the equal per-user
-    transmit power.  This keeps the baseline comparable to the ZF-from-PMI
-    baseline: both use only PMI directions, not the full channel matrix.
+    transmit power. This keeps the baseline comparable between unquantized
+    right-singular-vector PMI and quantized Type-II PMI.
     """
-    if streams_per_user != 1:
-        raise ValueError("PMI-only SLNR baseline currently assumes one stream per UE.")
-
-    q_vectors = []
-    for vk in full_vk_list:
-        q = vk[:, 0]
-        q_vectors.append(q / max(np.linalg.norm(q), 1e-12))
-
-    num_users = len(q_vectors)
-    num_tx_antennas = q_vectors[0].size
+    q_vectors = normalize_pmi_q_vectors(q_vectors)
+    num_users, num_tx_antennas = q_vectors.shape
     per_user_tx_power = total_tx_power / max(num_users, 1)
     sigma_eff = noise_power / max(per_user_tx_power, 1e-12)
 
@@ -213,6 +243,140 @@ def build_slnr_precoder_from_pmi(
         directions[:, k] = vk_slnr / max(np.linalg.norm(vk_slnr), 1e-12)
 
     return normalize_columns_equal_power(directions, total_tx_power)
+
+def build_slnr_precoder_from_pmi(
+    full_vk_list: list[np.ndarray],
+    streams_per_user: int,
+    total_tx_power: float,
+    noise_power: float,
+) -> np.ndarray:
+    if streams_per_user != 1:
+        raise ValueError("PMI-only SLNR baseline currently assumes one stream per UE.")
+    q_vectors = np.stack([vk[:, 0] for vk in full_vk_list], axis=0)
+    return build_slnr_precoder_from_q_vectors(q_vectors, total_tx_power, noise_power)
+
+def pmi_features_from_q_vectors(q_vectors: np.ndarray) -> np.ndarray:
+    q_vectors = normalize_pmi_q_vectors(q_vectors)
+    return np.concatenate([np.real(q_vectors).reshape(-1), np.imag(q_vectors).reshape(-1)]).astype(np.float64)
+
+
+def validate_type_ii_feedback_config(cfg: SimConfig) -> None:
+    """Validate the toy-to-Type-II adapter against quantized_CSI_feedback assumptions."""
+    if cfg.num_tx_antennas != 4:
+        raise ValueError("Type-II PMI feedback mode currently requires cfg.num_tx_antennas == 4.")
+    if cfg.num_rx_antennas_per_user != 2:
+        raise ValueError("Type-II PMI feedback mode currently requires cfg.num_rx_antennas_per_user == 2.")
+    if cfg.streams_per_user != 1:
+        raise ValueError("Type-II PMI feedback mode currently supports one stream per UE.")
+    if cfg.type_ii_feedback_architecture != "dMIMO_phase2_type_II_CB2":
+        raise ValueError("The toy Type-II adapter currently targets dMIMO_phase2_type_II_CB2 only.")
+    if cfg.type_ii_nfft != 512:
+        raise ValueError("quantized_CSI_feedback currently hardcodes nfft=512 for Type-II feedback.")
+    if cfg.type_ii_num_ofdm_symbols <= 0:
+        raise ValueError("type_ii_num_ofdm_symbols must be positive.")
+
+
+def make_type_ii_feedback_quantizer(cfg: SimConfig):
+    """Construct the production Type-II PMI feedback layer used by the MU-MIMO pipeline.
+
+    dMIMO_phase2_type_II_CB2 assumes two local BS receive antenna groups before
+    the scheduled UE receive antenna groups. The toy test only has UE channels,
+    so the adapter pads those two pseudo groups and therefore asks the quantizer
+    for cfg.num_users + 2 rank-one PMI streams, then drops the two pseudo streams.
+    """
+    validate_type_ii_feedback_config(cfg)
+
+    return quantized_CSI_feedback(
+        method="5G",
+        codebook_selection_method=None,
+        num_tx_streams=cfg.num_users + 2,
+        architecture=cfg.type_ii_feedback_architecture,
+        rbs_per_subband=4,
+        snrdb=cfg.snr_db,
+    )
+
+
+def toy_channels_to_type_ii_csi(user_channels: np.ndarray, cfg: SimConfig):
+    """Map toy flat UE channels to quantized_CSI_feedback's rank-7 CSI tensor.
+
+    Input user_channels has shape [K, Nrx_per_UE, Nt]. The returned tensor has
+    shape [1, 1, 4 + K*Nrx_per_UE, 1, Nt, num_ofdm_symbols, nfft], matching the
+    MU-MIMO pipeline's [batch, num_rx, rx_ant, num_tx, tx_ant, symbol, subcarrier]
+    convention after scheduled-UE gathering.
+    """
+    validate_type_ii_feedback_config(cfg)
+    import tensorflow as tf
+
+    user_channels = np.asarray(user_channels, dtype=np.complex64)
+    expected_shape = (cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas)
+    if user_channels.shape != expected_shape:
+        raise ValueError(f"Expected user_channels shape {expected_shape}, got {user_channels.shape}.")
+
+    rx_offset = 4
+    total_rx_antennas = rx_offset + cfg.num_users * cfg.num_rx_antennas_per_user
+    csi = np.zeros(
+        (1, 1, total_rx_antennas, 1, cfg.num_tx_antennas, cfg.type_ii_num_ofdm_symbols, cfg.type_ii_nfft),
+        dtype=np.complex64,
+    )
+
+    # Non-zero pseudo BS receive groups keep the production Type-II CB2 path
+    # numerically well-defined. Their resulting PMI streams are discarded below.
+    pseudo_bs = np.zeros((rx_offset, cfg.num_tx_antennas), dtype=np.complex64)
+    pseudo_bs[: cfg.num_tx_antennas, : cfg.num_tx_antennas] = np.eye(cfg.num_tx_antennas, dtype=np.complex64)
+    csi[0, 0, :rx_offset, 0, :, :, :] = pseudo_bs[:, :, None, None]
+
+    for k in range(cfg.num_users):
+        start = rx_offset + k * cfg.num_rx_antennas_per_user
+        stop = start + cfg.num_rx_antennas_per_user
+        csi[0, 0, start:stop, 0, :, :, :] = user_channels[k, :, :, None, None]
+
+    return tf.convert_to_tensor(csi, dtype=tf.complex64)
+
+
+def type_ii_pmi_from_channels(
+    user_channels: np.ndarray,
+    cfg: SimConfig,
+    quantizer,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return Type-II quantized PMI features and q-vectors for one toy slot."""
+    csi = toy_channels_to_type_ii_csi(user_channels, cfg)
+    h_quant, _feedback_bits = quantizer(csi, return_feedback_bits=True)
+    h_quant_np = np.asarray(h_quant.numpy())
+
+    # h_quant: [1, 1, total_streams, 1, Nt, Nsym, Nfft]. Since the toy channel
+    # is frequency-flat in the adapter, one representative RE is enough.
+    all_streams = h_quant_np[0, 0, :, 0, :, 0, 0]
+    real_ue_streams = all_streams[2 : 2 + cfg.num_users, :]
+    q_vectors = normalize_pmi_q_vectors(real_ue_streams)
+    return pmi_features_from_q_vectors(q_vectors), q_vectors
+
+
+def build_pmi_feedback_trace(cfg: SimConfig, channels: np.ndarray) -> dict[str, np.ndarray]:
+    """Build the per-slot PMI trace used consistently by ZF, SLNR, and RL."""
+    mode = cfg.pmi_feedback_mode
+    features: list[np.ndarray] = []
+    q_vectors: list[np.ndarray] = []
+
+    if mode == "right_singular_vectors":
+        for t in range(cfg.num_slots):
+            feat, vk_list = pmi_features_from_channels(channels[t])
+            features.append(feat)
+            q_vectors.append(normalize_pmi_q_vectors(np.stack([vk[:, 0] for vk in vk_list], axis=0)))
+    elif mode == "type_ii":
+        quantizer = make_type_ii_feedback_quantizer(cfg)
+        for t in range(cfg.num_slots):
+            print(f"Type-II PMI Slot {t + 1} / {cfg.num_slots}", end="\r")
+            feat, q = type_ii_pmi_from_channels(channels[t], cfg, quantizer)
+            features.append(feat)
+            q_vectors.append(q)
+        print()
+    else:
+        raise ValueError(f"Unsupported pmi_feedback_mode={mode!r}.")
+
+    return {
+        "features": np.stack(features, axis=0),
+        "q_vectors": np.stack(q_vectors, axis=0),
+    }
 
 def compute_slot_sum_rate(
     user_channels: np.ndarray, precoder: np.ndarray, noise_power: float
@@ -339,7 +503,14 @@ def pmi_features_from_channels(user_channels: np.ndarray) -> tuple[np.ndarray, l
     return np.concatenate(features, axis=0).astype(np.float64), vk_list
 
 
-def simulate_channels(cfg: SimConfig, rng: np.random.Generator) -> np.ndarray:
+
+def simulate_toy_ar1_channels(cfg: SimConfig, rng: np.random.Generator) -> np.ndarray:
+    """Original toy channel: independent coefficients with AR(1) time correlation.
+
+    This is useful as a cheap fallback, but it has no explicit cross-antenna or
+    cross-UE spatial structure.  Each scalar coefficient evolves independently
+    with the same temporal correlation coefficient cfg.temporal_correlation.
+    """
     channels = np.zeros(
         (cfg.num_slots, cfg.num_users, cfg.num_rx_antennas_per_user, cfg.num_tx_antennas),
         dtype=np.complex128,
@@ -356,21 +527,204 @@ def simulate_channels(cfg: SimConfig, rng: np.random.Generator) -> np.ndarray:
     return channels
 
 
-def run_zf_baseline(cfg: SimConfig, channels: np.ndarray) -> dict[str, np.ndarray]:
+def _rough_rectangular_panel_dims(num_antennas: int) -> tuple[int, int]:
+    """Choose a compact rectangular single-polarized panel with >= num_antennas elements."""
+    n = max(1, int(num_antennas))
+    rows = int(np.floor(np.sqrt(n)))
+    rows = max(1, rows)
+    cols = int(np.ceil(n / rows))
+    return rows, cols
+
+
+def _make_sionna_panel_array(num_antennas: int, carrier_frequency_hz: float, is_bs: bool):
+    """Build a simple single-polarized Sionna PanelArray.
+
+    Sionna's PanelArray wants a rectangular panel.  For antenna counts that are
+    not exactly rectangular, we build the nearest larger panel and slice the
+    generated channel down to the requested antenna count afterward.
+    """
+    try:
+        from sionna.channel.tr38901 import PanelArray
+    except ImportError:  # Sionna >= 1/2 namespace
+        from sionna.phy.channel.tr38901 import PanelArray
+
+    rows, cols = _rough_rectangular_panel_dims(num_antennas)
+    pattern = "38.901" if is_bs else "omni"
+    return PanelArray(
+        num_rows_per_panel=rows,
+        num_cols_per_panel=cols,
+        polarization="single",
+        polarization_type="V",
+        antenna_pattern=pattern,
+        carrier_frequency=carrier_frequency_hz,
+    )
+
+
+def _sample_sionna_topology(cfg: SimConfig, rng: np.random.Generator):
+    """Sample one BS and K UE positions/velocities for a Sionna topology."""
+    num_users = cfg.num_users
+    min_r = max(1.0, float(cfg.min_ue_distance_m))
+    max_r = max(min_r + 1.0, float(cfg.cell_radius_m))
+    # Uniform in area over an annulus.
+    radii = np.sqrt(rng.uniform(min_r**2, max_r**2, size=num_users))
+    angles = rng.uniform(-np.pi, np.pi, size=num_users)
+    ut_loc = np.zeros((1, num_users, 3), dtype=np.float32)
+    ut_loc[0, :, 0] = radii * np.cos(angles)
+    ut_loc[0, :, 1] = radii * np.sin(angles)
+    ut_loc[0, :, 2] = float(cfg.ue_height_m)
+
+    bs_loc = np.array([[[0.0, 0.0, float(cfg.bs_height_m)]]], dtype=np.float32)
+    ut_orientations = np.zeros((1, num_users, 3), dtype=np.float32)
+    bs_orientations = np.zeros((1, 1, 3), dtype=np.float32)
+
+    speed_mps = float(cfg.ue_speed_kmh) / 3.6
+    velocity_angles = rng.uniform(-np.pi, np.pi, size=num_users)
+    ut_velocities = np.zeros((1, num_users, 3), dtype=np.float32)
+    ut_velocities[0, :, 0] = speed_mps * np.cos(velocity_angles)
+    ut_velocities[0, :, 1] = speed_mps * np.sin(velocity_angles)
+
+    # Keep all UEs outdoor. This avoids adding another random indoor/O2I state
+    # unless the user explicitly wants to model it later.
+    in_state = np.zeros((1, num_users), dtype=bool)
+    return ut_loc, bs_loc, ut_orientations, bs_orientations, ut_velocities, in_state
+
+
+def simulate_sionna_channels(cfg: SimConfig, rng: np.random.Generator) -> np.ndarray:
+    """Generate flat per-slot MIMO channels from Sionna TR 38.901 models.
+
+    The returned tensor keeps this script's original narrowband interface:
+        [num_slots, num_users, num_rx_antennas_per_user, num_tx_antennas].
+
+    Internally, Sionna generates a time-evolving multipath channel impulse
+    response for a fixed random topology. We convert the CIR to an OFDM channel
+    and use the center subcarrier as the narrowband equivalent for this toy RL
+    testbench.
+    """
+    try:
+        import tensorflow as tf
+        try:
+            from sionna.channel.tr38901 import UMi, UMa, RMa
+            from sionna.channel import subcarrier_frequencies, cir_to_ofdm_channel
+        except ImportError:  # Sionna >= 1/2 namespace
+            from sionna.phy.channel.tr38901 import UMi, UMa, RMa
+            from sionna.phy.channel import subcarrier_frequencies, cir_to_ofdm_channel
+    except ImportError as exc:
+        raise ImportError(
+            "Sionna channel generation requested, but Sionna/TensorFlow could not be imported. "
+            "Install Sionna in this environment or rerun with --channel-model toy_ar1."
+        ) from exc
+
+    tf.random.set_seed(int(cfg.seed))
+    ut_array = _make_sionna_panel_array(
+        cfg.num_rx_antennas_per_user,
+        cfg.carrier_frequency_hz,
+        is_bs=False,
+    )
+    bs_array = _make_sionna_panel_array(
+        cfg.num_tx_antennas,
+        cfg.carrier_frequency_hz,
+        is_bs=True,
+    )
+
+    model_name = cfg.sionna_scenario.lower()
+    if cfg.channel_model.startswith("sionna_"):
+        model_name = cfg.channel_model.split("sionna_", 1)[1].lower()
+    model_cls = {"umi": UMi, "uma": UMa, "rma": RMa}.get(model_name)
+    if model_cls is None:
+        raise ValueError("Sionna channel model must be one of sionna_umi, sionna_uma, or sionna_rma.")
+
+    channel_model = model_cls(
+        carrier_frequency=float(cfg.carrier_frequency_hz),
+        o2i_model=str(cfg.sionna_o2i_model),
+        ut_array=ut_array,
+        bs_array=bs_array,
+        direction="downlink",
+        enable_pathloss=bool(cfg.sionna_enable_pathloss),
+        enable_shadow_fading=bool(cfg.sionna_enable_shadow_fading),
+    )
+
+    topo = _sample_sionna_topology(cfg, rng)
+    ut_loc, bs_loc, ut_orientations, bs_orientations, ut_velocities, in_state = topo
+    try:
+        channel_model.set_topology(
+            ut_loc=tf.constant(ut_loc),
+            bs_loc=tf.constant(bs_loc),
+            ut_orientations=tf.constant(ut_orientations),
+            bs_orientations=tf.constant(bs_orientations),
+            ut_velocities=tf.constant(ut_velocities),
+            in_state=tf.constant(in_state),
+        )
+    except TypeError:
+        # Older Sionna releases used a more positional-friendly signature.
+        channel_model.set_topology(
+            tf.constant(ut_loc),
+            tf.constant(bs_loc),
+            tf.constant(ut_orientations),
+            tf.constant(bs_orientations),
+            tf.constant(ut_velocities),
+            tf.constant(in_state),
+        )
+
+    sampling_frequency = 1.0 / max(float(cfg.slot_duration_s), 1e-12)
+    print(
+        f"Generating Sionna {model_name.upper()} channels: "
+        f"K={cfg.num_users}, Nt={cfg.num_tx_antennas}, "
+        f"Nrx={cfg.num_rx_antennas_per_user}, slots={cfg.num_slots}, "
+        f"fc={cfg.carrier_frequency_hz/1e9:.3f} GHz, speed={cfg.ue_speed_kmh:.2f} km/h"
+    )
+    a, tau = channel_model(
+        num_time_samples=int(cfg.num_slots),
+        sampling_frequency=float(sampling_frequency),
+    )
+
+    # Use a tiny 3-subcarrier grid and select the center RE. This avoids any
+    # ambiguity about whether a one-subcarrier frequency grid is exactly centered
+    # at 0 Hz across Sionna versions.
+    freqs = subcarrier_frequencies(3, float(cfg.subcarrier_spacing_hz))
+    h_freq = cir_to_ofdm_channel(freqs, a, tau, normalize=True)
+    h_np = np.asarray(h_freq.numpy())
+
+    # Expected Sionna shape:
+    # [batch, num_rx/UT, rx_ant, num_tx/BS, tx_ant, num_time_samples, num_subcarriers].
+    if h_np.ndim != 7:
+        raise RuntimeError(f"Unexpected Sionna OFDM channel rank {h_np.ndim}; shape={h_np.shape}")
+    h_center = h_np[0, : cfg.num_users, : cfg.num_rx_antennas_per_user, 0, : cfg.num_tx_antennas, :, 1]
+    channels = np.transpose(h_center, (3, 0, 1, 2)).astype(np.complex128, copy=False)
+    expected_shape = (
+        cfg.num_slots,
+        cfg.num_users,
+        cfg.num_rx_antennas_per_user,
+        cfg.num_tx_antennas,
+    )
+    if channels.shape != expected_shape:
+        raise RuntimeError(f"Unexpected generated channel shape {channels.shape}; expected {expected_shape}.")
+    return channels
+
+
+def simulate_channels(cfg: SimConfig, rng: np.random.Generator) -> np.ndarray:
+    if cfg.channel_model == "toy_ar1":
+        return simulate_toy_ar1_channels(cfg, rng)
+    if cfg.channel_model in {"sionna_umi", "sionna_uma", "sionna_rma"}:
+        return simulate_sionna_channels(cfg, rng)
+    raise ValueError("--channel-model must be one of: toy_ar1, sionna_umi, sionna_uma, sionna_rma.")
+
+
+def run_zf_baseline(
+    cfg: SimConfig, channels: np.ndarray, pmi_feedback: dict[str, np.ndarray] | None = None
+) -> dict[str, np.ndarray]:
     noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     sinr_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
     precoders = np.zeros(
         (cfg.num_slots, cfg.num_tx_antennas, cfg.num_users), dtype=np.complex128
     )
-    pmi_features = []
+    if pmi_feedback is None:
+        pmi_feedback = build_pmi_feedback_trace(cfg, channels)
 
     for t in range(cfg.num_slots):
         print(f"ZF Slot {t + 1} / {cfg.num_slots}", end="\r")
-        feat, vk_list = pmi_features_from_channels(channels[t])
-        pmi_features.append(feat)
-        p_zf = build_zf_precoder_from_pmi(
-            vk_list, cfg.streams_per_user, cfg.total_tx_power
+        p_zf = build_zf_precoder_from_q_vectors(
+            pmi_feedback["q_vectors"][t], cfg.total_tx_power
         )
         throughput[t], sinr_trace[t] = compute_slot_sum_rate(channels[t], p_zf, noise_power)
         precoders[t] = p_zf
@@ -380,12 +734,14 @@ def run_zf_baseline(cfg: SimConfig, channels: np.ndarray) -> dict[str, np.ndarra
         "throughput": throughput,
         "sinr": sinr_trace,
         "precoders": precoders,
-        "pmi_features": np.stack(pmi_features, axis=0),
+        "pmi_features": pmi_feedback["features"],
     }
 
 
 
-def run_slnr_baseline(cfg: SimConfig, channels: np.ndarray) -> dict[str, np.ndarray]:
+def run_slnr_baseline(
+    cfg: SimConfig, channels: np.ndarray, pmi_feedback: dict[str, np.ndarray] | None = None
+) -> dict[str, np.ndarray]:
     """Run a PMI-only SLNR precoding baseline.
 
     This baseline uses the same PMI/right-singular-vector feedback as the ZF
@@ -398,11 +754,13 @@ def run_slnr_baseline(cfg: SimConfig, channels: np.ndarray) -> dict[str, np.ndar
         (cfg.num_slots, cfg.num_tx_antennas, cfg.num_users), dtype=np.complex128
     )
 
+    if pmi_feedback is None:
+        pmi_feedback = build_pmi_feedback_trace(cfg, channels)
+
     for t in range(cfg.num_slots):
         print(f"SLNR Slot {t + 1} / {cfg.num_slots}", end="\r")
-        _, vk_list = pmi_features_from_channels(channels[t])
-        p_slnr = build_slnr_precoder_from_pmi(
-            vk_list, cfg.streams_per_user, cfg.total_tx_power, noise_power
+        p_slnr = build_slnr_precoder_from_q_vectors(
+            pmi_feedback["q_vectors"][t], cfg.total_tx_power, noise_power
         )
         throughput[t], sinr_trace[t] = compute_slot_sum_rate(channels[t], p_slnr, noise_power)
         precoders[t] = p_slnr
@@ -590,6 +948,126 @@ def pmi_proxy_sum_rate_from_theta_phi(
     proxy_sinr = compute_pmi_sinr_proxy_from_precoder(q_vectors, beams, noise_power, eps=eps)
     return float(np.sum(np.log1p(proxy_sinr)))
 
+
+
+def pmi_proxy_signal_leakage_from_theta_phi(
+    q_vectors: np.ndarray,
+    theta_phi: np.ndarray,
+    total_tx_power: float,
+    noise_power: float,
+    eps: float = 1e-12,
+) -> tuple[float, float, float]:
+    """Return PMI-only (proxy-rate, desired-signal, leakage) for angle coordinates.
+
+    The signal term is sum_k |q_k^H p_k|^2. The leakage term is
+    sum_k sum_{j != k} |q_j^H p_k|^2, i.e., leakage created by each transmit
+    beam into the other PMI directions. These are used only to construct
+    causal search directions in the PMI-span angle coordinates; the executed
+    RL reward still uses the true channel sum-rate.
+    """
+    num_users = q_vectors.shape[0]
+    num_tx_antennas = q_vectors.shape[1]
+    tp = np.asarray(theta_phi, dtype=np.float64).reshape(num_users, 2)
+    beams = np.zeros((num_tx_antennas, num_users), dtype=np.complex128)
+    for k in range(num_users):
+        beam_k = user_centered_pmi_span_beam_from_theta_phi(
+            q_vectors=q_vectors,
+            user_index=k,
+            theta=float(tp[k, 0]),
+            phi=float(tp[k, 1]),
+        )
+        beams[:, k] = np.sqrt(total_tx_power / max(num_users, 1)) * beam_k
+
+    signal_sum = 0.0
+    leakage_sum = 0.0
+    for tx_k in range(num_users):
+        signal_sum += float(np.abs(np.vdot(q_vectors[tx_k], beams[:, tx_k])) ** 2)
+        for rx_j in range(num_users):
+            if rx_j != tx_k:
+                leakage_sum += float(np.abs(np.vdot(q_vectors[rx_j], beams[:, tx_k])) ** 2)
+
+    proxy_sinr = compute_pmi_sinr_proxy_from_precoder(q_vectors, beams, noise_power, eps=eps)
+    proxy_rate = float(np.sum(np.log1p(proxy_sinr)))
+    return proxy_rate, float(signal_sum), float(leakage_sum)
+
+
+def finite_difference_angle_gradient_direction(
+    objective_fn,
+    center_theta_phi: np.ndarray,
+    theta_max: float,
+    eps: float = 1e-12,
+    sign: float = 1.0,
+    fd_step_theta: float = 1e-4,
+    fd_step_phi: float = 1e-4,
+) -> np.ndarray:
+    """Finite-difference normalized direction in [theta0, phi0, theta1, phi1]."""
+    num_users = center_theta_phi.shape[0]
+    flat = np.asarray(center_theta_phi, dtype=np.float64).reshape(-1)
+    grad = np.zeros_like(flat)
+    for i in range(flat.size):
+        delta = fd_step_theta if (i % 2 == 0) else fd_step_phi
+        step = np.zeros_like(flat)
+        step[i] = delta
+        plus = apply_angle_step_from_flat(flat, step, num_users, theta_max)
+        minus = apply_angle_step_from_flat(flat, -step, num_users, theta_max)
+        grad[i] = (float(objective_fn(plus)) - float(objective_fn(minus))) / max(2.0 * delta, eps)
+    grad = float(sign) * grad
+    nrm = float(np.linalg.norm(grad))
+    if nrm < eps or not np.all(np.isfinite(grad)):
+        return np.zeros_like(flat)
+    return grad / nrm
+
+
+def pmi_proxy_direction_dictionary_theta_phi(
+    q_vectors: np.ndarray,
+    center_theta_phi: np.ndarray,
+    total_tx_power: float,
+    noise_power: float,
+    theta_max: float,
+    eps: float = 1e-12,
+) -> tuple[np.ndarray, list[str]]:
+    """Build the angle-space direction dictionary used by the multi-direction policy.
+
+    Directions are:
+      0) proxy-rate ascent:        +grad R_PMI
+      1) leakage-reduction:        -grad L_PMI
+      2) desired-signal increase:  +grad S_PMI
+    All directions are normalized in the 4D physical angle coordinate vector.
+    """
+    def rate_obj(tp: np.ndarray) -> float:
+        r, _, _ = pmi_proxy_signal_leakage_from_theta_phi(
+            q_vectors=q_vectors,
+            theta_phi=tp,
+            total_tx_power=total_tx_power,
+            noise_power=noise_power,
+            eps=eps,
+        )
+        return r
+
+    def signal_obj(tp: np.ndarray) -> float:
+        _, s, _ = pmi_proxy_signal_leakage_from_theta_phi(
+            q_vectors=q_vectors,
+            theta_phi=tp,
+            total_tx_power=total_tx_power,
+            noise_power=noise_power,
+            eps=eps,
+        )
+        return s
+
+    def leakage_obj(tp: np.ndarray) -> float:
+        _, _, ell = pmi_proxy_signal_leakage_from_theta_phi(
+            q_vectors=q_vectors,
+            theta_phi=tp,
+            total_tx_power=total_tx_power,
+            noise_power=noise_power,
+            eps=eps,
+        )
+        return ell
+
+    d_rate = finite_difference_angle_gradient_direction(rate_obj, center_theta_phi, theta_max, eps=eps, sign=1.0)
+    d_leak = finite_difference_angle_gradient_direction(leakage_obj, center_theta_phi, theta_max, eps=eps, sign=-1.0)
+    d_sig = finite_difference_angle_gradient_direction(signal_obj, center_theta_phi, theta_max, eps=eps, sign=1.0)
+    return np.stack([d_rate, d_leak, d_sig], axis=0), ["proxy-rate", "leakage-reducing", "signal-increasing"]
 
 def apply_angle_step_from_flat(
     center_flat: np.ndarray,
@@ -1728,6 +2206,47 @@ def gaussian_raw_log_prob_torch(
     return torch.sum(log_probs, dim=-1)
 
 
+
+def tangent_projected_direction_real(
+    center: np.ndarray,
+    gradient: np.ndarray,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Project a Euclidean beam gradient onto the unit-sphere tangent space."""
+    x = unit_norm(np.asarray(center, dtype=np.float64))
+    g = np.asarray(gradient, dtype=np.float64)
+    g_tangent = g - x * float(np.dot(x, g))
+    nrm = float(np.linalg.norm(g_tangent))
+    if nrm < eps or not np.all(np.isfinite(g_tangent)):
+        return np.zeros_like(x)
+    return g_tangent / nrm
+
+
+def pmi_proxy_direction_dictionary_real(
+    center_real: np.ndarray,
+    signal_mat: np.ndarray,
+    leakage_mat: np.ndarray,
+    eps: float = 1e-12,
+) -> tuple[np.ndarray, list[str]]:
+    """Beam-space directions around an SLNR center that work for arbitrary K.
+
+    The old PMI-span policy used a two-angle coordinate system that only exists
+    cleanly for K=2, because each UE had exactly one "other UE" PMI direction.
+    This replacement stays in the real-packed beam space [Re{v}, Im{v}] and
+    therefore works for any number of UEs.
+
+    Directions:
+      0) proxy-rate: approximately increases desired PMI gain and reduces leakage.
+      1) leakage-reducing: negative tangent gradient of x^T L x.
+      2) signal-increasing: positive tangent gradient of x^T G x.
+    """
+    x = unit_norm(center_real)
+    d_leak = tangent_projected_direction_real(x, -(leakage_mat @ x), eps=eps)
+    d_sig = tangent_projected_direction_real(x, signal_mat @ x, eps=eps)
+    d_rate = unit_norm(d_sig + d_leak) if np.linalg.norm(d_sig + d_leak) >= eps else np.zeros_like(x)
+    return np.stack([d_rate, d_leak, d_sig], axis=0), ["proxy-rate", "leakage-reducing", "signal-increasing"]
+
+
 def run_wesn_policy_rl(
     cfg: SimConfig,
     rl_cfg: RLConfig,
@@ -1735,43 +2254,53 @@ def run_wesn_policy_rl(
     zf_baseline: dict[str, np.ndarray],
     slnr_baseline: dict[str, np.ndarray],
     rng: np.random.Generator,
+    pmi_feedback: dict[str, np.ndarray] | None = None,
+    policy_variant: str = "single_direction",
 ) -> dict[str, np.ndarray]:
-    """Run a structured 4D diagonal discrete-alpha policy in PMI-span angle space.
+    """Run an arbitrary-K SLNR-centered discrete alpha-step policy.
 
-    The center is the current PMI-SLNR precoder converted to [theta, phi]
-    coordinates.  A causal PMI-only proxy-rate gradient supplies a 4D direction
-    d_t at that center.  The WESN outputs categorical logits over a fixed set
-    of alpha levels for each coordinate.  The executed angles are
+    This replaces the old K=2 PMI-span angle policy.  For each UE k, the policy
+    starts from the current PMI-SLNR beam v_k^SLNR and chooses a discrete alpha
+    level, and optionally a direction, in the real-packed beam tangent space:
 
-        x_t = x_SLNR,t + (alpha_max * alpha_level) ⊙ d_t,
+        x_k(alpha,d) = normalize(x_k^SLNR + alpha_step * alpha * d_k),
 
-    with theta clipped and phi wrapped.  REINFORCE uses the summed
-    log-probability of the four selected alpha levels.
+    where d_k is one of the PMI-only proxy directions computed from the current
+    PMI vectors.  Because this construction only needs per-UE signal/leakage
+    matrices, it supports any cfg.num_users.
     """
-    if cfg.num_users != 2:
-        raise ValueError("The 4D diagonal Gaussian PMI-span policy currently assumes K=2.")
-
     noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
     k = cfg.num_users
     d = 2 * cfg.num_tx_antennas
-    action_dim = 2 * k
+    action_dim = k
     alpha_levels_np = np.array(rl_cfg.alpha_level_grid, dtype=np.float64)
     num_alpha_levels = int(alpha_levels_np.size)
     if num_alpha_levels < 2:
         raise ValueError("alpha_level_grid must contain at least two levels.")
     zero_level_index = int(np.argmin(np.abs(alpha_levels_np)))
-    alpha_levels_torch = torch.tensor(alpha_levels_np, dtype=torch.float64)
-    per_user_tx_power = cfg.total_tx_power / max(k, 1)
-    slnr_noise_power = noise_power / max(per_user_tx_power, rl_cfg.reward_sinr_eps)
+
+    if pmi_feedback is None:
+        pmi_feedback = build_pmi_feedback_trace(cfg, channels)
 
     wesn_states = compute_wesn_states(zf_baseline["pmi_features"], rl_cfg, rng)
     state_dim = wesn_states.shape[1]
 
-    # W_out now learns categorical logits over discrete alpha levels for each
-    # of the 4 coordinates.  The action is not an arbitrary angle residual; it
-    # chooses coordinate-wise step multipliers along a causal PMI-proxy-rate
-    # gradient direction evaluated at the current PMI-SLNR angle center.
-    num_logits = action_dim * num_alpha_levels
+    if policy_variant not in {"single_direction", "two_direction", "multi_direction"}:
+        raise ValueError("policy_variant must be one of: 'single_direction', 'two_direction', or 'multi_direction'.")
+
+    if policy_variant == "single_direction":
+        direction_names = ["proxy-rate"]
+        direction_selector = [0]
+    elif policy_variant == "two_direction":
+        direction_names = ["leakage-reducing", "signal-increasing"]
+        direction_selector = [1, 2]
+    else:
+        direction_names = ["proxy-rate", "leakage-reducing", "signal-increasing"]
+        direction_selector = [0, 1, 2]
+    num_directions = len(direction_names)
+    num_action_choices = num_alpha_levels if num_directions == 1 else num_directions * num_alpha_levels
+
+    num_logits = action_dim * num_action_choices
     w_out_init = rl_cfg.init_scale_out * rng.standard_normal((num_logits, state_dim))
     w_out = torch.nn.Parameter(torch.tensor(w_out_init, dtype=torch.float64))
 
@@ -1794,14 +2323,8 @@ def run_wesn_policy_rl(
             "on-policy REINFORCE. Keep --best-of-n 1 for now."
         )
 
-    alpha_max_np = np.tile(
-        np.array([rl_cfg.alpha_step_max_theta, rl_cfg.alpha_step_max_phi], dtype=np.float64),
-        k,
-    )
-    # Each UE has two independent categorical alpha choices: theta and phi.
-    # Store the entropy per UE as the sum of the two coordinate entropies.
-    uniform_alpha_entropy_per_coord = float(np.log(num_alpha_levels))
-    categorical_entropy_per_user = 2.0 * uniform_alpha_entropy_per_coord
+    alpha_step_scale = float(rl_cfg.alpha_step_max_theta)
+    uniform_alpha_entropy_per_user = float(np.log(num_alpha_levels))
 
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     reward_trace = np.zeros(cfg.num_slots, dtype=np.float64)
@@ -1833,7 +2356,7 @@ def run_wesn_policy_rl(
     best_of_n_selected_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     empirical_mean_norm_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     centered_update_norm_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
-    candidate_entropy_trace = np.full((cfg.num_slots, k), categorical_entropy_per_user, dtype=np.float64)
+    candidate_entropy_trace = np.full((cfg.num_slots, k), uniform_alpha_entropy_per_user, dtype=np.float64)
     candidate_entropy_norm_trace = np.ones((cfg.num_slots, k), dtype=np.float64)
     candidate_effective_count_trace = np.ones((cfg.num_slots, k), dtype=np.float64)
     candidate_selected_score_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
@@ -1857,17 +2380,12 @@ def run_wesn_policy_rl(
     selected_learned_branch_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     selected_dk_branch_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     mixture_logit_trace = np.zeros(cfg.num_slots, dtype=np.float64)
-
-    # Explicit discrete-alpha diagnostics.  The selected/mean alpha traces use
-    # the dimensionless alpha levels in rl_cfg.alpha_level_grid, not the
-    # physical angle steps.  alpha_prob_trace stores the full categorical
-    # probability vector for each coordinate [theta0, phi0, theta1, phi1].
     selected_alpha_level_trace = np.zeros((cfg.num_slots, action_dim), dtype=np.float64)
     mean_alpha_level_trace = np.zeros((cfg.num_slots, action_dim), dtype=np.float64)
     alpha_prob_trace = np.zeros((cfg.num_slots, action_dim, num_alpha_levels), dtype=np.float64)
+    selected_direction_trace = np.zeros((cfg.num_slots, action_dim), dtype=np.int64)
+    direction_prob_trace = np.zeros((cfg.num_slots, action_dim, num_directions), dtype=np.float64)
 
-    # No moving-average advantage baseline: the policy-gradient weight is the
-    # instantaneous reward itself (optionally clipped by advantage_clip).
     batch_s: list[np.ndarray] = []
     batch_alpha_indices: list[np.ndarray] = []
     batch_branch_is_learned: list[float] = []
@@ -1884,18 +2402,22 @@ def run_wesn_policy_rl(
         branch_is_learned_batch = torch.tensor(np.array(batch_branch_is_learned), dtype=torch.float64)
         adv_batch = torch.tensor(np.array(batch_adv), dtype=torch.float64)
 
-        alpha_logits_batch = torch.einsum("ln,bn->bl", w_out, s_batch).reshape(
-            -1, action_dim, num_alpha_levels
+        choice_logits_batch = torch.einsum("ln,bn->bl", w_out, s_batch).reshape(
+            -1, action_dim, num_action_choices
         )
         if rl_cfg.alpha_zero_logit_bias != 0.0:
-            zero_prior = torch.zeros_like(alpha_logits_batch)
-            zero_prior[:, :, zero_level_index] = float(rl_cfg.alpha_zero_logit_bias)
-            alpha_logits_batch = alpha_logits_batch + zero_prior
-        alpha_log_probs_batch = torch.log_softmax(
-            alpha_logits_batch / max(float(rl_cfg.candidate_temperature), 1e-12), dim=-1
+            zero_prior = torch.zeros_like(choice_logits_batch)
+            if num_directions == 1:
+                zero_prior[:, :, zero_level_index] = float(rl_cfg.alpha_zero_logit_bias)
+            else:
+                for dir_idx in range(num_directions):
+                    zero_prior[:, :, dir_idx * num_alpha_levels + zero_level_index] = float(rl_cfg.alpha_zero_logit_bias)
+            choice_logits_batch = choice_logits_batch + zero_prior
+        choice_log_probs_batch = torch.log_softmax(
+            choice_logits_batch / max(float(rl_cfg.candidate_temperature), 1e-12), dim=-1
         )
         learned_branch_log_prob = torch.gather(
-            alpha_log_probs_batch, dim=-1, index=alpha_index_batch.unsqueeze(-1)
+            choice_log_probs_batch, dim=-1, index=alpha_index_batch.unsqueeze(-1)
         ).squeeze(-1).sum(dim=-1)
 
         p_learned = torch.sigmoid(mixture_logit)
@@ -1904,7 +2426,6 @@ def run_wesn_policy_rl(
         branch_log_prob = branch_is_learned_batch * log_p_learned + (1.0 - branch_is_learned_batch) * log_p_dk
         joint_log_prob = branch_log_prob + branch_is_learned_batch * learned_branch_log_prob
         rl_loss = -torch.mean(adv_batch * joint_log_prob)
-        joint_pmi_aux_loss = torch.zeros((), dtype=torch.float64)
         loss = rl_loss
 
         optimizer.zero_grad()
@@ -1932,8 +2453,7 @@ def run_wesn_policy_rl(
         s = wesn_states[t]
         s_t = torch.tensor(s, dtype=torch.float64)
 
-        q_vectors = pmi_dominant_vectors_from_channels(channels[t])
-
+        q_vectors = pmi_feedback["q_vectors"][t]
         signal_mats, leakage_mats = build_pmi_signal_and_leakage_matrices_real(q_vectors)
 
         zf_rate = float(zf_baseline["throughput"][t])
@@ -1949,33 +2469,40 @@ def run_wesn_policy_rl(
             q_vectors, slnr_precoder_t, noise_power, eps=rl_cfg.reward_sinr_eps
         )
 
-        center_theta_phi = pmi_slnr_theta_phi_center(
-            q_vectors=q_vectors,
-            slnr_precoder=slnr_precoder_t,
-            theta_max=rl_cfg.pmi_span_theta_max,
-            eps=rl_cfg.leakage_norm_eps,
-        )
-        # Causal direction in physical [theta0, phi0, theta1, phi1] space:
-        # normalized PMI-only proxy-rate gradient at the SLNR angle center.
-        angle_direction_np = pmi_proxy_rate_gradient_direction_theta_phi(
-            q_vectors=q_vectors,
-            center_theta_phi=center_theta_phi,
-            total_tx_power=cfg.total_tx_power,
-            noise_power=noise_power,
-            theta_max=rl_cfg.pmi_span_theta_max,
-            eps=rl_cfg.reward_sinr_eps,
-        )
-        center_flat_np = center_theta_phi.reshape(-1)
-        with torch.no_grad():
-            alpha_logits_t = torch.einsum("ln,n->l", w_out, s_t).reshape(action_dim, num_alpha_levels)
-            if rl_cfg.alpha_zero_logit_bias != 0.0:
-                alpha_logits_t[:, zero_level_index] += float(rl_cfg.alpha_zero_logit_bias)
-            alpha_log_probs_t = torch.log_softmax(
-                alpha_logits_t / max(float(rl_cfg.candidate_temperature), 1e-12), dim=-1
+        center_real = np.stack([complex_unit_to_real(slnr_precoder_t[:, ku]) for ku in range(k)], axis=0)
+        all_dirs = np.zeros((k, 3, d), dtype=np.float64)
+        for ku in range(k):
+            dirs_ku, _ = pmi_proxy_direction_dictionary_real(
+                center_real=center_real[ku],
+                signal_mat=signal_mats[ku],
+                leakage_mat=leakage_mats[ku],
+                eps=rl_cfg.leakage_norm_eps,
             )
-            alpha_probs_np = torch.exp(alpha_log_probs_t).detach().cpu().numpy()
-            alpha_logits_np = alpha_logits_t.detach().cpu().numpy()
-            alpha_mean_level_np = alpha_probs_np @ alpha_levels_np
+            all_dirs[ku] = dirs_ku
+        angle_directions_np = all_dirs[:, direction_selector, :]
+
+        with torch.no_grad():
+            choice_logits_t = torch.einsum("ln,n->l", w_out, s_t).reshape(action_dim, num_action_choices)
+            if rl_cfg.alpha_zero_logit_bias != 0.0:
+                if num_directions == 1:
+                    choice_logits_t[:, zero_level_index] += float(rl_cfg.alpha_zero_logit_bias)
+                else:
+                    for dir_idx in range(num_directions):
+                        choice_logits_t[:, dir_idx * num_alpha_levels + zero_level_index] += float(rl_cfg.alpha_zero_logit_bias)
+            choice_log_probs_t = torch.log_softmax(
+                choice_logits_t / max(float(rl_cfg.candidate_temperature), 1e-12), dim=-1
+            )
+            choice_probs_np = torch.exp(choice_log_probs_t).detach().cpu().numpy()
+            choice_logits_np = choice_logits_t.detach().cpu().numpy()
+            if num_directions == 1:
+                alpha_probs_np = choice_probs_np
+                direction_probs_np = np.ones((action_dim, 1), dtype=np.float64)
+                alpha_mean_level_np = alpha_probs_np @ alpha_levels_np
+            else:
+                pair_probs_np = choice_probs_np.reshape(action_dim, num_directions, num_alpha_levels)
+                alpha_probs_np = pair_probs_np.sum(axis=1)
+                direction_probs_np = pair_probs_np.sum(axis=2)
+                alpha_mean_level_np = alpha_probs_np @ alpha_levels_np
 
         if rl_cfg.reward_reference == "slnr":
             ref_rate = slnr_rate
@@ -1998,25 +2525,17 @@ def run_wesn_policy_rl(
         mixture_logit_trace[t] = float(mixture_logit.detach().cpu().item())
 
         if slot_from_learned:
-            selected_alpha_indices = np.array([
-                int(rng.choice(num_alpha_levels, p=alpha_probs_np[i]))
+            selected_choice_indices = np.array([
+                int(rng.choice(num_action_choices, p=choice_probs_np[i]))
                 for i in range(action_dim)
             ], dtype=np.int64)
+            if num_directions == 1:
+                selected_direction_indices = np.zeros(action_dim, dtype=np.int64)
+                selected_alpha_indices = selected_choice_indices.copy()
+            else:
+                selected_direction_indices = selected_choice_indices // num_alpha_levels
+                selected_alpha_indices = selected_choice_indices % num_alpha_levels
             selected_alpha_levels = alpha_levels_np[selected_alpha_indices]
-            alpha_action = alpha_max_np * selected_alpha_levels
-            alpha_mean = alpha_max_np * alpha_mean_level_np
-            theta_phi = apply_angle_step_from_flat(
-                center_flat_np,
-                alpha_action * angle_direction_np,
-                num_users=k,
-                theta_max=rl_cfg.pmi_span_theta_max,
-            )
-            mean_theta_phi = apply_angle_step_from_flat(
-                center_flat_np,
-                alpha_mean * angle_direction_np,
-                num_users=k,
-                theta_max=rl_cfg.pmi_span_theta_max,
-            )
 
             beams = np.zeros((cfg.num_tx_antennas, k), dtype=np.complex128)
             x_sample = np.zeros((k, d), dtype=np.float64)
@@ -2024,20 +2543,18 @@ def run_wesn_policy_rl(
             signal = np.zeros(k, dtype=np.float64)
             leakage = np.zeros(k, dtype=np.float64)
             for ku in range(k):
-                beam_k = user_centered_pmi_span_beam_from_theta_phi(
-                    q_vectors=q_vectors,
-                    user_index=ku,
-                    theta=float(theta_phi[ku, 0]),
-                    phi=float(theta_phi[ku, 1]),
-                )
-                mean_beam_k = user_centered_pmi_span_beam_from_theta_phi(
-                    q_vectors=q_vectors,
-                    user_index=ku,
-                    theta=float(mean_theta_phi[ku, 0]),
-                    phi=float(mean_theta_phi[ku, 1]),
-                )
-                x_sample[ku] = complex_unit_to_real(beam_k)
-                mean_x_sample[ku] = complex_unit_to_real(mean_beam_k)
+                selected_dir = angle_directions_np[ku, selected_direction_indices[ku]]
+                x_sample[ku] = unit_norm(center_real[ku] + alpha_step_scale * selected_alpha_levels[ku] * selected_dir)
+
+                if num_directions == 1:
+                    mean_dir_step = alpha_step_scale * alpha_mean_level_np[ku] * angle_directions_np[ku, 0]
+                else:
+                    mean_dir_step = np.zeros(d, dtype=np.float64)
+                    pair_probs_i = choice_probs_np[ku].reshape(num_directions, num_alpha_levels)
+                    for dir_idx in range(num_directions):
+                        for alpha_idx, alpha_level in enumerate(alpha_levels_np):
+                            mean_dir_step += pair_probs_i[dir_idx, alpha_idx] * alpha_step_scale * alpha_level * angle_directions_np[ku, dir_idx]
+                mean_x_sample[ku] = unit_norm(center_real[ku] + mean_dir_step)
                 beams[:, ku] = real_to_complex_beam(x_sample[ku], cfg.total_tx_power, k)
                 signal[ku] = raw_quadratic_score(x_sample[ku], signal_mats[ku])
                 leakage[ku] = raw_quadratic_score(x_sample[ku], leakage_mats[ku])
@@ -2064,14 +2581,14 @@ def run_wesn_policy_rl(
                 bonus_power=rl_cfg.positive_rate_bonus_power,
             )
             emp_mean_sample = mean_x_sample
-            selected_theta_phi = theta_phi
             best_score = reward
-            alpha_indices_for_training = selected_alpha_indices
+            alpha_indices_for_training = selected_choice_indices
             selected_alpha_for_trace = selected_alpha_levels
             mean_alpha_for_trace = alpha_mean_level_np
+            selected_direction_for_trace = selected_direction_indices
         else:
             beams = slnr_precoder_t.copy()
-            x_sample = np.stack([complex_unit_to_real(slnr_precoder_t[:, ku]) for ku in range(k)], axis=0)
+            x_sample = center_real.copy()
             signal = np.zeros(k, dtype=np.float64)
             leakage = np.zeros(k, dtype=np.float64)
             for ku in range(k):
@@ -2098,50 +2615,37 @@ def run_wesn_policy_rl(
                 bonus_power=rl_cfg.positive_rate_bonus_power,
             )
             emp_mean_sample = x_sample.copy()
-            selected_theta_phi = np.zeros((k, 2), dtype=np.float64)
             best_score = reward
             alpha_indices_for_training = np.full(action_dim, zero_level_index, dtype=np.int64)
             selected_alpha_for_trace = np.zeros(action_dim, dtype=np.float64)
             mean_alpha_for_trace = alpha_mean_level_np
+            selected_direction_for_trace = np.zeros(action_dim, dtype=np.int64)
 
         selected_alpha_level_trace[t] = np.asarray(selected_alpha_for_trace, dtype=np.float64).reshape(-1)
         mean_alpha_level_trace[t] = np.asarray(mean_alpha_for_trace, dtype=np.float64).reshape(-1)
         alpha_prob_trace[t] = alpha_probs_np
+        selected_direction_trace[t] = np.asarray(selected_direction_for_trace, dtype=np.int64).reshape(-1)
+        direction_prob_trace[t] = direction_probs_np
 
         signal_trace[t] = signal
         leakage_trace[t] = leakage
         empirical_mean_norm_trace[t] = np.linalg.norm(emp_mean_sample, axis=1)
         centered_update_norm_trace[t] = np.linalg.norm(x_sample - emp_mean_sample, axis=1)
-        pmi_span_selected_theta_trace[t] = selected_theta_phi[:, 0]
-        pmi_span_selected_phi_trace[t] = selected_theta_phi[:, 1]
-        pmi_center_theta_trace[t] = center_theta_phi[:, 0]
-        pmi_center_phi_trace[t] = center_theta_phi[:, 1]
-        pmi_mean_theta_trace[t] = mean_theta_phi[:, 0]
-        pmi_mean_phi_trace[t] = mean_theta_phi[:, 1]
-        selected_alpha_2d = np.asarray(selected_alpha_for_trace, dtype=np.float64).reshape(k, 2)
-        mean_alpha_2d = np.asarray(mean_alpha_for_trace, dtype=np.float64).reshape(k, 2)
-        candidate_selected_score_trace[t] = selected_alpha_2d[:, 0]
-        candidate_mean_score_trace[t] = mean_alpha_2d[:, 0]
-        candidate_selected_minus_mean_score_trace[t] = selected_alpha_2d[:, 0] - mean_alpha_2d[:, 0]
-        candidate_phase_score_mean_trace[t] = mean_alpha_2d[:, 1]
-        candidate_phase_score_std_trace[t] = selected_alpha_2d[:, 1]
-        candidate_slnr_score_mean_trace[t] = mean_alpha_2d[:, 0]
-        candidate_slnr_score_std_trace[t] = selected_alpha_2d[:, 0]
+        candidate_selected_score_trace[t] = selected_alpha_for_trace
+        candidate_mean_score_trace[t] = mean_alpha_for_trace
+        candidate_selected_minus_mean_score_trace[t] = selected_alpha_for_trace - mean_alpha_for_trace
+        candidate_phase_score_mean_trace[t] = mean_alpha_for_trace
+        candidate_phase_score_std_trace[t] = selected_alpha_for_trace
+        candidate_slnr_score_mean_trace[t] = mean_alpha_for_trace
+        candidate_slnr_score_std_trace[t] = selected_alpha_for_trace
 
-        # Categorical-alpha diagnostics: entropy/effective count per UE, summing
-        # over theta/phi coordinates for entropy and averaging effective counts.
-        ent_per_coord = -np.sum(alpha_probs_np * np.log(np.maximum(alpha_probs_np, 1e-12)), axis=1)
-        eff_per_coord = 1.0 / np.maximum(np.sum(alpha_probs_np**2, axis=1), 1e-12)
-        ent_2d = ent_per_coord.reshape(k, 2)
-        eff_2d = eff_per_coord.reshape(k, 2)
-        candidate_entropy_trace[t] = np.sum(ent_2d, axis=1)
-        candidate_entropy_norm_trace[t] = np.sum(ent_2d, axis=1) / max(2.0 * np.log(num_alpha_levels), 1e-12)
-        candidate_effective_count_trace[t] = np.mean(eff_2d, axis=1)
-        candidate_policy_score_std_trace[t] = np.std(alpha_logits_np.reshape(k, 2, num_alpha_levels), axis=-1).mean(axis=1)
+        ent_per_user = -np.sum(alpha_probs_np * np.log(np.maximum(alpha_probs_np, 1e-12)), axis=1)
+        eff_per_user = 1.0 / np.maximum(np.sum(alpha_probs_np**2, axis=1), 1e-12)
+        candidate_entropy_trace[t] = ent_per_user
+        candidate_entropy_norm_trace[t] = ent_per_user / max(np.log(num_alpha_levels), 1e-12)
+        candidate_effective_count_trace[t] = eff_per_user
+        candidate_policy_score_std_trace[t] = np.std(choice_logits_np.reshape(k, num_action_choices), axis=-1)
 
-        # No moving-average baseline is subtracted.  The REINFORCE weight is
-        # the instantaneous reward relative to the selected reference baseline
-        # (ZF or SLNR), optionally clipped for numerical stability.
         advantage = float(reward)
         if rl_cfg.advantage_clip > 0:
             advantage = float(np.clip(advantage, -rl_cfg.advantage_clip, rl_cfg.advantage_clip))
@@ -2235,16 +2739,37 @@ def run_wesn_policy_rl(
         "selected_alpha_level": selected_alpha_level_trace,
         "mean_alpha_level": mean_alpha_level_trace,
         "alpha_prob": alpha_prob_trace,
+        "selected_direction": selected_direction_trace,
+        "direction_prob": direction_prob_trace,
+        "direction_names": np.array(direction_names, dtype=object),
         "alpha_levels": alpha_levels_np,
+        "policy_variant": policy_variant,
         "wesn_states": wesn_states,
     }
-
 
 def moving_average(trace: np.ndarray, window_len: int) -> np.ndarray:
     if window_len <= 1 or window_len > trace.size:
         return trace.copy()
     kernel = np.ones(window_len, dtype=np.float64) / window_len
     return np.convolve(trace, kernel, mode="valid")
+
+
+
+def make_action_coord_labels(num_coords: int) -> list[str]:
+    """Labels for arbitrary-K per-UE alpha/action coordinates."""
+    return [f"UE {i}" for i in range(int(num_coords))]
+
+
+def subplot_grid(num_items: int) -> tuple[int, int]:
+    """Return a compact subplot grid for a dynamic number of items."""
+    num_items = max(1, int(num_items))
+    ncols = min(3, num_items)
+    nrows = int(np.ceil(num_items / ncols))
+    return nrows, ncols
+
+
+def safe_action_name(index: int) -> str:
+    return f"ue{int(index)}"
 
 
 def save_plots(
@@ -2255,6 +2780,7 @@ def save_plots(
     output_dir: Path,
     window_len: int,
 ) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
     rl_throughput = rl_results["throughput"]
     reward = rl_results["reward"]
     beat_zf = rl_results["beat_zf"]
@@ -2538,13 +3064,15 @@ def save_plots(
     #    alpha levels evolves over time for each coordinate.
     # ------------------------------------------------------------------
     if selected_alpha_level is not None and alpha_levels is not None:
-        coord_labels = [r"$\theta_0$", r"$\phi_0$", r"$\theta_1$", r"$\phi_1$"]
         alpha_levels_arr = np.asarray(alpha_levels, dtype=np.float64)
         selected_alpha_arr = np.asarray(selected_alpha_level, dtype=np.float64)
+        coord_labels = make_action_coord_labels(selected_alpha_arr.shape[1])
+        nrows, ncols = subplot_grid(selected_alpha_arr.shape[1])
 
-        fig_alpha_hist, axes_alpha_hist = plt.subplots(2, 2, figsize=(9, 6), sharey=True)
-        axes_alpha_hist = axes_alpha_hist.reshape(-1)
-        for coord_idx, ax in enumerate(axes_alpha_hist):
+        fig_alpha_hist, axes_alpha_hist = plt.subplots(nrows, ncols, figsize=(3.4 * ncols, 2.8 * nrows), sharey=True)
+        axes_alpha_hist = np.atleast_1d(axes_alpha_hist).reshape(-1)
+        for coord_idx in range(selected_alpha_arr.shape[1]):
+            ax = axes_alpha_hist[coord_idx]
             counts = np.array([
                 np.mean(np.isclose(selected_alpha_arr[:, coord_idx], level))
                 for level in alpha_levels_arr
@@ -2555,14 +3083,16 @@ def save_plots(
             ax.set_xticklabels([f"{a:g}" for a in alpha_levels_arr], rotation=45)
             ax.set_ylabel("Selection fraction")
             ax.grid(True, alpha=0.3)
+        for ax in axes_alpha_hist[selected_alpha_arr.shape[1]:]:
+            ax.axis("off")
         fig_alpha_hist.tight_layout()
         fig_alpha_hist.savefig(output_dir / "alpha_level_selection_histograms.png", dpi=150)
         plt.close(fig_alpha_hist)
 
     if alpha_prob is not None and alpha_levels is not None:
-        coord_labels = [r"$\theta_0$", r"$\phi_0$", r"$\theta_1$", r"$\phi_1$"]
         alpha_levels_arr = np.asarray(alpha_levels, dtype=np.float64)
         alpha_prob_arr = np.asarray(alpha_prob, dtype=np.float64)
+        coord_labels = make_action_coord_labels(alpha_prob_arr.shape[1])
 
         def moving_average_2d(trace_2d: np.ndarray, win: int) -> np.ndarray:
             if win <= 1 or win > trace_2d.shape[0]:
@@ -2590,9 +3120,261 @@ def save_plots(
             ax_alpha_prob.set_yticklabels([f"{a:g}" for a in alpha_levels_arr])
             fig_alpha_prob.colorbar(im, ax=ax_alpha_prob, label="Probability")
             fig_alpha_prob.tight_layout()
-            safe_name = ["theta0", "phi0", "theta1", "phi1"][coord_idx]
+            safe_name = safe_action_name(coord_idx)
             fig_alpha_prob.savefig(output_dir / f"alpha_probability_heatmap_{safe_name}.png", dpi=150)
             plt.close(fig_alpha_prob)
+
+
+def save_two_policy_comparison_plots(
+    zf_throughput: np.ndarray,
+    slnr_throughput: np.ndarray,
+    single_results: dict[str, np.ndarray],
+    multi_results: dict[str, np.ndarray],
+    output_dir: Path,
+    window_len: int,
+) -> None:
+    """Save comparison plots for the one-direction and multi-direction policies."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    zf_avg = moving_average(zf_throughput, window_len)
+    slnr_avg = moving_average(slnr_throughput, window_len)
+    single_tput_avg = moving_average(single_results["throughput"], window_len)
+    multi_tput_avg = moving_average(multi_results["throughput"], window_len)
+    x = np.arange(1, min(zf_avg.size, slnr_avg.size, single_tput_avg.size, multi_tput_avg.size) + 1)
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(x, zf_avg[:x.size], lw=1.5, label="ZF baseline")
+    ax.plot(x, slnr_avg[:x.size], lw=1.5, label="SLNR baseline")
+    # ax.plot(x, single_tput_avg[:x.size], lw=1.5, label="WESN: 1 direction")
+    ax.plot(x, multi_tput_avg[:x.size], lw=1.5, label="WESN: 3 directions")
+    ax.set_title("Throughput Across Time")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Sum-rate [bits/s/Hz]")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / "throughput_across_time_zf_slnr_single_vs_multi_direction.png", dpi=150)
+    plt.close(fig)
+
+    single_reward_avg = moving_average(single_results["reward"], window_len)
+    multi_reward_avg = moving_average(multi_results["reward"], window_len)
+    xr = np.arange(1, min(single_reward_avg.size, multi_reward_avg.size) + 1)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(xr, single_reward_avg[:xr.size], lw=1.5, label="WESN: 1 direction")
+    ax.plot(xr, multi_reward_avg[:xr.size], lw=1.5, label="WESN: 3 directions")
+    ax.set_title("RL Reward Across Time")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Reward vs selected reference")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / "reward_across_time_single_vs_multi_direction.png", dpi=150)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(xr, moving_average(single_results["rate_delta_slnr"], window_len)[:xr.size], lw=1.5, label="WESN: 1 direction")
+    ax.plot(xr, moving_average(multi_results["rate_delta_slnr"], window_len)[:xr.size], lw=1.5, label="WESN: 3 directions")
+    ax.axhline(0.0, lw=1.0)
+    ax.set_title("Throughput Delta vs SLNR Across Time")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Rate delta [bits/s/Hz]")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / "rate_delta_vs_slnr_single_vs_multi_direction.png", dpi=150)
+    plt.close(fig)
+
+    # Mean selected alpha level per UE/action coordinate, comparing both policies.
+    num_coords = single_results["selected_alpha_level"].shape[1]
+    coord_labels = make_action_coord_labels(num_coords)
+    nrows, ncols = subplot_grid(num_coords)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.4 * ncols, 2.8 * nrows), sharex=True)
+    axes = np.atleast_1d(axes).reshape(-1)
+    for coord_idx in range(num_coords):
+        ax = axes[coord_idx]
+        ax.plot(
+            moving_average(single_results["selected_alpha_level"][:, coord_idx], window_len),
+            lw=1.2,
+            label="1 direction",
+        )
+        ax.plot(
+            moving_average(multi_results["selected_alpha_level"][:, coord_idx], window_len),
+            lw=1.2,
+            label="3 directions",
+        )
+        ax.set_title(f"Selected alpha level: {coord_labels[coord_idx]}")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best")
+    for ax in axes[num_coords:]:
+        ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(output_dir / "selected_alpha_levels_single_vs_multi_direction.png", dpi=150)
+    plt.close(fig)
+
+    # Direction-choice diagnostics for the multi-direction policy.
+    direction_names = [str(x) for x in multi_results.get("direction_names", np.array(["proxy-rate", "leakage-reducing", "signal-increasing"], dtype=object))]
+    selected_direction = multi_results.get("selected_direction", None)
+    direction_prob = multi_results.get("direction_prob", None)
+    if selected_direction is not None and direction_prob is not None and len(direction_names) > 1:
+        nrows, ncols = subplot_grid(selected_direction.shape[1])
+        fig, axes = plt.subplots(nrows, ncols, figsize=(3.4 * ncols, 2.8 * nrows), sharey=True)
+        axes = np.atleast_1d(axes).reshape(-1)
+        for coord_idx in range(selected_direction.shape[1]):
+            ax = axes[coord_idx]
+            counts = np.array([np.mean(selected_direction[:, coord_idx] == d) for d in range(len(direction_names))])
+            ax.bar(np.arange(len(direction_names)), counts)
+            ax.set_title(f"Selected direction: {coord_labels[coord_idx]}")
+            ax.set_xticks(np.arange(len(direction_names)))
+            ax.set_xticklabels(direction_names, rotation=30, ha="right")
+            ax.set_ylabel("Selection fraction")
+            ax.grid(True, alpha=0.3)
+        for ax in axes[selected_direction.shape[1]:]:
+            ax.axis("off")
+        fig.tight_layout()
+        fig.savefig(output_dir / "multi_direction_selection_histograms.png", dpi=150)
+        plt.close(fig)
+
+        for coord_idx in range(direction_prob.shape[1]):
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for d, name in enumerate(direction_names):
+                ax.plot(moving_average(direction_prob[:, coord_idx, d], window_len), lw=1.4, label=name)
+            ax.set_title(f"Direction probabilities across time: {coord_labels[coord_idx]}")
+            ax.set_xlabel("Slot index")
+            ax.set_ylabel("Probability")
+            ax.set_ylim(0.0, 1.0)
+            ax.grid(True, alpha=0.35)
+            ax.legend(loc="best")
+            fig.tight_layout()
+            safe_name = safe_action_name(coord_idx)
+            fig.savefig(output_dir / f"multi_direction_probabilities_{safe_name}.png", dpi=150)
+            plt.close(fig)
+
+
+
+def save_three_policy_comparison_plots(
+    zf_throughput: np.ndarray,
+    slnr_throughput: np.ndarray,
+    single_results: dict[str, np.ndarray],
+    two_results: dict[str, np.ndarray],
+    three_results: dict[str, np.ndarray],
+    output_dir: Path,
+    window_len: int,
+) -> None:
+    """Save comparison plots for one-, two-, and three-direction learned policies."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    zf_avg = moving_average(zf_throughput, window_len)
+    slnr_avg = moving_average(slnr_throughput, window_len)
+    single_tput_avg = moving_average(single_results["throughput"], window_len)
+    two_tput_avg = moving_average(two_results["throughput"], window_len)
+    three_tput_avg = moving_average(three_results["throughput"], window_len)
+    x = np.arange(1, min(zf_avg.size, slnr_avg.size, single_tput_avg.size, two_tput_avg.size, three_tput_avg.size) + 1)
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(x, zf_avg[:x.size], lw=1.5, label="ZF baseline")
+    ax.plot(x, slnr_avg[:x.size], lw=1.5, label="SLNR baseline")
+    # ax.plot(x, single_tput_avg[:x.size], lw=1.5, label="WESN: 1 direction")
+    ax.plot(x, two_tput_avg[:x.size], lw=1.5, label="WESN: 2 directions")
+    ax.plot(x, three_tput_avg[:x.size], lw=1.5, label="WESN: 3 directions")
+    ax.set_title("Throughput Across Time")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Sum-rate [bits/s/Hz]")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / "throughput_across_time_zf_slnr_1dir_2dir_3dir.png", dpi=150)
+    plt.close(fig)
+
+    single_reward_avg = moving_average(single_results["reward"], window_len)
+    two_reward_avg = moving_average(two_results["reward"], window_len)
+    three_reward_avg = moving_average(three_results["reward"], window_len)
+    xr = np.arange(1, min(single_reward_avg.size, two_reward_avg.size, three_reward_avg.size) + 1)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(xr, single_reward_avg[:xr.size], lw=1.5, label="WESN: 1 direction")
+    ax.plot(xr, two_reward_avg[:xr.size], lw=1.5, label="WESN: 2 directions")
+    ax.plot(xr, three_reward_avg[:xr.size], lw=1.5, label="WESN: 3 directions")
+    ax.set_title("RL Reward Across Time")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Reward vs selected reference")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / "reward_across_time_1dir_2dir_3dir.png", dpi=150)
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.plot(xr, moving_average(single_results["rate_delta_slnr"], window_len)[:xr.size], lw=1.5, label="WESN: 1 direction")
+    ax.plot(xr, moving_average(two_results["rate_delta_slnr"], window_len)[:xr.size], lw=1.5, label="WESN: 2 directions")
+    ax.plot(xr, moving_average(three_results["rate_delta_slnr"], window_len)[:xr.size], lw=1.5, label="WESN: 3 directions")
+    ax.axhline(0.0, lw=1.0)
+    ax.set_title("Throughput Delta vs SLNR Across Time")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Rate delta [bits/s/Hz]")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / "rate_delta_vs_slnr_1dir_2dir_3dir.png", dpi=150)
+    plt.close(fig)
+
+    num_coords = single_results["selected_alpha_level"].shape[1]
+    coord_labels = make_action_coord_labels(num_coords)
+    nrows, ncols = subplot_grid(num_coords)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.4 * ncols, 2.8 * nrows), sharex=True)
+    axes = np.atleast_1d(axes).reshape(-1)
+    for coord_idx in range(num_coords):
+        ax = axes[coord_idx]
+        ax.plot(moving_average(single_results["selected_alpha_level"][:, coord_idx], window_len), lw=1.2, label="1 direction")
+        ax.plot(moving_average(two_results["selected_alpha_level"][:, coord_idx], window_len), lw=1.2, label="2 directions")
+        ax.plot(moving_average(three_results["selected_alpha_level"][:, coord_idx], window_len), lw=1.2, label="3 directions")
+        ax.set_title(f"Selected alpha level: {coord_labels[coord_idx]}")
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best")
+    for ax in axes[num_coords:]:
+        ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(output_dir / "selected_alpha_levels_1dir_2dir_3dir.png", dpi=150)
+    plt.close(fig)
+
+    def save_direction_diagnostics(results: dict[str, np.ndarray], label_slug: str, label_title: str) -> None:
+        direction_names = [str(x) for x in results.get("direction_names", np.array([], dtype=object))]
+        selected_direction = results.get("selected_direction", None)
+        direction_prob = results.get("direction_prob", None)
+        if selected_direction is None or direction_prob is None or len(direction_names) <= 1:
+            return
+        nrows, ncols = subplot_grid(selected_direction.shape[1])
+        fig, axes = plt.subplots(nrows, ncols, figsize=(3.4 * ncols, 2.8 * nrows), sharey=True)
+        axes = np.atleast_1d(axes).reshape(-1)
+        for coord_idx in range(selected_direction.shape[1]):
+            ax = axes[coord_idx]
+            counts = np.array([np.mean(selected_direction[:, coord_idx] == d) for d in range(len(direction_names))])
+            ax.bar(np.arange(len(direction_names)), counts)
+            ax.set_title(f"Selected direction ({label_title}): {coord_labels[coord_idx]}")
+            ax.set_xticks(np.arange(len(direction_names)))
+            ax.set_xticklabels(direction_names, rotation=30, ha="right")
+            ax.set_ylabel("Selection fraction")
+            ax.grid(True, alpha=0.3)
+        for ax in axes[selected_direction.shape[1]:]:
+            ax.axis("off")
+        fig.tight_layout()
+        fig.savefig(output_dir / f"{label_slug}_direction_selection_histograms.png", dpi=150)
+        plt.close(fig)
+
+        for coord_idx in range(direction_prob.shape[1]):
+            fig, ax = plt.subplots(figsize=(8, 4.5))
+            for d, name in enumerate(direction_names):
+                ax.plot(moving_average(direction_prob[:, coord_idx, d], window_len), lw=1.4, label=name)
+            ax.set_title(f"Direction probabilities ({label_title}): {coord_labels[coord_idx]}")
+            ax.set_xlabel("Slot index")
+            ax.set_ylabel("Probability")
+            ax.set_ylim(0.0, 1.0)
+            ax.grid(True, alpha=0.35)
+            ax.legend(loc="best")
+            fig.tight_layout()
+            safe_name = safe_action_name(coord_idx)
+            fig.savefig(output_dir / f"{label_slug}_direction_probabilities_{safe_name}.png", dpi=150)
+            plt.close(fig)
+
+    save_direction_diagnostics(two_results, "two_direction", "2 directions")
+    save_direction_diagnostics(three_results, "three_direction", "3 directions")
 
 def sim_cache_metadata(cfg: SimConfig) -> dict[str, float | int]:
     """Metadata that determines whether cached channel-dependent baselines are valid."""
@@ -2604,9 +3386,139 @@ def sim_cache_metadata(cfg: SimConfig) -> dict[str, float | int]:
         "num_slots": cfg.num_slots,
         "snr_db": cfg.snr_db,
         "temporal_correlation": cfg.temporal_correlation,
+        "channel_model": cfg.channel_model,
+        "carrier_frequency_hz": cfg.carrier_frequency_hz,
+        "subcarrier_spacing_hz": cfg.subcarrier_spacing_hz,
+        "slot_duration_s": cfg.slot_duration_s,
+        "ue_speed_kmh": cfg.ue_speed_kmh,
+        "bs_height_m": cfg.bs_height_m,
+        "ue_height_m": cfg.ue_height_m,
+        "cell_radius_m": cfg.cell_radius_m,
+        "min_ue_distance_m": cfg.min_ue_distance_m,
+        "sionna_scenario": cfg.sionna_scenario,
+        "sionna_o2i_model": cfg.sionna_o2i_model,
+        "sionna_enable_pathloss": cfg.sionna_enable_pathloss,
+        "sionna_enable_shadow_fading": cfg.sionna_enable_shadow_fading,
         "seed": cfg.seed,
         "total_tx_power": cfg.total_tx_power,
+        "pmi_feedback_mode": cfg.pmi_feedback_mode,
+        "type_ii_feedback_architecture": cfg.type_ii_feedback_architecture,
+        "type_ii_nfft": cfg.type_ii_nfft,
+        "type_ii_num_ofdm_symbols": cfg.type_ii_num_ofdm_symbols,
     }
+
+
+def _cache_value_to_slug(value: object) -> str:
+    """Convert a cache-setting value into a filesystem-safe filename fragment."""
+    if isinstance(value, float):
+        value_str = f"{value:.8g}"
+    else:
+        value_str = str(value)
+    value_str = value_str.replace("-", "m").replace(".", "p")
+    safe_chars = []
+    for ch in value_str:
+        if ch.isalnum() or ch in {"_", "="}:
+            safe_chars.append(ch)
+        else:
+            safe_chars.append("_")
+    return "".join(safe_chars).strip("_")
+
+
+def channel_pmi_cache_stem(cfg: SimConfig) -> str:
+    """Filename stem encoding all settings that affect generated channels or PMI."""
+    parts = [
+        f"nt{cfg.num_tx_antennas}",
+        f"ue{cfg.num_users}",
+        f"nrx{cfg.num_rx_antennas_per_user}",
+        f"streams{cfg.streams_per_user}",
+        f"slots{cfg.num_slots}",
+        f"snr{_cache_value_to_slug(cfg.snr_db)}",
+        f"ch{_cache_value_to_slug(cfg.channel_model)}",
+        f"rho{_cache_value_to_slug(cfg.temporal_correlation)}",
+        f"fc{_cache_value_to_slug(cfg.carrier_frequency_hz)}",
+        f"vel{_cache_value_to_slug(cfg.ue_speed_kmh)}",
+        f"cell{_cache_value_to_slug(cfg.cell_radius_m)}",
+        f"seed{cfg.seed}",
+        f"ptx{_cache_value_to_slug(cfg.total_tx_power)}",
+        f"pmi{_cache_value_to_slug(cfg.pmi_feedback_mode)}",
+    ]
+    if cfg.pmi_feedback_mode == "type_ii":
+        parts.extend(
+            [
+                f"arch{_cache_value_to_slug(cfg.type_ii_feedback_architecture)}",
+                f"nfft{cfg.type_ii_nfft}",
+                f"nsym{cfg.type_ii_num_ofdm_symbols}",
+            ]
+        )
+    return "channel_pmi_" + "_".join(parts)
+
+
+def load_or_generate_channels_and_pmi(
+    cfg: SimConfig,
+    cache_dir: Path,
+    force_recompute: bool = False,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Load cached channels/PMI when the parameterized cache file matches cfg.
+
+    The cache filename itself contains the channel-generation and PMI settings,
+    so changing num_users, num_slots, SNR, rho, seed, PMI mode, Type-II OFDM
+    dimensions, etc. naturally points to a different cache file.  The sidecar
+    JSON metadata is an additional integrity check.
+    """
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    stem = channel_pmi_cache_stem(cfg)
+    data_path = cache_dir / f"{stem}.npz"
+    meta_path = cache_dir / f"{stem}_meta.json"
+    metadata = sim_cache_metadata(cfg) | {"cache_kind": "channels_and_pmi", "cache_stem": stem}
+
+    can_load = (
+        not force_recompute
+        and data_path.exists()
+        and _metadata_matches(meta_path, metadata)
+    )
+    if can_load:
+        print(f"Loading cached channels and PMI from {data_path}")
+        with np.load(data_path) as data:
+            channels = data["channels"]
+            pmi_feedback = {
+                "features": data["pmi_features"],
+                "q_vectors": data["pmi_q_vectors"],
+            }
+        expected_channel_shape = (
+            cfg.num_slots,
+            cfg.num_users,
+            cfg.num_rx_antennas_per_user,
+            cfg.num_tx_antennas,
+        )
+        expected_q_shape = (cfg.num_slots, cfg.num_users, cfg.num_tx_antennas)
+        if channels.shape != expected_channel_shape:
+            raise ValueError(
+                f"Cached channel shape {channels.shape} does not match expected {expected_channel_shape}. "
+                "Delete the cache file or rerun with --force-recompute-channel-pmi."
+            )
+        if pmi_feedback["q_vectors"].shape != expected_q_shape:
+            raise ValueError(
+                f"Cached PMI q-vector shape {pmi_feedback['q_vectors'].shape} does not match expected {expected_q_shape}. "
+                "Delete the cache file or rerun with --force-recompute-channel-pmi."
+            )
+        return channels, pmi_feedback
+
+    if force_recompute:
+        print("Forcing channel/PMI cache regeneration.")
+    else:
+        print("Cached channels and PMI not found or incompatible; generating once.")
+    rng_channels = np.random.default_rng(cfg.seed)
+    channels = simulate_channels(cfg, rng_channels)
+    pmi_feedback = build_pmi_feedback_trace(cfg, channels)
+    np.savez_compressed(
+        data_path,
+        channels=channels,
+        pmi_features=pmi_feedback["features"],
+        pmi_q_vectors=pmi_feedback["q_vectors"],
+    )
+    _write_metadata(meta_path, metadata)
+    print(f"Saved channels and PMI cache to {data_path}")
+    return channels, pmi_feedback
 
 
 def _metadata_matches(path: Path, expected: dict) -> bool:
@@ -2630,6 +3542,7 @@ def load_or_run_zf_baseline(
     channels: np.ndarray,
     cache_dir: Path,
     force_recompute: bool = False,
+    pmi_feedback: dict[str, np.ndarray] | None = None,
 ) -> dict[str, np.ndarray]:
     """Load ZF baseline from cache if compatible; otherwise compute and cache it.
 
@@ -2657,7 +3570,7 @@ def load_or_run_zf_baseline(
         return {name: np.load(path) for name, path in paths.items()}
 
     print("Cached ZF baseline not found or incompatible; recomputing.")
-    zf_results = run_zf_baseline(cfg, channels)
+    zf_results = run_zf_baseline(cfg, channels, pmi_feedback=pmi_feedback)
     for name, path in paths.items():
         np.save(path, zf_results[name])
     _write_metadata(meta_path, metadata)
@@ -2670,6 +3583,7 @@ def load_or_run_slnr_baseline(
     channels: np.ndarray,
     cache_dir: Path,
     force_recompute: bool = False,
+    pmi_feedback: dict[str, np.ndarray] | None = None,
 ) -> dict[str, np.ndarray]:
     """Load PMI-only SLNR baseline from cache if compatible; otherwise compute it."""
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -2692,7 +3606,7 @@ def load_or_run_slnr_baseline(
         return {name: np.load(path) for name, path in paths.items()}
 
     print("Cached SLNR baseline not found or incompatible; recomputing.")
-    slnr_results = run_slnr_baseline(cfg, channels)
+    slnr_results = run_slnr_baseline(cfg, channels, pmi_feedback=pmi_feedback)
     for name, path in paths.items():
         np.save(path, slnr_results[name])
     _write_metadata(meta_path, metadata)
@@ -2735,14 +3649,44 @@ def load_or_run_random_vmf_baseline(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched WESN phase-invariant PMI raw-SLNR RL")
-    parser.add_argument("--num-slots", type=int, default=20000)
+    parser.add_argument("--num-slots", type=int, default=50000)
+    parser.add_argument("--window-len", type=int, default=10000)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
+    parser.add_argument("--num-users", type=int, default=2, help="Number of scheduled UEs/users.")
+    parser.add_argument("--num-tx-antennas", type=int, default=4, help="Number of transmit antennas at the BS/virtual array.")
+    parser.add_argument("--num-rx-antennas-per-user", type=int, default=2, help="Number of receive antennas per UE.")
+    parser.add_argument(
+        "--channel-model",
+        type=str,
+        default="sionna_uma",
+        choices=["toy_ar1", "sionna_umi", "sionna_uma", "sionna_rma"],
+        help="Channel generator. toy_ar1 is the original i.i.d. AR(1) toy model; sionna_* uses Sionna TR 38.901 channels.",
+    )
+    parser.add_argument("--carrier-frequency-hz", type=float, default=3.5e9, help="Carrier frequency used by the Sionna channel model.")
+    parser.add_argument("--subcarrier-spacing-hz", type=float, default=30e3, help="Subcarrier spacing used when converting Sionna CIR to an OFDM channel.")
+    parser.add_argument("--slot-duration-s", type=float, default=1e-3, help="Time step between RL slots for Sionna Doppler/time evolution.")
+    parser.add_argument("--ue-speed-kmh", type=float, default=15.0, help="UE speed used by the Sionna topology.")
+    parser.add_argument("--bs-height-m", type=float, default=25.0, help="BS height for Sionna topology.")
+    parser.add_argument("--ue-height-m", type=float, default=1.5, help="UE height for Sionna topology.")
+    parser.add_argument("--cell-radius-m", type=float, default=100.0, help="Maximum UE distance from BS for Sionna topology.")
+    parser.add_argument("--min-ue-distance-m", type=float, default=10.0, help="Minimum UE distance from BS for Sionna topology.")
+    parser.add_argument("--sionna-o2i-model", type=str, default="low", choices=["low", "high"], help="Sionna outdoor-to-indoor model parameter. UEs are currently placed outdoors.")
+    parser.add_argument("--sionna-enable-pathloss", action="store_true", help="Enable Sionna pathloss. Disabled by default to keep channel-power comparisons close to the toy model.")
+    parser.add_argument("--sionna-enable-shadow-fading", action="store_true", help="Enable Sionna shadow fading. Disabled by default to keep channel-power comparisons close to the toy model.")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE_SLNR_perturbation_with_mixture"))
-    parser.add_argument("--window-len", type=int, default=1000)
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
+    parser.add_argument("--channel-pmi-cache-dir", type=Path, default=None, help="Directory used to cache generated channels and PMI traces. Defaults to output_dir/channel_pmi_cache.")
+    parser.add_argument("--force-recompute-channel-pmi", action="store_true", help="Ignore cached channels/PMI and regenerate them before running baselines/RL.")
     parser.add_argument("--force-recompute-baselines", action="store_true")
+    parser.add_argument(
+        "--pmi-feedback-mode",
+        type=str,
+        default="type_ii",
+        choices=["right_singular_vectors", "type_ii"],
+        help="PMI source: original unquantized right singular vectors or actual Type-II PMI from dmimo.mimo.quantized_CSI_feedback.",
+    )
 
     # WESN knobs. The reservoir update is the same as the vanilla ESN; the
     # readout is augmented with a window of recent PMI inputs as skip connections.
@@ -2787,7 +3731,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reward-reference",
         type=str,
-        default="slnr",
+        default="zf",
         choices=["zf", "slnr"],
         help="Reference baseline used inside the RL reward. Use slnr when trying to beat the SLNR baseline.",
     )
@@ -2833,10 +3777,27 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = SimConfig(
+        num_tx_antennas=args.num_tx_antennas,
+        num_users=args.num_users,
+        num_rx_antennas_per_user=args.num_rx_antennas_per_user,
         num_slots=args.num_slots,
         snr_db=args.snr_db,
         temporal_correlation=args.rho,
+        channel_model=args.channel_model,
+        carrier_frequency_hz=args.carrier_frequency_hz,
+        subcarrier_spacing_hz=args.subcarrier_spacing_hz,
+        slot_duration_s=args.slot_duration_s,
+        ue_speed_kmh=args.ue_speed_kmh,
+        bs_height_m=args.bs_height_m,
+        ue_height_m=args.ue_height_m,
+        cell_radius_m=args.cell_radius_m,
+        min_ue_distance_m=args.min_ue_distance_m,
+        sionna_scenario=args.channel_model.split("sionna_", 1)[1] if args.channel_model.startswith("sionna_") else "umi",
+        sionna_o2i_model=args.sionna_o2i_model,
+        sionna_enable_pathloss=args.sionna_enable_pathloss,
+        sionna_enable_shadow_fading=args.sionna_enable_shadow_fading,
         seed=args.seed,
+        pmi_feedback_mode=args.pmi_feedback_mode,
     )
     rl_cfg = RLConfig(
         lr_out=args.lr_out,
@@ -2891,30 +3852,40 @@ def main() -> None:
         positive_rate_bonus_power=args.positive_rate_bonus_power,
     )
 
-    # Use separate RNG streams so loading cached baselines does not change the
-    # stochastic trajectory of the RL policy. This keeps repeated runs comparable.
-    rng_channels = np.random.default_rng(cfg.seed)
+    # Use separate RNG streams so loading cached channels/PMI or baselines does
+    # not change the stochastic trajectory of the RL policy. This keeps repeated
+    # runs comparable.
     rng_random_vmf = np.random.default_rng(cfg.seed + 10_000)
     rng_rl = np.random.default_rng(cfg.seed + 20_000)
     torch.manual_seed(cfg.seed)
 
-    channels = simulate_channels(cfg, rng_channels)
-
     baseline_cache_dir = args.baseline_cache_dir
     if baseline_cache_dir is None:
         baseline_cache_dir = args.output_dir / "baseline_cache"
+
+    channel_pmi_cache_dir = args.channel_pmi_cache_dir
+    if channel_pmi_cache_dir is None:
+        channel_pmi_cache_dir = args.output_dir / "channel_pmi_cache"
+
+    channels, pmi_feedback = load_or_generate_channels_and_pmi(
+        cfg=cfg,
+        cache_dir=channel_pmi_cache_dir,
+        force_recompute=args.force_recompute_channel_pmi,
+    )
 
     zf_results = load_or_run_zf_baseline(
         cfg=cfg,
         channels=channels,
         cache_dir=baseline_cache_dir,
         force_recompute=args.force_recompute_baselines,
+        pmi_feedback=pmi_feedback,
     )
     slnr_results = load_or_run_slnr_baseline(
         cfg=cfg,
         channels=channels,
         cache_dir=baseline_cache_dir,
         force_recompute=args.force_recompute_baselines,
+        pmi_feedback=pmi_feedback,
     )
     random_vmf_results = load_or_run_random_vmf_baseline(
         cfg=cfg,
@@ -2924,7 +3895,43 @@ def main() -> None:
         cache_dir=baseline_cache_dir,
         force_recompute=args.force_recompute_baselines,
     )
-    rl_results = run_wesn_policy_rl(cfg, rl_cfg, channels, zf_results, slnr_results, rng_rl)
+    single_direction_results = run_wesn_policy_rl(
+        cfg,
+        rl_cfg,
+        channels,
+        zf_results,
+        slnr_results,
+        rng_rl,
+        policy_variant="single_direction",
+        pmi_feedback=pmi_feedback,
+    )
+    # Use separate RNG streams so each learned policy has an independent but
+    # reproducible exploration trajectory while using the same channels and
+    # deterministic baselines.
+    rng_rl_two = np.random.default_rng(cfg.seed + 30_000)
+    torch.manual_seed(cfg.seed + 1)
+    two_direction_results = run_wesn_policy_rl(
+        cfg,
+        rl_cfg,
+        channels,
+        zf_results,
+        slnr_results,
+        rng_rl_two,
+        policy_variant="two_direction",
+        pmi_feedback=pmi_feedback,
+    )
+    rng_rl_multi = np.random.default_rng(cfg.seed + 40_000)
+    torch.manual_seed(cfg.seed + 2)
+    multi_direction_results = run_wesn_policy_rl(
+        cfg,
+        rl_cfg,
+        channels,
+        zf_results,
+        slnr_results,
+        rng_rl_multi,
+        policy_variant="multi_direction",
+        pmi_feedback=pmi_feedback,
+    )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     np.save(args.output_dir / "zf_throughput_trace.npy", zf_results["throughput"])
@@ -2932,155 +3939,87 @@ def main() -> None:
     np.save(args.output_dir / "slnr_sinr_trace.npy", slnr_results["sinr"])
     np.save(args.output_dir / "slnr_precoders_trace.npy", slnr_results["precoders"])
     np.save(args.output_dir / "random_vmf_baseline_throughput_trace.npy", random_vmf_results["throughput"])
-    np.save(args.output_dir / "esn_vmf_rl_throughput_trace.npy", rl_results["throughput"])
-    np.save(args.output_dir / "esn_vmf_rl_reward_trace.npy", rl_results["reward"])
-    np.save(args.output_dir / "esn_vmf_rl_rate_delta_trace.npy", rl_results["rate_delta"])
-    np.save(args.output_dir / "esn_vmf_rl_rate_delta_slnr_trace.npy", rl_results["rate_delta_slnr"])
-    np.save(args.output_dir / "esn_fb_proxy_sinr_trace.npy", rl_results["proxy_sinr"])
-    np.save(args.output_dir / "esn_fb_zf_proxy_sinr_trace.npy", rl_results["zf_proxy_sinr"])
-    np.save(args.output_dir / "esn_fb_proxy_sinr_ratio_trace.npy", rl_results["proxy_sinr_ratio"])
-    np.save(args.output_dir / "esn_fb_actual_sinr_ratio_trace.npy", rl_results["actual_sinr_ratio"])
-    np.save(args.output_dir / "esn_fb_proxy_sinr_ratio_slnr_trace.npy", rl_results["proxy_sinr_ratio_slnr"])
-    np.save(args.output_dir / "esn_fb_actual_sinr_ratio_slnr_trace.npy", rl_results["actual_sinr_ratio_slnr"])
-    np.save(args.output_dir / "esn_vmf_rl_advantage_trace.npy", rl_results["advantage"])
-    np.save(args.output_dir / "esn_vmf_rl_reward_baseline_trace.npy", rl_results["reward_baseline"])
-    np.save(args.output_dir / "esn_vmf_rl_kappa_trace.npy", rl_results["kappa"])
-    np.save(args.output_dir / "esn_vmf_rl_fraction_beats_zf_trace.npy", rl_results["beat_zf"])
-    np.save(args.output_dir / "esn_vmf_rl_fraction_beats_slnr_trace.npy", rl_results["beat_slnr"])
-    np.save(args.output_dir / "oracle_slnr_anchor_rate_trace.npy", rl_results["oracle_slnr_anchor_rate"])
-    np.save(args.output_dir / "oracle_best_pool_rate_trace.npy", rl_results["oracle_best_pool_rate"])
-    np.save(args.output_dir / "esn_vmf_rl_beam_similarity_to_zf_trace.npy", rl_results["beam_similarity_to_zf"])
-    np.save(args.output_dir / "esn_vmf_rl_grad_norm_trace.npy", rl_results["grad_norm"])
-    np.save(args.output_dir / "esn_vmf_rl_loss_trace.npy", rl_results["loss"])
-    np.save(args.output_dir / "esn_vmf_rl_rl_loss_trace.npy", rl_results["rl_loss"])
-    np.save(args.output_dir / "esn_vmf_rl_joint_pmi_aux_loss_trace.npy", rl_results["joint_pmi_aux_loss"])
-    np.save(args.output_dir / "esn_fb_signal_trace.npy", rl_results["signal"])
-    np.save(args.output_dir / "esn_fb_leakage_trace.npy", rl_results["leakage"])
-    np.save(args.output_dir / "esn_fb_sampler_attempts_trace.npy", rl_results["fb_attempts"])
-    np.save(args.output_dir / "esn_fb_sampler_accept_trace.npy", rl_results["fb_accept"])
-    np.save(args.output_dir / "esn_fb_best_of_n_score_trace.npy", rl_results["best_of_n_score"])
-    np.save(args.output_dir / "esn_fb_best_of_n_selected_trace.npy", rl_results["best_of_n_selected"])
-    np.save(args.output_dir / "esn_fb_empirical_mean_norm_trace.npy", rl_results["empirical_mean_norm"])
-    np.save(args.output_dir / "esn_fb_centered_update_norm_trace.npy", rl_results["centered_update_norm"])
-    np.save(args.output_dir / "phase_inv_candidate_entropy_trace.npy", rl_results["candidate_entropy"])
-    np.save(args.output_dir / "phase_inv_candidate_entropy_norm_trace.npy", rl_results["candidate_entropy_norm"])
-    np.save(args.output_dir / "phase_inv_candidate_effective_count_trace.npy", rl_results["candidate_effective_count"])
-    np.save(args.output_dir / "phase_inv_candidate_selected_score_trace.npy", rl_results["candidate_selected_score"])
-    np.save(args.output_dir / "phase_inv_candidate_best_score_trace.npy", rl_results["candidate_best_score"])
-    np.save(args.output_dir / "phase_inv_candidate_mean_score_trace.npy", rl_results["candidate_mean_score"])
-    np.save(args.output_dir / "phase_inv_candidate_selected_minus_mean_score_trace.npy", rl_results["candidate_selected_minus_mean_score"])
-    np.save(args.output_dir / "phase_inv_candidate_phase_score_mean_trace.npy", rl_results["candidate_phase_score_mean"])
-    np.save(args.output_dir / "phase_inv_candidate_phase_score_std_trace.npy", rl_results["candidate_phase_score_std"])
-    np.save(args.output_dir / "phase_inv_candidate_slnr_score_mean_trace.npy", rl_results["candidate_slnr_score_mean"])
-    np.save(args.output_dir / "phase_inv_candidate_slnr_score_std_trace.npy", rl_results["candidate_slnr_score_std"])
-    np.save(args.output_dir / "phase_inv_candidate_policy_score_std_trace.npy", rl_results["candidate_policy_score_std"])
-    np.save(args.output_dir / "phase_inv_candidate_selected_source_trace.npy", rl_results["candidate_selected_source"])
-    np.save(args.output_dir / "hybrid_mixture_learned_policy_probability_trace.npy", rl_results["learned_policy_probability"])
-    np.save(args.output_dir / "hybrid_mixture_dk_policy_probability_trace.npy", rl_results["dk_policy_probability"])
-    np.save(args.output_dir / "hybrid_mixture_selected_learned_branch_trace.npy", rl_results["selected_learned_branch"])
-    np.save(args.output_dir / "hybrid_mixture_selected_dk_branch_trace.npy", rl_results["selected_dk_branch"])
-    np.save(args.output_dir / "hybrid_mixture_logit_trace.npy", rl_results["mixture_logit"])
-    np.save(args.output_dir / "pmi_span_selected_theta_trace.npy", rl_results["pmi_span_selected_theta"])
-    np.save(args.output_dir / "pmi_span_selected_phi_trace.npy", rl_results["pmi_span_selected_phi"])
-    np.save(args.output_dir / "pmi_center_theta_trace.npy", rl_results["pmi_center_theta"])
-    np.save(args.output_dir / "pmi_center_phi_trace.npy", rl_results["pmi_center_phi"])
-    np.save(args.output_dir / "pmi_mean_theta_trace.npy", rl_results["pmi_mean_theta"])
-    np.save(args.output_dir / "pmi_mean_phi_trace.npy", rl_results["pmi_mean_phi"])
-    np.save(args.output_dir / "selected_alpha_level_trace.npy", rl_results["selected_alpha_level"])
-    np.save(args.output_dir / "mean_alpha_level_trace.npy", rl_results["mean_alpha_level"])
-    np.save(args.output_dir / "alpha_prob_trace.npy", rl_results["alpha_prob"])
-    np.save(args.output_dir / "alpha_levels.npy", rl_results["alpha_levels"])
-    np.save(args.output_dir / "wesn_states_trace.npy", rl_results["wesn_states"])
 
-    save_plots(
+    def save_policy_arrays(prefix: str, results: dict[str, np.ndarray]) -> None:
+        for key, value in results.items():
+            if isinstance(value, np.ndarray):
+                np.save(args.output_dir / f"{prefix}_{key}_trace.npy", value)
+
+    save_policy_arrays("single_direction", single_direction_results)
+    save_policy_arrays("two_direction", two_direction_results)
+    save_policy_arrays("multi_direction", multi_direction_results)
+
+    save_two_policy_comparison_plots(
         zf_throughput=zf_results["throughput"],
         slnr_throughput=slnr_results["throughput"],
-        random_vmf_throughput=random_vmf_results["throughput"],
-        rl_results=rl_results,
+        single_results=single_direction_results,
+        multi_results=multi_direction_results,
+        output_dir=args.output_dir,
+        window_len=args.window_len,
+    )
+    save_three_policy_comparison_plots(
+        zf_throughput=zf_results["throughput"],
+        slnr_throughput=slnr_results["throughput"],
+        single_results=single_direction_results,
+        two_results=two_direction_results,
+        three_results=multi_direction_results,
         output_dir=args.output_dir,
         window_len=args.window_len,
     )
 
-    print("Simple WESN-FB PMI raw-SLNR RL precoder design run finished.")
-    print(f"ZF average throughput         : {zf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"SLNR baseline throughput  : {slnr_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"Random vMF baseline throughput: {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"WESN-FB PMI raw-SLNR RL throughput  : {rl_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"Reward mode                   : {rl_cfg.reward_mode}")
-    print(f"Reward reference              : {rl_cfg.reward_reference}")
-    print(f"Positive rate bonus           : lambda={rl_cfg.positive_rate_bonus_lambda:.4f}, p={rl_cfg.positive_rate_bonus_power:.4f}  (lambda * max(rate-reference,0)^p)")
-    print(f"WESN-FB PMI raw-SLNR RL reward      : {rl_results['reward'].mean():.4f}")
-    print(f"WESN-FB throughput delta vs ZF  : {rl_results['rate_delta'].mean():.4f}")
-    print(f"WESN-FB throughput delta vs SLNR: {rl_results['rate_delta_slnr'].mean():.4f}")
-    print(f"Mean proxy-SINR ratio to ZF   : {rl_results['proxy_sinr_ratio'].mean():.4f}")
-    print(f"Mean actual SINR ratio to ZF  : {rl_results['actual_sinr_ratio'].mean():.4f}")
-    print(f"Mean proxy-SINR ratio to SLNR : {rl_results['proxy_sinr_ratio_slnr'].mean():.4f}")
-    print(f"Mean actual SINR ratio to SLNR: {rl_results['actual_sinr_ratio_slnr'].mean():.4f}")
-    print(f"RL beats ZF fraction          : {rl_results['beat_zf'].mean():.4f}")
-    print(f"RL beats SLNR fraction        : {rl_results['beat_slnr'].mean():.4f}")
-    print(f"Mean beam similarity to ZF    : {rl_results['beam_similarity_to_zf'].mean():.4f}")
-    print(f"Mean grad norm                : {rl_results['grad_norm'].mean():.4f}")
-    print("Oracle exact candidate-SLNR throughput: not computed (SLNR is not in learned Gaussian action)")
-    print(f"True cached SLNR throughput          : {slnr_results['throughput'].mean():.4f}")
-    if np.any(np.isfinite(rl_results['oracle_best_pool_rate'])):
-        print(f"Oracle best candidate-pool throughput: {np.nanmean(rl_results['oracle_best_pool_rate']):.4f}")
-    print(f"Mean raw PMI desired signal: {rl_results['signal'].mean():.4f}")
-    print(f"Mean raw PMI leakage       : {rl_results['leakage'].mean():.4f}")
-    print(f"PMI-span discrete alpha policy: yes (WESN outputs logits over alpha levels for [theta0, phi0, theta1, phi1])")
-    print(f"Hybrid mixture policy      : yes (exact SLNR DK branch + learned PMI-span branch)")
-    print(f"Initial learned branch prob: {rl_cfg.initial_learned_policy_probability:.4f}")
-    print(f"Mean learned branch prob   : {rl_results['learned_policy_probability'].mean():.4f}")
-    print(f"Final learned branch prob  : {rl_results['learned_policy_probability'][-1]:.4f}")
-    print(f"Mean DK SLNR branch prob   : {rl_results['dk_policy_probability'].mean():.4f}")
-    print(f"Selected learned branch frac: {rl_results['selected_learned_branch'].mean():.4f}")
-    print(f"Selected DK SLNR branch frac: {rl_results['selected_dk_branch'].mean():.4f}")
-    print(f"Mean mixture logit         : {rl_results['mixture_logit'].mean():.4f}")
-    print(f"Mixture logit LR           : {rl_cfg.lr_mixture:.4e}")
-    print(f"User-centered PMI-span search: yes")
-    print(f"PMI-span theta points      : not used by Gaussian policy")
-    print(f"PMI-span phi points        : not used by Gaussian policy")
-    print(f"PMI-span action dimension  : {2 * cfg.num_users}")
-    print(f"WESN PMI-span policy       : joint 4D diagonal discrete alpha-level policy around PMI-SLNR angle center")
-    print(f"PMI-SLNR prior weight      : {rl_cfg.alpha_slnr_prior_weight:.4f}")
-    print("Exact SLNR anchor candidates: False (SLNR baseline only; not a learned Gaussian action)")
-    print(f"Policy update              : REINFORCE on sampled 4D categorical alpha levels")
-    print(f"Alpha levels               : {rl_cfg.alpha_level_grid}")
-    print(f"Alpha zero logit bias      : {rl_cfg.alpha_zero_logit_bias:.4f}")
-    print(f"Alpha softmax temperature  : {rl_cfg.candidate_temperature:.4f}")
-    print(f"Alpha step max [theta, phi]: [{rl_cfg.alpha_step_max_theta:.4f}, {rl_cfg.alpha_step_max_phi:.4f}]")
-    print("PMI-SLNR angle center      : yes (slot-dependent center from current PMI-SLNR precoder)")
-    print("Proxy-rate gradient direction: yes (PMI-only gradient at SLNR angle center)")
-    print(f"Mean SLNR-center theta per UE: {rl_results['pmi_center_theta'].mean(axis=0)}")
-    print(f"Mean SLNR-center phi per UE  : {rl_results['pmi_center_phi'].mean(axis=0)}")
-    print(f"Mean deterministic-alpha theta per UE: {rl_results['pmi_mean_theta'].mean(axis=0)}")
-    print(f"Mean deterministic-alpha phi per UE  : {rl_results['pmi_mean_phi'].mean(axis=0)}")
-    print(f"Normalize candidate scores : {rl_cfg.normalize_candidate_scores}")
-    print(f"Candidate proposal fractions [uniform, PMI, SLNR, WESN]: ignored for Gaussian PMI-span policy")
-    print(f"Candidate proposal kappa   : ignored for Gaussian PMI-span policy")
-    print(f"Joint PMI aux loss weight  : {rl_cfg.joint_pmi_aux_loss_weight:.4f}")
-    print(f"Oracle pool diagnostics    : {rl_cfg.enable_oracle_pool_diagnostics}")
-    print(f"Joint PMI aux temperature  : {rl_cfg.joint_pmi_aux_temperature:.4f}")
-    print(f"Joint PMI aux candidates   : {rl_cfg.num_joint_pmi_aux_candidates}")
-    print(f"Mean RL loss               : {rl_results['rl_loss'].mean():.4f}")
-    print(f"Mean joint PMI auxiliary loss: {rl_results['joint_pmi_aux_loss'].mean():.4f}")
-    print(f"Empirical mean correction  : no (not used for phase-invariant quadratic score)")
-    print(f"Mean empirical mean norm   : {rl_results['empirical_mean_norm'].mean():.4f}")
-    print(f"Mean centered update norm  : {rl_results['centered_update_norm'].mean():.4f}")
-    print(f"SLNR score uses raw PMI-only actual SLNR: yes")
-    print(f"Candidate sampler selection rate: {rl_results['fb_accept'].mean():.4f}")
-    print(f"Mean selected per-UE candidate index: {rl_results['fb_attempts'].mean():.4f}")
-    print(f"Mean alpha categorical entropy : {rl_results['candidate_entropy'].mean():.4f}")
-    print(f"Mean selected alpha levels [theta0, phi0, theta1, phi1]: {rl_results['selected_alpha_level'].mean(axis=0)}")
-    print(f"Mean deterministic alpha levels [theta0, phi0, theta1, phi1]: {rl_results['mean_alpha_level'].mean(axis=0)}")
-    print(f"Mean selected theta-alpha minus mean: {rl_results['candidate_selected_minus_mean_score'].mean():.4f}")
-    print(f"Mean selected phi-alpha level       : {rl_results['candidate_phase_score_std'].mean():.4f}")
-    print(f"Selected source fractions [PMI-span Gaussian]: {(rl_results['candidate_selected_source'] == 4).mean():.4f}")
-    print(f"Mean selected PMI-span theta per UE: {rl_results['pmi_span_selected_theta'].mean(axis=0)}")
-    print(f"Mean selected PMI-span phi per UE  : {rl_results['pmi_span_selected_phi'].mean(axis=0)}")
-    print(f"WESN skip window length      : {rl_cfg.skip_window_length}")
-    print(f"Best-of-N candidates          : {rl_cfg.best_of_n}")
-    print(f"Mean selected candidate index : {rl_results['best_of_n_selected'].mean():.4f}")
+    # Keep the old single-policy diagnostic plots too, but write them into
+    # separate subdirectories so they do not overwrite each other.
+    save_plots(
+        zf_throughput=zf_results["throughput"],
+        slnr_throughput=slnr_results["throughput"],
+        random_vmf_throughput=random_vmf_results["throughput"],
+        rl_results=single_direction_results,
+        output_dir=args.output_dir / "single_direction_diagnostics",
+        window_len=args.window_len,
+    )
+    save_plots(
+        zf_throughput=zf_results["throughput"],
+        slnr_throughput=slnr_results["throughput"],
+        random_vmf_throughput=random_vmf_results["throughput"],
+        rl_results=two_direction_results,
+        output_dir=args.output_dir / "two_direction_diagnostics",
+        window_len=args.window_len,
+    )
+    save_plots(
+        zf_throughput=zf_results["throughput"],
+        slnr_throughput=slnr_results["throughput"],
+        random_vmf_throughput=random_vmf_results["throughput"],
+        rl_results=multi_direction_results,
+        output_dir=args.output_dir / "multi_direction_diagnostics",
+        window_len=args.window_len,
+    )
 
+    print("Simple WESN-FB PMI raw-SLNR RL precoder design run finished.")
+    print(f"ZF average throughput             : {zf_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"SLNR baseline throughput          : {slnr_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"Random vMF baseline throughput    : {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"WESN 1-direction throughput       : {single_direction_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"WESN 2-direction throughput       : {two_direction_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"WESN 3-direction throughput       : {multi_direction_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"WESN 1-direction reward           : {single_direction_results['reward'].mean():.4f}")
+    print(f"WESN 2-direction reward           : {two_direction_results['reward'].mean():.4f}")
+    print(f"WESN 3-direction reward           : {multi_direction_results['reward'].mean():.4f}")
+    print(f"WESN 1-direction delta vs SLNR    : {single_direction_results['rate_delta_slnr'].mean():.4f}")
+    print(f"WESN 2-direction delta vs SLNR    : {two_direction_results['rate_delta_slnr'].mean():.4f}")
+    print(f"WESN 3-direction delta vs SLNR    : {multi_direction_results['rate_delta_slnr'].mean():.4f}")
+    print(f"WESN 1-direction beats SLNR frac  : {single_direction_results['beat_slnr'].mean():.4f}")
+    print(f"WESN 2-direction beats SLNR frac  : {two_direction_results['beat_slnr'].mean():.4f}")
+    print(f"WESN 3-direction beats SLNR frac  : {multi_direction_results['beat_slnr'].mean():.4f}")
+    print(f"Mean selected direction index [theta0, phi0, theta1, phi1] for 2-direction policy: {two_direction_results['selected_direction'].mean(axis=0)}")
+    print(f"2-direction names                : {list(two_direction_results['direction_names'])}")
+    print(f"Mean selected direction index [theta0, phi0, theta1, phi1] for 3-direction policy: {multi_direction_results['selected_direction'].mean(axis=0)}")
+    print(f"3-direction names                : {list(multi_direction_results['direction_names'])}")
+    print(f"Alpha levels                     : {rl_cfg.alpha_level_grid}")
+    print(f"Alpha zero logit bias            : {rl_cfg.alpha_zero_logit_bias:.4f}")
+    print(f"Alpha softmax temperature        : {rl_cfg.candidate_temperature:.4f}")
+    print(f"Alpha step max [theta, phi]      : [{rl_cfg.alpha_step_max_theta:.4f}, {rl_cfg.alpha_step_max_phi:.4f}]")
+    print(f"Reward mode/reference            : {rl_cfg.reward_mode} / {rl_cfg.reward_reference}")
+    print(f"WESN skip window length          : {rl_cfg.skip_window_length}")
 
 if __name__ == "__main__":
     main()

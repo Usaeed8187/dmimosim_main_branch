@@ -392,11 +392,12 @@ def parse_args() -> argparse.Namespace:
             "Root directory containing per-drop results."
         ),
     )
-    parser.add_argument("--mobility", default="high_mobility")
+    # parser.add_argument("--mobility", default="high_mobility")
     parser.add_argument(
         "--mobilities",
         nargs="+",
-        default=["high_mobility", "higher_mobility", "highest_mobility"],
+        # default=["high_mobility", "higher_mobility", "highest_mobility"],
+        default=["high_mobility"],
         help=(
             "One or more mobility folder names (e.g., high_mobility higher_mobility). "
             "If provided, this takes precedence over --mobility."
@@ -407,14 +408,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         nargs="+",
         # default=[1, 2, 3, 5],
-        default=list(range(1, 21)),
+        default=list(range(1, 7)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
         "--rx-ues",
         type=int,
         nargs="+",
-        default=[4],
+        default=[6],
         help="UE counts that were simulated.",
     )
     parser.add_argument(

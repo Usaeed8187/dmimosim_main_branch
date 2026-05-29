@@ -214,6 +214,8 @@ class ResultLoader:
     ) -> Optional[str]:
         folder = self._drop_folder(drop_id, scenario)
         code_rate_str = str(code_rate)
+        if rx_ues == 5:
+            hold = 1
         if scenario.link_adapt:
             prefix = f"mu_mimo_results_link_adapt_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
         else:
@@ -621,14 +623,14 @@ def main() -> None:
             "Root directory containing per-drop results."
         ),
     )
-    parser.add_argument("--mobility", default="high_mobility", help="Mobility string used in the folder names.")
+    parser.add_argument("--mobility", default="highest_mobility", help="Mobility string used in the folder names.")
     parser.add_argument(
         "--drops",
         type=int,
         nargs="+",
         # default=[1, 2],
         # default=[3, 13, 14, 15, 19, 20], # good: 20, 3,  okay: 19, 15, not great: 14, 13
-        default=list(range(1, 21)),
+        default=list(range(1, 11)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -649,7 +651,7 @@ def main() -> None:
         "--rx-ues",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8, 10],
+        default=[5],
         help="UE counts that were simulated.",
     )
     parser.add_argument(
@@ -688,7 +690,7 @@ def main() -> None:
     parser.add_argument(
         "--fixed-rx",
         type=int,
-        default=4,
+        default=5,
         help="UE count to hold fixed when sweeping RUs.",
     )
     parser.add_argument(

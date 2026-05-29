@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Array of arguments
-# declare -a mobilities=("low_mobility" "medium_mobility" "high_mobility")
-declare -a mobilities=("highest_mobility")
+declare -a mobilities=("low_mobility" "medium_mobility" "high_mobility")
+# declare -a mobilities=("highest_mobility")
 # declare -a drop_idx=("26" "27" "28" "29" "30" "31" "32" "33" "34" "35" "36" "37" "38" "39" "43" "44" "45")
 # declare -a drop_idx=("1")
 declare -a drop_idx=($(seq 1 20))
