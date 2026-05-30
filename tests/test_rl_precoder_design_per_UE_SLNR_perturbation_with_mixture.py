@@ -75,7 +75,7 @@ class RLConfig:
     leakage_norm_eps: float = 1e-12
     signal_norm_eps: float = 1e-12
     reward_mode: str = "rate_log_ratio"
-    reward_reference: str = "slnr"
+    reference_precoder: str = "slnr"
     reward_sinr_eps: float = 1e-12
     # Keep this at 1 for exact on-policy training. The per-UE candidate
     # sampler already uses max_fb_resamples candidate directions.
@@ -110,7 +110,7 @@ class RLConfig:
     num_joint_pmi_aux_candidates: int = 32
     # Slot-level hybrid mixture policy. The DK branch executes the exact cached
     # PMI-SLNR precoder. The learned branch executes the current WESN
-    # SLNR-perturbation candidate policy. Both this reuse probability and W_out
+    # reference-precoder perturbation candidate policy. Both this reuse probability and W_out
     # are trained by the policy-gradient loss.
     initial_learned_policy_probability: float = 0.25
     lr_mixture: float = 3e-2
@@ -1368,7 +1368,7 @@ def parse_alpha_level_grid(s: str) -> tuple[float, ...]:
     """Parse comma-separated alpha-level multipliers for the angle-step policy.
 
     The levels are dimensionless multipliers applied to alpha_step_max_theta/phi.
-    We force 0.0 to be present so the exact SLNR-center action remains available.
+    We force 0.0 to be present so the exact reference-precoder-center action remains available.
     """
     vals: list[float] = []
     for item in s.split(","):
@@ -2257,13 +2257,13 @@ def run_wesn_policy_rl(
     pmi_feedback: dict[str, np.ndarray] | None = None,
     policy_variant: str = "single_direction",
 ) -> dict[str, np.ndarray]:
-    """Run an arbitrary-K SLNR-centered discrete alpha-step policy.
+    """Run an arbitrary-K reference-precoder-centered discrete alpha-step policy.
 
     This replaces the old K=2 PMI-span angle policy.  For each UE k, the policy
-    starts from the current PMI-SLNR beam v_k^SLNR and chooses a discrete alpha
+    starts from the selected reference beam v_k^ref and chooses a discrete alpha
     level, and optionally a direction, in the real-packed beam tangent space:
 
-        x_k(alpha,d) = normalize(x_k^SLNR + alpha_step * alpha * d_k),
+        x_k(alpha,d) = normalize(x_k^ref + alpha_step * alpha * d_k),
 
     where d_k is one of the PMI-only proxy directions computed from the current
     PMI vectors.  Because this construction only needs per-UE signal/leakage
@@ -2333,9 +2333,10 @@ def run_wesn_policy_rl(
     kappa_trace = np.full((cfg.num_slots, k), rl_cfg.fixed_kappa, dtype=np.float64)
     beat_zf_trace = np.zeros(cfg.num_slots, dtype=np.float64)
     beat_slnr_trace = np.zeros(cfg.num_slots, dtype=np.float64)
-    rate_delta_slnr_trace = np.zeros(cfg.num_slots, dtype=np.float64)
-    actual_sinr_ratio_slnr_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
-    proxy_sinr_ratio_slnr_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    beat_baseline_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    rate_delta_baseline_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    actual_sinr_ratio_baseline_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
+    proxy_sinr_ratio_baseline_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
     oracle_slnr_anchor_rate_trace = np.full(cfg.num_slots, np.nan, dtype=np.float64)
     oracle_best_pool_rate_trace = np.full(cfg.num_slots, np.nan, dtype=np.float64)
     beam_similarity_trace = np.zeros((cfg.num_slots, k), dtype=np.float64)
@@ -2469,7 +2470,22 @@ def run_wesn_policy_rl(
             q_vectors, slnr_precoder_t, noise_power, eps=rl_cfg.reward_sinr_eps
         )
 
-        center_real = np.stack([complex_unit_to_real(slnr_precoder_t[:, ku]) for ku in range(k)], axis=0)
+        if rl_cfg.reference_precoder == "slnr":
+            ref_precoder_t = slnr_precoder_t
+            ref_rate = slnr_rate
+            ref_actual_sinr = slnr_actual_sinr
+            ref_proxy_sinr = slnr_proxy_sinr
+            ref_name = "SLNR"
+        elif rl_cfg.reference_precoder == "zf":
+            ref_precoder_t = zf_baseline["precoders"][t]
+            ref_rate = zf_rate
+            ref_actual_sinr = zf_actual_sinr
+            ref_proxy_sinr = zf_proxy_sinr
+            ref_name = "ZF"
+        else:
+            raise ValueError(f"Unknown reference_precoder={rl_cfg.reference_precoder!r}")
+
+        center_real = np.stack([complex_unit_to_real(ref_precoder_t[:, ku]) for ku in range(k)], axis=0)
         all_dirs = np.zeros((k, 3, d), dtype=np.float64)
         for ku in range(k):
             dirs_ku, _ = pmi_proxy_direction_dictionary_real(
@@ -2503,17 +2519,6 @@ def run_wesn_policy_rl(
                 alpha_probs_np = pair_probs_np.sum(axis=1)
                 direction_probs_np = pair_probs_np.sum(axis=2)
                 alpha_mean_level_np = alpha_probs_np @ alpha_levels_np
-
-        if rl_cfg.reward_reference == "slnr":
-            ref_rate = slnr_rate
-            ref_actual_sinr = slnr_actual_sinr
-            ref_proxy_sinr = slnr_proxy_sinr
-        elif rl_cfg.reward_reference == "zf":
-            ref_rate = zf_rate
-            ref_actual_sinr = zf_actual_sinr
-            ref_proxy_sinr = zf_proxy_sinr
-        else:
-            raise ValueError(f"Unknown reward_reference={rl_cfg.reward_reference!r}")
 
         with torch.no_grad():
             p_learned_np = float(torch.sigmoid(mixture_logit).detach().cpu().item())
@@ -2587,16 +2592,16 @@ def run_wesn_policy_rl(
             mean_alpha_for_trace = alpha_mean_level_np
             selected_direction_for_trace = selected_direction_indices
         else:
-            beams = slnr_precoder_t.copy()
+            beams = ref_precoder_t.copy()
             x_sample = center_real.copy()
             signal = np.zeros(k, dtype=np.float64)
             leakage = np.zeros(k, dtype=np.float64)
             for ku in range(k):
                 signal[ku] = raw_quadratic_score(x_sample[ku], signal_mats[ku])
                 leakage[ku] = raw_quadratic_score(x_sample[ku], leakage_mats[ku])
-            rate = slnr_rate
-            actual_sinr = slnr_actual_sinr
-            proxy_sinr = slnr_proxy_sinr
+            rate = ref_rate
+            actual_sinr = ref_actual_sinr
+            proxy_sinr = ref_proxy_sinr
             base_reward = compute_rl_reward(
                 reward_mode=rl_cfg.reward_mode,
                 rate=rate,
@@ -2654,17 +2659,18 @@ def run_wesn_policy_rl(
         throughput[t] = float(rate)
         reward_trace[t] = float(reward)
         rate_delta_trace[t] = float(rate) - zf_rate
-        rate_delta_slnr_trace[t] = float(rate) - slnr_rate
+        rate_delta_baseline_trace[t] = float(rate) - ref_rate
         proxy_sinr_trace[t] = proxy_sinr
         zf_proxy_sinr_trace[t] = zf_proxy_sinr
         proxy_sinr_ratio_trace[t] = proxy_sinr / np.maximum(zf_proxy_sinr, rl_cfg.reward_sinr_eps)
         actual_sinr_ratio_trace[t] = actual_sinr / np.maximum(zf_actual_sinr, rl_cfg.reward_sinr_eps)
-        proxy_sinr_ratio_slnr_trace[t] = proxy_sinr / np.maximum(slnr_proxy_sinr, rl_cfg.reward_sinr_eps)
-        actual_sinr_ratio_slnr_trace[t] = actual_sinr / np.maximum(slnr_actual_sinr, rl_cfg.reward_sinr_eps)
+        proxy_sinr_ratio_baseline_trace[t] = proxy_sinr / np.maximum(ref_proxy_sinr, rl_cfg.reward_sinr_eps)
+        actual_sinr_ratio_baseline_trace[t] = actual_sinr / np.maximum(ref_actual_sinr, rl_cfg.reward_sinr_eps)
         advantage_trace[t] = advantage
         baseline_trace[t] = reward_baseline_value
         beat_zf_trace[t] = 1.0 if rate > zf_rate else 0.0
         beat_slnr_trace[t] = 1.0 if rate > slnr_rate else 0.0
+        beat_baseline_trace[t] = 1.0 if rate > ref_rate else 0.0
         beam_similarity_trace[t] = beam_similarity(beams, zf_baseline["precoders"][t])
         best_of_n_score_trace[t] = best_score
         best_of_n_selected_trace[t] = 0.0
@@ -2685,18 +2691,25 @@ def run_wesn_policy_rl(
         "throughput": throughput,
         "reward": reward_trace,
         "rate_delta": rate_delta_trace,
-        "rate_delta_slnr": rate_delta_slnr_trace,
+        "rate_delta_baseline": rate_delta_baseline_trace,
+        "rate_delta_slnr": rate_delta_baseline_trace if rl_cfg.reference_precoder == "slnr" else throughput - slnr_baseline["throughput"],
         "proxy_sinr": proxy_sinr_trace,
         "zf_proxy_sinr": zf_proxy_sinr_trace,
         "proxy_sinr_ratio": proxy_sinr_ratio_trace,
         "actual_sinr_ratio": actual_sinr_ratio_trace,
-        "proxy_sinr_ratio_slnr": proxy_sinr_ratio_slnr_trace,
-        "actual_sinr_ratio_slnr": actual_sinr_ratio_slnr_trace,
+        "proxy_sinr_ratio_baseline": proxy_sinr_ratio_baseline_trace,
+        "proxy_sinr_ratio_slnr": proxy_sinr_ratio_baseline_trace if rl_cfg.reference_precoder == "slnr" else proxy_sinr_trace / np.maximum(
+            np.stack([compute_pmi_sinr_proxy_from_precoder(pmi_feedback["q_vectors"][tt], slnr_baseline["precoders"][tt], noise_power, eps=rl_cfg.reward_sinr_eps) for tt in range(cfg.num_slots)], axis=0),
+            rl_cfg.reward_sinr_eps,
+        ),
+        "actual_sinr_ratio_baseline": actual_sinr_ratio_baseline_trace,
+        "actual_sinr_ratio_slnr": actual_sinr_ratio_baseline_trace if rl_cfg.reference_precoder == "slnr" else (actual_sinr_ratio_trace * zf_baseline["sinr"]) / np.maximum(slnr_baseline["sinr"], rl_cfg.reward_sinr_eps),
         "advantage": advantage_trace,
         "reward_baseline": baseline_trace,
         "kappa": kappa_trace,
         "beat_zf": beat_zf_trace,
         "beat_slnr": beat_slnr_trace,
+        "beat_baseline": beat_baseline_trace,
         "oracle_slnr_anchor_rate": oracle_slnr_anchor_rate_trace,
         "oracle_best_pool_rate": oracle_best_pool_rate_trace,
         "beam_similarity_to_zf": beam_similarity_trace,
@@ -2784,7 +2797,7 @@ def save_plots(
     rl_throughput = rl_results["throughput"]
     reward = rl_results["reward"]
     beat_zf = rl_results["beat_zf"]
-    beat_slnr = rl_results.get("beat_slnr", None)
+    beat_baseline = rl_results.get("beat_baseline", None)
     sim_to_zf = rl_results["beam_similarity_to_zf"].mean(axis=1)
     grad_norm = rl_results["grad_norm"]
     proxy_sinr_ratio = rl_results.get("proxy_sinr_ratio", None)
@@ -2810,7 +2823,7 @@ def save_plots(
     rl_avg = moving_average(rl_throughput, window_len)
     reward_avg = moving_average(reward, window_len)
     beat_zf_avg = moving_average(beat_zf, window_len)
-    beat_slnr_avg = moving_average(beat_slnr, window_len) if beat_slnr is not None else None
+    beat_baseline_avg = moving_average(beat_baseline, window_len) if beat_baseline is not None else None
     sim_avg = moving_average(sim_to_zf, window_len)
     grad_norm_avg = moving_average(grad_norm, window_len)
     proxy_sinr_ratio_avg = moving_average(proxy_sinr_ratio.mean(axis=1), window_len) if proxy_sinr_ratio is not None else None
@@ -2845,7 +2858,7 @@ def save_plots(
 
     fig2, ax2 = plt.subplots(figsize=(8, 4.5))
     ax2.plot(x_reward, reward_avg, lw=1.5)
-    ax2.set_title("WESN-FB Raw-SLNR RL Reward Across Time")
+    ax2.set_title("WESN RL Reward Across Time")
     ax2.set_xlabel("Slot index")
     ax2.set_ylabel("Reward vs selected reference")
     ax2.grid(True, alpha=0.35)
@@ -2855,7 +2868,7 @@ def save_plots(
 
     fig3, ax3 = plt.subplots(figsize=(8, 4.5))
     ax3.plot(np.arange(1, beat_zf_avg.size + 1), beat_zf_avg, lw=1.5)
-    ax3.set_title("Fraction of Slots Where WESN-FB Raw-SLNR RL Beats ZF")
+    ax3.set_title("Fraction of Slots Where WESN Beats ZF")
     ax3.set_xlabel("Slot index")
     ax3.set_ylabel("Moving-average fraction")
     ax3.set_ylim(0.0, 1.0)
@@ -2864,16 +2877,16 @@ def save_plots(
     fig3.savefig(output_dir / "esn_vmf_rl_fraction_beats_zf.png", dpi=150)
     plt.close(fig3)
 
-    if beat_slnr_avg is not None:
+    if beat_baseline_avg is not None:
         fig3b, ax3b = plt.subplots(figsize=(8, 4.5))
-        ax3b.plot(np.arange(1, beat_slnr_avg.size + 1), beat_slnr_avg, lw=1.5)
-        ax3b.set_title("Fraction of Slots Where WESN-FB Raw-SLNR RL Beats SLNR")
+        ax3b.plot(np.arange(1, beat_baseline_avg.size + 1), beat_baseline_avg, lw=1.5)
+        ax3b.set_title("Fraction of Slots Where WESN Beats Reference Baseline")
         ax3b.set_xlabel("Slot index")
         ax3b.set_ylabel("Moving-average fraction")
         ax3b.set_ylim(0.0, 1.0)
         ax3b.grid(True, alpha=0.35)
         fig3b.tight_layout()
-        fig3b.savefig(output_dir / "esn_vmf_rl_fraction_beats_slnr.png", dpi=150)
+        fig3b.savefig(output_dir / "esn_vmf_rl_fraction_beats_baseline.png", dpi=150)
         plt.close(fig3b)
 
     fig4, ax4 = plt.subplots(figsize=(8, 4.5))
@@ -3003,8 +3016,8 @@ def save_plots(
 
     if learned_policy_probability_avg is not None and dk_policy_probability_avg is not None:
         fig12, ax12 = plt.subplots(figsize=(8, 4.5))
-        ax12.plot(np.arange(1, learned_policy_probability_avg.size + 1), learned_policy_probability_avg, lw=1.5, label="Learned PMI-span branch")
-        ax12.plot(np.arange(1, dk_policy_probability_avg.size + 1), dk_policy_probability_avg, lw=1.5, label="Exact SLNR DK branch")
+        ax12.plot(np.arange(1, learned_policy_probability_avg.size + 1), learned_policy_probability_avg, lw=1.5, label="Learned perturbation branch")
+        ax12.plot(np.arange(1, dk_policy_probability_avg.size + 1), dk_policy_probability_avg, lw=1.5, label="Exact reference-precoder branch")
         ax12.set_title("Hybrid Mixture Branch Probabilities Across Time")
         ax12.set_xlabel("Slot index")
         ax12.set_ylabel("Probability")
@@ -3171,16 +3184,16 @@ def save_two_policy_comparison_plots(
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(xr, moving_average(single_results["rate_delta_slnr"], window_len)[:xr.size], lw=1.5, label="WESN: 1 direction")
-    ax.plot(xr, moving_average(multi_results["rate_delta_slnr"], window_len)[:xr.size], lw=1.5, label="WESN: 3 directions")
+    ax.plot(xr, moving_average(single_results["rate_delta_baseline"], window_len)[:xr.size], lw=1.5, label="WESN: 1 direction")
+    ax.plot(xr, moving_average(multi_results["rate_delta_baseline"], window_len)[:xr.size], lw=1.5, label="WESN: 3 directions")
     ax.axhline(0.0, lw=1.0)
-    ax.set_title("Throughput Delta vs SLNR Across Time")
+    ax.set_title("Throughput Delta vs Reference Baseline Across Time")
     ax.set_xlabel("Slot index")
     ax.set_ylabel("Rate delta [bits/s/Hz]")
     ax.grid(True, alpha=0.35)
     ax.legend(loc="best")
     fig.tight_layout()
-    fig.savefig(output_dir / "rate_delta_vs_slnr_single_vs_multi_direction.png", dpi=150)
+    fig.savefig(output_dir / "rate_delta_vs_baseline_single_vs_multi_direction.png", dpi=150)
     plt.close(fig)
 
     # Mean selected alpha level per UE/action coordinate, comparing both policies.
@@ -3289,7 +3302,7 @@ def save_three_policy_comparison_plots(
     three_reward_avg = moving_average(three_results["reward"], window_len)
     xr = np.arange(1, min(single_reward_avg.size, two_reward_avg.size, three_reward_avg.size) + 1)
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(xr, single_reward_avg[:xr.size], lw=1.5, label="WESN: 1 direction")
+    # ax.plot(xr, single_reward_avg[:xr.size], lw=1.5, label="WESN: 1 direction")
     ax.plot(xr, two_reward_avg[:xr.size], lw=1.5, label="WESN: 2 directions")
     ax.plot(xr, three_reward_avg[:xr.size], lw=1.5, label="WESN: 3 directions")
     ax.set_title("RL Reward Across Time")
@@ -3302,17 +3315,17 @@ def save_three_policy_comparison_plots(
     plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(xr, moving_average(single_results["rate_delta_slnr"], window_len)[:xr.size], lw=1.5, label="WESN: 1 direction")
-    ax.plot(xr, moving_average(two_results["rate_delta_slnr"], window_len)[:xr.size], lw=1.5, label="WESN: 2 directions")
-    ax.plot(xr, moving_average(three_results["rate_delta_slnr"], window_len)[:xr.size], lw=1.5, label="WESN: 3 directions")
+    # ax.plot(xr, moving_average(single_results["rate_delta_baseline"], window_len)[:xr.size], lw=1.5, label="WESN: 1 direction")
+    ax.plot(xr, moving_average(two_results["rate_delta_baseline"], window_len)[:xr.size], lw=1.5, label="WESN: 2 directions")
+    ax.plot(xr, moving_average(three_results["rate_delta_baseline"], window_len)[:xr.size], lw=1.5, label="WESN: 3 directions")
     ax.axhline(0.0, lw=1.0)
-    ax.set_title("Throughput Delta vs SLNR Across Time")
+    ax.set_title("Throughput Delta vs Reference Baseline Across Time")
     ax.set_xlabel("Slot index")
     ax.set_ylabel("Rate delta [bits/s/Hz]")
     ax.grid(True, alpha=0.35)
     ax.legend(loc="best")
     fig.tight_layout()
-    fig.savefig(output_dir / "rate_delta_vs_slnr_1dir_2dir_3dir.png", dpi=150)
+    fig.savefig(output_dir / "rate_delta_vs_baseline_1dir_2dir_3dir.png", dpi=150)
     plt.close(fig)
 
     num_coords = single_results["selected_alpha_level"].shape[1]
@@ -3648,9 +3661,9 @@ def load_or_run_random_vmf_baseline(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF baseline + batched WESN phase-invariant PMI raw-SLNR RL")
-    parser.add_argument("--num-slots", type=int, default=50000)
-    parser.add_argument("--window-len", type=int, default=10000)
+    parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF/SLNR baselines + batched WESN reference-precoder perturbation RL")
+    parser.add_argument("--num-slots", type=int, default=5000)
+    parser.add_argument("--window-len", type=int, default=1000)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--num-users", type=int, default=2, help="Number of scheduled UEs/users.")
@@ -3666,7 +3679,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--carrier-frequency-hz", type=float, default=3.5e9, help="Carrier frequency used by the Sionna channel model.")
     parser.add_argument("--subcarrier-spacing-hz", type=float, default=30e3, help="Subcarrier spacing used when converting Sionna CIR to an OFDM channel.")
     parser.add_argument("--slot-duration-s", type=float, default=1e-3, help="Time step between RL slots for Sionna Doppler/time evolution.")
-    parser.add_argument("--ue-speed-kmh", type=float, default=15.0, help="UE speed used by the Sionna topology.")
+    parser.add_argument("--ue-speed-kmh", type=float, default=10.0, help="UE speed used by the Sionna topology.")
     parser.add_argument("--bs-height-m", type=float, default=25.0, help="BS height for Sionna topology.")
     parser.add_argument("--ue-height-m", type=float, default=1.5, help="UE height for Sionna topology.")
     parser.add_argument("--cell-radius-m", type=float, default=100.0, help="Maximum UE distance from BS for Sionna topology.")
@@ -3675,7 +3688,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sionna-enable-pathloss", action="store_true", help="Enable Sionna pathloss. Disabled by default to keep channel-power comparisons close to the toy model.")
     parser.add_argument("--sionna-enable-shadow-fading", action="store_true", help="Enable Sionna shadow fading. Disabled by default to keep channel-power comparisons close to the toy model.")
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE_SLNR_perturbation_with_mixture"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE_reference_precoder_perturbation_with_mixture"))
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--channel-pmi-cache-dir", type=Path, default=None, help="Directory used to cache generated channels and PMI traces. Defaults to output_dir/channel_pmi_cache.")
     parser.add_argument("--force-recompute-channel-pmi", action="store_true", help="Ignore cached channels/PMI and regenerate them before running baselines/RL.")
@@ -3729,11 +3742,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
     parser.add_argument(
-        "--reward-reference",
+        "--reference-precoder",
         type=str,
         default="zf",
         choices=["zf", "slnr"],
-        help="Reference baseline used inside the RL reward. Use slnr when trying to beat the SLNR baseline.",
+        help=(
+            "Reference precoder used both as the perturbation center and as the "
+            "baseline inside the RL reward. Use slnr to perturb/reward relative "
+            "to SLNR, or zf to perturb/reward relative to ZF."
+        ),
     )
     parser.add_argument("--best-of-n", type=int, default=1, help="Must be 1 for exact on-policy candidate-based training. Use --max-fb-resamples for per-UE candidate directions.")
     parser.add_argument("--candidate-temperature", type=float, default=0.8, help="Softmax temperature for candidate selection; smaller is stricter.")
@@ -3759,7 +3776,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha-step-max-theta", type=float, default=0.25, help="Maximum physical theta step used by alpha_max * tanh(u_alpha) along the PMI proxy-gradient direction.")
     parser.add_argument("--alpha-step-max-phi", type=float, default=0.75, help="Maximum physical phi step used by alpha_max * alpha_level along the PMI proxy-gradient direction.")
     parser.add_argument("--alpha-level-grid", type=str, default="-1,-0.5,-0.25,-0.1,0,0.1,0.25,0.5,1", help="Comma-separated dimensionless alpha levels for the discrete angle-step policy. 0 is added automatically if missing.")
-    parser.add_argument("--alpha-zero-logit-bias", type=float, default=2.0, help="Fixed logit bias added to the zero-alpha level so the initial policy favors the exact SLNR-center action.")
+    parser.add_argument("--alpha-zero-logit-bias", type=float, default=2.0, help="Fixed logit bias added to the zero-alpha level so the initial policy favors the exact reference-precoder-center action.")
     parser.add_argument("--gaussian-init-theta", type=float, default=0.40, help="Initial physical theta mean for each UE before conversion to raw sigmoid coordinates.")
     parser.add_argument("--gaussian-init-phi", type=float, default=float(np.pi), help="Initial physical phi mean for each UE before conversion to raw sigmoid coordinates.")
     parser.add_argument("--no-exact-anchor-candidates", action="store_true", help="Disable deterministic exact SLNR / SLNR-residual / PMI candidates in the candidate pool.")
@@ -3767,7 +3784,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--joint-pmi-aux-temperature", type=float, default=0.5, help="Softmax temperature used to convert joint PMI proxy rates into auxiliary target weights.")
     parser.add_argument("--num-joint-pmi-aux-candidates", type=int, default=32, help="Number of full-precoder candidate combinations sampled per slot for the joint PMI auxiliary loss.")
     parser.add_argument("--enable-oracle-pool-diagnostics", action="store_true", help="Expensively score all M^K full-precoder combinations from the candidate pools and log the best actual rate.")
-    parser.add_argument("--initial-learned-policy-probability", type=float, default=1.0, help="Initial reuse probability for the learned SLNR-perturbation branch. The exact SLNR DK branch starts with probability 1-p.")
+    parser.add_argument("--initial-learned-policy-probability", type=float, default=1.0, help="Initial reuse probability for the learned reference-precoder perturbation branch. The exact reference-precoder branch starts with probability 1-p.")
     parser.add_argument("--lr-mixture", type=float, default=0, help="Learning rate for the trainable mixture/reuse probability logit.")
     parser.add_argument("--positive-rate-bonus-lambda", type=float, default=0.0, help="Scale lambda for the positive rate-delta bonus: lambda * max(rate - reference_rate, 0)^p.")
     parser.add_argument("--positive-rate-bonus-power", type=float, default=0.5, help="Exponent p for the positive rate-delta bonus. Default 0.5 amplifies small positive deltas.")
@@ -3817,7 +3834,7 @@ def main() -> None:
         leakage_norm_eps=args.leakage_norm_eps,
         signal_norm_eps=args.signal_norm_eps,
         reward_mode=args.reward_mode,
-        reward_reference=args.reward_reference,
+        reference_precoder=args.reference_precoder,
         reward_sinr_eps=args.reward_sinr_eps,
         best_of_n=args.best_of_n,
         candidate_temperature=args.candidate_temperature,
@@ -3994,22 +4011,23 @@ def main() -> None:
         window_len=args.window_len,
     )
 
-    print("Simple WESN-FB PMI raw-SLNR RL precoder design run finished.")
+    print("Simple WESN-FB PMI reference-precoder perturbation RL run finished.")
     print(f"ZF average throughput             : {zf_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"SLNR baseline throughput          : {slnr_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"Random vMF baseline throughput    : {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
+    print(f"Reference precoder                : {rl_cfg.reference_precoder}")
     print(f"WESN 1-direction throughput       : {single_direction_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"WESN 2-direction throughput       : {two_direction_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"WESN 3-direction throughput       : {multi_direction_results['throughput'].mean():.4f} bits/s/Hz")
     print(f"WESN 1-direction reward           : {single_direction_results['reward'].mean():.4f}")
     print(f"WESN 2-direction reward           : {two_direction_results['reward'].mean():.4f}")
     print(f"WESN 3-direction reward           : {multi_direction_results['reward'].mean():.4f}")
-    print(f"WESN 1-direction delta vs SLNR    : {single_direction_results['rate_delta_slnr'].mean():.4f}")
-    print(f"WESN 2-direction delta vs SLNR    : {two_direction_results['rate_delta_slnr'].mean():.4f}")
-    print(f"WESN 3-direction delta vs SLNR    : {multi_direction_results['rate_delta_slnr'].mean():.4f}")
-    print(f"WESN 1-direction beats SLNR frac  : {single_direction_results['beat_slnr'].mean():.4f}")
-    print(f"WESN 2-direction beats SLNR frac  : {two_direction_results['beat_slnr'].mean():.4f}")
-    print(f"WESN 3-direction beats SLNR frac  : {multi_direction_results['beat_slnr'].mean():.4f}")
+    print(f"WESN 1-direction delta vs baseline: {single_direction_results['rate_delta_baseline'].mean():.4f}")
+    print(f"WESN 2-direction delta vs baseline: {two_direction_results['rate_delta_baseline'].mean():.4f}")
+    print(f"WESN 3-direction delta vs baseline: {multi_direction_results['rate_delta_baseline'].mean():.4f}")
+    print(f"WESN 1-direction beats baseline frac: {single_direction_results['beat_baseline'].mean():.4f}")
+    print(f"WESN 2-direction beats baseline frac: {two_direction_results['beat_baseline'].mean():.4f}")
+    print(f"WESN 3-direction beats baseline frac: {multi_direction_results['beat_baseline'].mean():.4f}")
     print(f"Mean selected direction index [theta0, phi0, theta1, phi1] for 2-direction policy: {two_direction_results['selected_direction'].mean(axis=0)}")
     print(f"2-direction names                : {list(two_direction_results['direction_names'])}")
     print(f"Mean selected direction index [theta0, phi0, theta1, phi1] for 3-direction policy: {multi_direction_results['selected_direction'].mean(axis=0)}")
@@ -4018,7 +4036,7 @@ def main() -> None:
     print(f"Alpha zero logit bias            : {rl_cfg.alpha_zero_logit_bias:.4f}")
     print(f"Alpha softmax temperature        : {rl_cfg.candidate_temperature:.4f}")
     print(f"Alpha step max [theta, phi]      : [{rl_cfg.alpha_step_max_theta:.4f}, {rl_cfg.alpha_step_max_phi:.4f}]")
-    print(f"Reward mode/reference            : {rl_cfg.reward_mode} / {rl_cfg.reward_reference}")
+    print(f"Reward mode/reference precoder   : {rl_cfg.reward_mode} / {rl_cfg.reference_precoder}")
     print(f"WESN skip window length          : {rl_cfg.skip_window_length}")
 
 if __name__ == "__main__":
