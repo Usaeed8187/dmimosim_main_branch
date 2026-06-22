@@ -3157,7 +3157,7 @@ def save_two_policy_comparison_plots(
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(x, zf_avg[:x.size], lw=1.5, label="ZF baseline")
     ax.plot(x, slnr_avg[:x.size], lw=1.5, label="SLNR baseline")
-    # ax.plot(x, single_tput_avg[:x.size], lw=1.5, label="WESN: 1 direction")
+    ax.plot(x, single_tput_avg[:x.size], lw=1.5, label="WESN: 1 direction")
     ax.plot(x, multi_tput_avg[:x.size], lw=1.5, label="WESN: 3 directions")
     ax.set_title("Throughput Across Time")
     ax.set_xlabel("Slot index")
@@ -3280,72 +3280,136 @@ def save_three_policy_comparison_plots(
     single_tput_avg = moving_average(single_results["throughput"], window_len)
     two_tput_avg = moving_average(two_results["throughput"], window_len)
     three_tput_avg = moving_average(three_results["throughput"], window_len)
-    x = np.arange(1, min(zf_avg.size, slnr_avg.size, single_tput_avg.size, two_tput_avg.size, three_tput_avg.size) + 1)
+    throughput_plot_specs = [
+        (
+            "throughput_across_time_zf_slnr_1dir.png",
+            [(single_tput_avg, "WESN: 1 direction")],
+        ),
+        (
+            "throughput_across_time_zf_slnr_2dir.png",
+            [(two_tput_avg, "WESN: 2 directions")],
+        ),
+        (
+            "throughput_across_time_zf_slnr_3dir.png",
+            [(three_tput_avg, "WESN: 3 directions")],
+        ),
+        (
+            "throughput_across_time_zf_slnr_1dir_2dir.png",
+            [
+                (single_tput_avg, "WESN: 1 direction"),
+                (two_tput_avg, "WESN: 2 directions"),
+            ],
+        ),
+        (
+            "throughput_across_time_zf_slnr_1dir_2dir_3dir.png",
+            [
+                (single_tput_avg, "WESN: 1 direction"),
+                (two_tput_avg, "WESN: 2 directions"),
+                (three_tput_avg, "WESN: 3 directions"),
+            ],
+        ),
+    ]
+    for filename, wesn_curves in throughput_plot_specs:
+        x_size = min(zf_avg.size, slnr_avg.size, *(curve.size for curve, _ in wesn_curves))
+        x = np.arange(1, x_size + 1)
 
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(x, zf_avg[:x.size], lw=1.5, label="ZF baseline")
-    ax.plot(x, slnr_avg[:x.size], lw=1.5, label="SLNR baseline")
-    # ax.plot(x, single_tput_avg[:x.size], lw=1.5, label="WESN: 1 direction")
-    ax.plot(x, two_tput_avg[:x.size], lw=1.5, label="WESN: 2 directions")
-    ax.plot(x, three_tput_avg[:x.size], lw=1.5, label="WESN: 3 directions")
-    ax.set_title("Throughput Across Time")
-    ax.set_xlabel("Slot index")
-    ax.set_ylabel("Sum-rate [bits/s/Hz]")
-    ax.grid(True, alpha=0.35)
-    ax.legend(loc="best")
-    fig.tight_layout()
-    fig.savefig(output_dir / "throughput_across_time_zf_slnr_1dir_2dir_3dir.png", dpi=150)
-    plt.close(fig)
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        ax.plot(x, zf_avg[:x_size], lw=1.5, label="ZF baseline")
+        ax.plot(x, slnr_avg[:x_size], lw=1.5, label="SLNR baseline")
+        for curve, label in wesn_curves:
+            ax.plot(x, curve[:x_size], lw=1.5, label=label)
+        ax.set_title("Throughput Across Time")
+        ax.set_xlabel("Slot index")
+        ax.set_ylabel("Sum-rate [bits/s/Hz]")
+        ax.grid(True, alpha=0.35)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        fig.savefig(output_dir / filename, dpi=150)
+        plt.close(fig)
 
     single_reward_avg = moving_average(single_results["reward"], window_len)
     two_reward_avg = moving_average(two_results["reward"], window_len)
     three_reward_avg = moving_average(three_results["reward"], window_len)
-    xr = np.arange(1, min(single_reward_avg.size, two_reward_avg.size, three_reward_avg.size) + 1)
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    # ax.plot(xr, single_reward_avg[:xr.size], lw=1.5, label="WESN: 1 direction")
-    ax.plot(xr, two_reward_avg[:xr.size], lw=1.5, label="WESN: 2 directions")
-    ax.plot(xr, three_reward_avg[:xr.size], lw=1.5, label="WESN: 3 directions")
-    ax.set_title("RL Reward Across Time")
-    ax.set_xlabel("Slot index")
-    ax.set_ylabel("Reward vs selected reference")
-    ax.grid(True, alpha=0.35)
-    ax.legend(loc="best")
-    fig.tight_layout()
-    fig.savefig(output_dir / "reward_across_time_1dir_2dir_3dir.png", dpi=150)
-    plt.close(fig)
+    single_delta_avg = moving_average(single_results["rate_delta_baseline"], window_len)
+    two_delta_avg = moving_average(two_results["rate_delta_baseline"], window_len)
+    three_delta_avg = moving_average(three_results["rate_delta_baseline"], window_len)
 
-    fig, ax = plt.subplots(figsize=(8, 4.5))
-    # ax.plot(xr, moving_average(single_results["rate_delta_baseline"], window_len)[:xr.size], lw=1.5, label="WESN: 1 direction")
-    ax.plot(xr, moving_average(two_results["rate_delta_baseline"], window_len)[:xr.size], lw=1.5, label="WESN: 2 directions")
-    ax.plot(xr, moving_average(three_results["rate_delta_baseline"], window_len)[:xr.size], lw=1.5, label="WESN: 3 directions")
-    ax.axhline(0.0, lw=1.0)
-    ax.set_title("Throughput Delta vs Reference Baseline Across Time")
-    ax.set_xlabel("Slot index")
-    ax.set_ylabel("Rate delta [bits/s/Hz]")
-    ax.grid(True, alpha=0.35)
-    ax.legend(loc="best")
-    fig.tight_layout()
-    fig.savefig(output_dir / "rate_delta_vs_baseline_1dir_2dir_3dir.png", dpi=150)
-    plt.close(fig)
+    policy_plot_specs = [
+        ("1dir", [(single_results, "1 direction")]),
+        ("2dir", [(two_results, "2 directions")]),
+        ("3dir", [(three_results, "3 directions")]),
+        ("1dir_2dir", [(single_results, "1 direction"), (two_results, "2 directions")]),
+        (
+            "1dir_2dir_3dir",
+            [
+                (single_results, "1 direction"),
+                (two_results, "2 directions"),
+                (three_results, "3 directions"),
+            ],
+        ),
+    ]
+    reward_avgs = {
+        id(single_results): single_reward_avg,
+        id(two_results): two_reward_avg,
+        id(three_results): three_reward_avg,
+    }
+    delta_avgs = {
+        id(single_results): single_delta_avg,
+        id(two_results): two_delta_avg,
+        id(three_results): three_delta_avg,
+    }
+
+    for slug, policies in policy_plot_specs:
+        reward_curves = [(reward_avgs[id(results)], label) for results, label in policies]
+        x_size = min(curve.size for curve, _ in reward_curves)
+        x = np.arange(1, x_size + 1)
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        for curve, label in reward_curves:
+            ax.plot(x, curve[:x_size], lw=1.5, label=f"WESN: {label}")
+        ax.set_title("RL Reward Across Time")
+        ax.set_xlabel("Slot index")
+        ax.set_ylabel("Reward vs selected reference")
+        ax.grid(True, alpha=0.35)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        fig.savefig(output_dir / f"reward_across_time_{slug}.png", dpi=150)
+        plt.close(fig)
+
+        delta_curves = [(delta_avgs[id(results)], label) for results, label in policies]
+        x_size = min(curve.size for curve, _ in delta_curves)
+        x = np.arange(1, x_size + 1)
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        for curve, label in delta_curves:
+            ax.plot(x, curve[:x_size], lw=1.5, label=f"WESN: {label}")
+        ax.axhline(0.0, lw=1.0)
+        ax.set_title("Throughput Delta vs Reference Baseline Across Time")
+        ax.set_xlabel("Slot index")
+        ax.set_ylabel("Rate delta [bits/s/Hz]")
+        ax.grid(True, alpha=0.35)
+        ax.legend(loc="best")
+        fig.tight_layout()
+        fig.savefig(output_dir / f"rate_delta_vs_baseline_{slug}.png", dpi=150)
+        plt.close(fig)
 
     num_coords = single_results["selected_alpha_level"].shape[1]
     coord_labels = make_action_coord_labels(num_coords)
     nrows, ncols = subplot_grid(num_coords)
-    fig, axes = plt.subplots(nrows, ncols, figsize=(3.4 * ncols, 2.8 * nrows), sharex=True)
-    axes = np.atleast_1d(axes).reshape(-1)
-    for coord_idx in range(num_coords):
-        ax = axes[coord_idx]
-        ax.plot(moving_average(single_results["selected_alpha_level"][:, coord_idx], window_len), lw=1.2, label="1 direction")
-        ax.plot(moving_average(two_results["selected_alpha_level"][:, coord_idx], window_len), lw=1.2, label="2 directions")
-        ax.plot(moving_average(three_results["selected_alpha_level"][:, coord_idx], window_len), lw=1.2, label="3 directions")
-        ax.set_title(f"Selected alpha level: {coord_labels[coord_idx]}")
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best")
-    for ax in axes[num_coords:]:
-        ax.axis("off")
-    fig.tight_layout()
-    fig.savefig(output_dir / "selected_alpha_levels_1dir_2dir_3dir.png", dpi=150)
-    plt.close(fig)
+    for slug, policies in policy_plot_specs:
+        fig, axes = plt.subplots(nrows, ncols, figsize=(3.4 * ncols, 2.8 * nrows), sharex=True)
+        axes = np.atleast_1d(axes).reshape(-1)
+        for coord_idx in range(num_coords):
+            ax = axes[coord_idx]
+            for results, label in policies:
+                alpha_avg = moving_average(results["selected_alpha_level"][:, coord_idx], window_len)
+                ax.plot(alpha_avg, lw=1.2, label=label)
+            ax.set_title(f"Selected alpha level: {coord_labels[coord_idx]}")
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc="best")
+        for ax in axes[num_coords:]:
+            ax.axis("off")
+        fig.tight_layout()
+        fig.savefig(output_dir / f"selected_alpha_levels_{slug}.png", dpi=150)
+        plt.close(fig)
 
     def save_direction_diagnostics(results: dict[str, np.ndarray], label_slug: str, label_title: str) -> None:
         direction_names = [str(x) for x in results.get("direction_names", np.array([], dtype=object))]
@@ -3662,11 +3726,11 @@ def load_or_run_random_vmf_baseline(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF/SLNR baselines + batched WESN reference-precoder perturbation RL")
-    parser.add_argument("--num-slots", type=int, default=5000)
-    parser.add_argument("--window-len", type=int, default=1000)
+    parser.add_argument("--num-slots", type=int, default=10000)
+    parser.add_argument("--window-len", type=int, default=500)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
-    parser.add_argument("--num-users", type=int, default=2, help="Number of scheduled UEs/users.")
+    parser.add_argument("--num-users", type=int, default=3, help="Number of scheduled UEs/users.")
     parser.add_argument("--num-tx-antennas", type=int, default=4, help="Number of transmit antennas at the BS/virtual array.")
     parser.add_argument("--num-rx-antennas-per-user", type=int, default=2, help="Number of receive antennas per UE.")
     parser.add_argument(
@@ -3682,8 +3746,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ue-speed-kmh", type=float, default=10.0, help="UE speed used by the Sionna topology.")
     parser.add_argument("--bs-height-m", type=float, default=25.0, help="BS height for Sionna topology.")
     parser.add_argument("--ue-height-m", type=float, default=1.5, help="UE height for Sionna topology.")
-    parser.add_argument("--cell-radius-m", type=float, default=100.0, help="Maximum UE distance from BS for Sionna topology.")
-    parser.add_argument("--min-ue-distance-m", type=float, default=10.0, help="Minimum UE distance from BS for Sionna topology.")
+    parser.add_argument("--cell-radius-m", type=float, default=60.0, help="Maximum UE distance from BS for Sionna topology.")
+    parser.add_argument("--min-ue-distance-m", type=float, default=50.0, help="Minimum UE distance from BS for Sionna topology.")
     parser.add_argument("--sionna-o2i-model", type=str, default="low", choices=["low", "high"], help="Sionna outdoor-to-indoor model parameter. UEs are currently placed outdoors.")
     parser.add_argument("--sionna-enable-pathloss", action="store_true", help="Enable Sionna pathloss. Disabled by default to keep channel-power comparisons close to the toy model.")
     parser.add_argument("--sionna-enable-shadow-fading", action="store_true", help="Enable Sionna shadow fading. Disabled by default to keep channel-power comparisons close to the toy model.")
@@ -3775,7 +3839,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gaussian-raw-std-phi", type=float, default=0.30, help="Fixed raw-coordinate exploration std for phi coordinates in the 4D diagonal Gaussian policy.")
     parser.add_argument("--alpha-step-max-theta", type=float, default=0.25, help="Maximum physical theta step used by alpha_max * tanh(u_alpha) along the PMI proxy-gradient direction.")
     parser.add_argument("--alpha-step-max-phi", type=float, default=0.75, help="Maximum physical phi step used by alpha_max * alpha_level along the PMI proxy-gradient direction.")
-    parser.add_argument("--alpha-level-grid", type=str, default="-1,-0.5,-0.25,-0.1,0,0.1,0.25,0.5,1", help="Comma-separated dimensionless alpha levels for the discrete angle-step policy. 0 is added automatically if missing.")
+    parser.add_argument(
+        "--num-alpha-levels",
+        type=int,
+        default=21,
+        help="Number of uniformly spaced alpha levels from -1 to 1 for the discrete angle-step policy.",
+    )
     parser.add_argument("--alpha-zero-logit-bias", type=float, default=2.0, help="Fixed logit bias added to the zero-alpha level so the initial policy favors the exact reference-precoder-center action.")
     parser.add_argument("--gaussian-init-theta", type=float, default=0.40, help="Initial physical theta mean for each UE before conversion to raw sigmoid coordinates.")
     parser.add_argument("--gaussian-init-phi", type=float, default=float(np.pi), help="Initial physical phi mean for each UE before conversion to raw sigmoid coordinates.")
@@ -3855,7 +3924,7 @@ def main() -> None:
         gaussian_raw_std_phi=args.gaussian_raw_std_phi,
         alpha_step_max_theta=args.alpha_step_max_theta,
         alpha_step_max_phi=args.alpha_step_max_phi,
-        alpha_level_grid=parse_alpha_level_grid(args.alpha_level_grid),
+        alpha_level_grid=tuple(np.linspace(-1.0, 1.0, args.num_alpha_levels)),
         alpha_zero_logit_bias=args.alpha_zero_logit_bias,
         gaussian_init_theta=args.gaussian_init_theta,
         gaussian_init_phi=args.gaussian_init_phi,
@@ -3966,14 +4035,6 @@ def main() -> None:
     save_policy_arrays("two_direction", two_direction_results)
     save_policy_arrays("multi_direction", multi_direction_results)
 
-    save_two_policy_comparison_plots(
-        zf_throughput=zf_results["throughput"],
-        slnr_throughput=slnr_results["throughput"],
-        single_results=single_direction_results,
-        multi_results=multi_direction_results,
-        output_dir=args.output_dir,
-        window_len=args.window_len,
-    )
     save_three_policy_comparison_plots(
         zf_throughput=zf_results["throughput"],
         slnr_throughput=slnr_results["throughput"],

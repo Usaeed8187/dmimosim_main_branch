@@ -238,12 +238,18 @@ class twomode_wesn_pred:
         return nmse
 
     def reg_p_inv(self, X):
-        # X: (F, T)
+        # X: (feature_dim, num_samples)
         F = X.shape[0]
-        G = X @ X.T + self.reg * np.eye(F, dtype=self.dtype)  # (F,F)
-        G = X.T @ np.linalg.pinv(G)                 # (T,F)
+        gram = X @ X.T + self.reg * np.eye(F, dtype=self.dtype)
 
-        return G
+        try:
+            chol = np.linalg.cholesky(gram)
+            temp = np.linalg.solve(chol, X)
+            reg_inv = np.linalg.solve(chol.T, temp)
+        except np.linalg.LinAlgError:
+            reg_inv = np.linalg.solve(gram, X)
+
+        return reg_inv.T
 
     def form_window_input_signal(self, Y_3D_real, curr_window_weights):
 
