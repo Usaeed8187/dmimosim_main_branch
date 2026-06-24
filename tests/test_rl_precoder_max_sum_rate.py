@@ -3752,7 +3752,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sionna-enable-pathloss", action="store_true", help="Enable Sionna pathloss. Disabled by default to keep channel-power comparisons close to the toy model.")
     parser.add_argument("--sionna-enable-shadow-fading", action="store_true", help="Enable Sionna shadow fading. Disabled by default to keep channel-power comparisons close to the toy model.")
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_design_per_UE_reference_precoder_perturbation_with_mixture"))
+    parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_max_sum_rate"))
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--channel-pmi-cache-dir", type=Path, default=None, help="Directory used to cache generated channels and PMI traces. Defaults to output_dir/channel_pmi_cache.")
     parser.add_argument("--force-recompute-channel-pmi", action="store_true", help="Ignore cached channels/PMI and regenerate them before running baselines/RL.")
@@ -3808,7 +3808,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reference-precoder",
         type=str,
-        default="zf",
+        default="slnr",
         choices=["zf", "slnr"],
         help=(
             "Reference precoder used both as the perturbation center and as the "
