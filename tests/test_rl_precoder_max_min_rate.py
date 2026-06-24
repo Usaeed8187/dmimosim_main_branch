@@ -23,7 +23,10 @@ class SimConfig:
     num_rx_antennas_per_user: int = 2
     streams_per_user: int = 1
     num_slots: int = 2000
-    snr_db: float = 10.0
+    # Receiver noise power in Watts. SNR is not forced globally; it is induced
+    # by Sionna pathloss/shadowing, small-scale fading, total_tx_power, and this
+    # fixed noise floor.
+    noise_power_w: float = 3.1622776601683794e-12
     temporal_correlation: float = 0.95
     # Channel generation model. toy_ar1 keeps the original independent AR(1)
     # coefficients. sionna_umi/sionna_uma/sionna_rma use Sionna TR 38.901
@@ -40,8 +43,8 @@ class SimConfig:
     min_ue_distance_m: float = 10.0
     sionna_scenario: str = "umi"
     sionna_o2i_model: str = "low"
-    sionna_enable_pathloss: bool = False
-    sionna_enable_shadow_fading: bool = False
+    sionna_enable_pathloss: bool = True
+    sionna_enable_shadow_fading: bool = True
     seed: int = 7
     total_tx_power: float = 1.0
     grad_ascent_iterations: int = 3
@@ -79,6 +82,7 @@ class RLConfig:
     leakage_norm_eps: float = 1e-12
     signal_norm_eps: float = 1e-12
     reward_mode: str = "min_rate_log_ratio"
+    softmin_tau: float = 0.5
     reference_precoder: str = "grad_ascent"
     reward_sinr_eps: float = 1e-12
     # Keep this at 1 for exact on-policy training. The per-UE candidate
@@ -163,6 +167,7 @@ class RLConfig:
     # Optional fixed prior favoring the zero-alpha/SLNR action at initialization.
     # W_out still learns additive logits over the same discrete levels.
     alpha_zero_logit_bias: float = 2.0
+    learned_direction_kappa: float = 10.0
     # Deprecated constant initial physical-angle center, retained only so older
     # command lines do not break. The active policy uses a slot-dependent
     # PMI-SLNR angle center instead of a constant bias.
@@ -368,7 +373,10 @@ def make_type_ii_feedback_quantizer(cfg: SimConfig):
         num_tx_streams=cfg.num_users + 2,
         architecture=cfg.type_ii_feedback_architecture,
         rbs_per_subband=4,
-        snrdb=cfg.snr_db,
+        # This is an API placeholder for the Type-II feedback adapter, not the
+        # evaluation SNR. Evaluation SNR is computed from pathloss/shadowing
+        # channels and cfg.noise_power_w.
+        snrdb=0.0,
     )
 
 
@@ -559,6 +567,46 @@ def build_multicast_wesn_input_features(
     return np.concatenate([pmi_features, snr_features], axis=1)
 
 
+def compute_pre_precoding_snr_db_trace(
+    cfg: SimConfig,
+    channels: np.ndarray,
+    pmi_feedback: dict[str, np.ndarray],
+) -> np.ndarray:
+    """Return per-slot, per-UE SNR before precoding along each UE's PMI vector."""
+    noise_power = cfg.noise_power_w
+    q_trace = np.asarray(pmi_feedback["q_vectors"])
+    snr_lin = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
+    for t in range(cfg.num_slots):
+        rho = estimate_multicast_rho_from_q_vectors(
+            channels[t], q_trace[t], cfg.total_tx_power, noise_power
+        )
+        snr_lin[t] = rho
+    return 10.0 * np.log10(np.maximum(snr_lin, 1e-30))
+
+
+def save_pre_precoding_snr_cdf(
+    output_dir: Path,
+    pre_precoding_snr_db: np.ndarray,
+) -> None:
+    """Save SNR trace and empirical CDF plot for pre-precoding UE SNRs."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    np.save(output_dir / "pre_precoding_snr_db_trace.npy", pre_precoding_snr_db)
+    vals = np.sort(np.asarray(pre_precoding_snr_db, dtype=np.float64).reshape(-1))
+    cdf = np.arange(1, vals.size + 1, dtype=np.float64) / max(vals.size, 1)
+    np.save(output_dir / "pre_precoding_snr_cdf_x_db.npy", vals)
+    np.save(output_dir / "pre_precoding_snr_cdf_y.npy", cdf)
+
+    fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    ax.plot(vals, cdf, lw=1.8)
+    ax.set_title("Pre-Precoding UE SNR CDF")
+    ax.set_xlabel("SNR before precoding [dB]")
+    ax.set_ylabel("Empirical CDF")
+    ax.grid(True, alpha=0.35)
+    fig.tight_layout()
+    fig.savefig(output_dir / "pre_precoding_snr_cdf.png", dpi=150)
+    plt.close(fig)
+
+
 def build_multicast_R_matrices_from_q_vectors(
     q_vectors: np.ndarray,
     rho: np.ndarray,
@@ -647,29 +695,20 @@ def multicast_direction_dictionary(
     R_mats: np.ndarray,
     eps: float = 1e-6,
 ) -> tuple[np.ndarray, list[str]]:
-    """Return the two common-beam perturbation directions used by RL.
+    """Return the weakest-user common-beam perturbation direction used by RL.
 
-    The action dictionary contains exactly two tangent directions around the
-    gradient-ascent reference beam:
-
-      0) weakest-user: direction R_{k*} p, where k* has the smallest
-         PMI-proxy multicast SNR gamma_k(p)=p^H R_k p.
-      1) average-SNR: direction sum_k R_k p, which increases the average
-         PMI-proxy received energy.
-
-    The earlier proportional-fair direction is intentionally removed.
+    The action dictionary contains one tangent direction around the
+    gradient-ascent reference beam: R_{k*} p, where k* has the smallest
+    PMI-proxy multicast SNR gamma_k(p)=p^H R_k p.
     """
     beam = np.asarray(beam, dtype=np.complex128).reshape(-1)
     gamma = multicast_gamma_from_R(beam, R_mats)
     weakest = int(np.argmin(gamma))
 
     grad_weak = R_mats[weakest] @ beam
-    grad_avg = np.zeros_like(beam)
-    for k in range(R_mats.shape[0]):
-        grad_avg += R_mats[k] @ beam
 
-    names = ["weakest-user", "average-snr"]
-    dirs_complex = [grad_weak, grad_avg]
+    names = ["weakest-user"]
+    dirs_complex = [grad_weak]
     dirs_real = []
     center_real = complex_unit_to_real(beam)
     for d_complex in dirs_complex:
@@ -966,7 +1005,7 @@ def simulate_sionna_channels(cfg: SimConfig, rng: np.random.Generator) -> np.nda
     # ambiguity about whether a one-subcarrier frequency grid is exactly centered
     # at 0 Hz across Sionna versions.
     freqs = subcarrier_frequencies(3, float(cfg.subcarrier_spacing_hz))
-    h_freq = cir_to_ofdm_channel(freqs, a, tau, normalize=True)
+    h_freq = cir_to_ofdm_channel(freqs, a, tau, normalize=False)
     h_np = np.asarray(h_freq.numpy())
 
     # Expected Sionna shape:
@@ -997,7 +1036,7 @@ def simulate_channels(cfg: SimConfig, rng: np.random.Generator) -> np.ndarray:
 def run_zf_baseline(
     cfg: SimConfig, channels: np.ndarray, pmi_feedback: dict[str, np.ndarray] | None = None
 ) -> dict[str, np.ndarray]:
-    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    noise_power = cfg.noise_power_w
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     sinr_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
     precoders = np.zeros(
@@ -1032,7 +1071,7 @@ def run_slnr_baseline(
     This baseline uses the same PMI/right-singular-vector feedback as the ZF
     baseline, but designs each beam by maximizing a PMI-only SLNR criterion.
     """
-    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    noise_power = cfg.noise_power_w
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     sinr_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
     precoders = np.zeros(
@@ -1062,7 +1101,7 @@ def run_grad_ascent_baseline(
     cfg: SimConfig, channels: np.ndarray, pmi_feedback: dict[str, np.ndarray] | None = None
 ) -> dict[str, np.ndarray]:
     """Run the SNR-weighted PMI gradient-ascent conventional precoder."""
-    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    noise_power = cfg.noise_power_w
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     sinr_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
     precoders = np.zeros(
@@ -1107,7 +1146,7 @@ def run_multicast_common_baselines(
     Only the gradient-ascent common beam is kept as the reference baseline.
     The old weighted-average and weakest-user PMI baselines are not evaluated.
     """
-    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    noise_power = cfg.noise_power_w
     if pmi_feedback is None:
         pmi_feedback = build_pmi_feedback_trace(cfg, channels)
 
@@ -1150,11 +1189,26 @@ def run_multicast_common_baselines(
     return out
 
 
+def softmin_rate(user_rates: np.ndarray, tau: float) -> float:
+    """Smooth approximation to min_k R_k.
+
+    tau controls the smoothness. Smaller tau approaches the hard minimum; larger
+    tau gives non-worst but still weak users more gradient/reward weight.
+    """
+    rates = np.asarray(user_rates, dtype=np.float64).reshape(-1)
+    tau = max(float(tau), 1e-12)
+    m = float(np.min(rates))
+    return float(m - tau * np.log(np.sum(np.exp(-(rates - m) / tau))))
+
+
 def compute_multicast_reward(
     rate: float,
     ref_rate: float,
-    mode: str = "min_rate_log_ratio",
+    mode: str = "soft_min_delta",
     eps: float = 1e-12,
+    user_rates: np.ndarray | None = None,
+    ref_user_rates: np.ndarray | None = None,
+    softmin_tau: float = 0.5,
 ) -> float:
     if mode in {"min_rate_delta", "throughput_delta"}:
         return float(rate - ref_rate)
@@ -1162,9 +1216,23 @@ def compute_multicast_reward(
         return float((rate - ref_rate) / (abs(ref_rate) + eps))
     if mode == "min_rate_log_ratio":
         return float(np.log((rate + eps) / (ref_rate + eps)))
+    if mode in {"soft_min_delta", "softmin_delta"}:
+        if user_rates is None or ref_user_rates is None:
+            raise ValueError("soft_min_delta requires user_rates and ref_user_rates.")
+        return float(softmin_rate(user_rates, softmin_tau) - softmin_rate(ref_user_rates, softmin_tau))
+    if mode in {"normalized_soft_min_delta", "normalized_softmin_delta"}:
+        if user_rates is None or ref_user_rates is None:
+            raise ValueError("normalized_soft_min_delta requires user_rates and ref_user_rates.")
+        ref_soft = softmin_rate(ref_user_rates, softmin_tau)
+        return float((softmin_rate(user_rates, softmin_tau) - ref_soft) / (abs(ref_soft) + eps))
+    if mode in {"soft_min_log_ratio", "softmin_log_ratio"}:
+        if user_rates is None or ref_user_rates is None:
+            raise ValueError("soft_min_log_ratio requires user_rates and ref_user_rates.")
+        return float(np.log((softmin_rate(user_rates, softmin_tau) + eps) / (softmin_rate(ref_user_rates, softmin_tau) + eps)))
     raise ValueError(
-        "Same-stream multicast RL supports min_rate_delta, "
-        "normalized_min_rate_delta, and min_rate_log_ratio."
+        "Same-stream multicast RL supports min_rate_delta, normalized_min_rate_delta, "
+        "min_rate_log_ratio, soft_min_delta, normalized_soft_min_delta, "
+        "and soft_min_log_ratio."
     )
 
 
@@ -1178,7 +1246,7 @@ def run_wesn_multicast_policy_rl(
     policy_variant: str = "single_direction",
 ) -> dict[str, np.ndarray]:
     """WESN policy that perturbs one common multicast beam per slot."""
-    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    noise_power = cfg.noise_power_w
     if pmi_feedback is None:
         pmi_feedback = build_pmi_feedback_trace(cfg, channels)
 
@@ -1193,16 +1261,12 @@ def run_wesn_multicast_policy_rl(
     alpha_levels_np = np.array(rl_cfg.alpha_level_grid, dtype=np.float64)
     zero_level_index = int(np.argmin(np.abs(alpha_levels_np)))
 
-    all_direction_names = ["weakest-user", "average-snr"]
+    all_direction_names = ["weakest-user"]
     if policy_variant in {"weakest_only", "weakest-user", "weakest"}:
         direction_selector = [0]
-    elif policy_variant in {"average_snr_only", "average-snr", "avg_snr", "average"}:
-        direction_selector = [1]
-    elif policy_variant in {"weakest_average_snr", "two_direction", "weakest_plus_average_snr"}:
-        direction_selector = [0, 1]
     else:
         raise ValueError(
-            "policy_variant must be weakest_only, average_snr_only, or weakest_average_snr."
+            "policy_variant must be weakest_only after removing the average-SNR direction."
         )
     direction_names = [all_direction_names[i] for i in direction_selector]
     num_directions = len(direction_selector)
@@ -1279,6 +1343,7 @@ def run_wesn_multicast_policy_rl(
         R_mats = build_multicast_R_matrices_from_q_vectors(q_vectors, rho)
         ref_beam = reference_baseline["precoders"][t]
         ref_rate = float(reference_baseline["throughput"][t])
+        ref_user_rates = reference_baseline["user_rates"][t]
         center_real = complex_unit_to_real(ref_beam)
         dirs_all, _ = multicast_direction_dictionary(ref_beam, R_mats, eps=rl_cfg.reward_sinr_eps)
         dirs = dirs_all[direction_selector]
@@ -1305,6 +1370,9 @@ def run_wesn_multicast_policy_rl(
             ref_rate=ref_rate,
             mode=rl_cfg.reward_mode,
             eps=rl_cfg.reward_sinr_eps,
+            user_rates=user_rates,
+            ref_user_rates=ref_user_rates,
+            softmin_tau=rl_cfg.softmin_tau,
         )
         advantage = float(reward)
         if rl_cfg.advantage_clip > 0:
@@ -1347,6 +1415,303 @@ def run_wesn_multicast_policy_rl(
         "alpha_prob": alpha_prob_trace,
         "direction_names": np.array(direction_names, dtype=object),
         "alpha_levels": alpha_levels_np,
+        "grad_norm": grad_norm_trace,
+        "loss": loss_trace,
+    }
+
+
+def random_tangent_direction(center_real: np.ndarray, rng: np.random.Generator, eps: float = 1e-12) -> np.ndarray:
+    """Sample a random unit direction in the tangent space at center_real."""
+    center = unit_norm(center_real)
+    for _ in range(16):
+        x = rng.standard_normal(center.size)
+        x = x - center * float(np.dot(center, x))
+        nrm = float(np.linalg.norm(x))
+        if nrm > eps:
+            return x / nrm
+    return unit_norm(rng.standard_normal(center.size))
+
+
+def tangent_project_real(center_real: np.ndarray, direction_real: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    center = unit_norm(center_real)
+    direction = np.asarray(direction_real, dtype=np.float64).reshape(-1)
+    direction = direction - center * float(np.dot(center, direction))
+    nrm = float(np.linalg.norm(direction))
+    if nrm < eps or not np.all(np.isfinite(direction)):
+        return np.zeros_like(center)
+    return direction / nrm
+
+
+def run_multicast_random_perturbation_baseline(
+    cfg: SimConfig,
+    rl_cfg: RLConfig,
+    channels: np.ndarray,
+    reference_baseline: dict[str, np.ndarray],
+    rng: np.random.Generator,
+    pmi_feedback: dict[str, np.ndarray],
+    mode: str,
+) -> dict[str, np.ndarray]:
+    """Evaluate random common-beam perturbations around the reference beam.
+
+    mode="isotropic" samples a random tangent direction.
+    mode="designed" samples a positive step along the hand-designed weakest-user direction.
+    """
+    if mode not in {"isotropic", "designed"}:
+        raise ValueError("Random perturbation mode must be 'isotropic' or 'designed'.")
+    noise_power = cfg.noise_power_w
+    alpha_levels_np = np.array(rl_cfg.alpha_level_grid, dtype=np.float64)
+    positive_alpha_levels_np = alpha_levels_np[alpha_levels_np >= 0.0]
+    if positive_alpha_levels_np.size == 0:
+        raise ValueError("Designed random perturbation needs at least one nonnegative alpha level.")
+    direction_names = np.array(["random-isotropic"] if mode == "isotropic" else ["weakest-user-positive"], dtype=object)
+
+    throughput = np.zeros(cfg.num_slots, dtype=np.float64)
+    sum_rate_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    rate_delta_baseline_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    beat_baseline_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    snr_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
+    user_rate_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
+    precoders = np.zeros((cfg.num_slots, cfg.num_tx_antennas), dtype=np.complex128)
+    selected_alpha_level_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    selected_direction_trace = np.zeros(cfg.num_slots, dtype=np.int64)
+
+    for t in range(cfg.num_slots):
+        print(f"Random multicast {mode} Slot {t + 1} / {cfg.num_slots}", end="\r")
+        ref_beam = reference_baseline["precoders"][t]
+        ref_rate = float(reference_baseline["throughput"][t])
+        center_real = complex_unit_to_real(ref_beam)
+        if mode == "isotropic":
+            alpha_level = float(rng.choice(alpha_levels_np))
+        else:
+            alpha_level = float(rng.choice(positive_alpha_levels_np))
+
+        if mode == "isotropic":
+            direction_idx = 0
+            direction = random_tangent_direction(center_real, rng)
+        else:
+            q_vectors = pmi_feedback["q_vectors"][t]
+            rho = estimate_multicast_rho_from_q_vectors(
+                channels[t], q_vectors, cfg.total_tx_power, noise_power
+            )
+            R_mats = build_multicast_R_matrices_from_q_vectors(q_vectors, rho)
+            dirs_all, _ = multicast_direction_dictionary(ref_beam, R_mats, eps=rl_cfg.reward_sinr_eps)
+            direction_idx = 0
+            direction = dirs_all[0]
+
+        candidate_real = unit_norm(center_real + float(rl_cfg.alpha_step_max_theta) * alpha_level * direction)
+        beam = real_to_common_beam(candidate_real, cfg.total_tx_power)
+        rate, sum_rate, snr, user_rates = compute_slot_multicast_rates(channels[t], beam, noise_power)
+
+        throughput[t] = rate
+        sum_rate_trace[t] = sum_rate
+        rate_delta_baseline_trace[t] = rate - ref_rate
+        beat_baseline_trace[t] = 1.0 if rate > ref_rate else 0.0
+        snr_trace[t] = snr
+        user_rate_trace[t] = user_rates
+        precoders[t] = beam
+        selected_alpha_level_trace[t] = alpha_level
+        selected_direction_trace[t] = direction_idx
+
+    print()
+    return {
+        "throughput": throughput,
+        "sum_rate": sum_rate_trace,
+        "reward": rate_delta_baseline_trace,
+        "rate_delta_baseline": rate_delta_baseline_trace,
+        "beat_baseline": beat_baseline_trace,
+        "snr": snr_trace,
+        "user_rates": user_rate_trace,
+        "precoders": precoders,
+        "selected_alpha_level": selected_alpha_level_trace,
+        "selected_direction": selected_direction_trace,
+        "direction_names": direction_names,
+        "alpha_levels": alpha_levels_np,
+    }
+
+
+def run_wesn_multicast_learned_vmf_direction_rl(
+    cfg: SimConfig,
+    rl_cfg: RLConfig,
+    channels: np.ndarray,
+    reference_baseline: dict[str, np.ndarray],
+    rng: np.random.Generator,
+    pmi_feedback: dict[str, np.ndarray] | None = None,
+) -> dict[str, np.ndarray]:
+    """Learn a state-dependent vMF mean direction and a discrete alpha step.
+
+    The WESN readout has two heads:
+      1) a real-packed tangent-space vMF mean direction around the reference beam;
+      2) logits over alpha levels for the step size along the sampled direction.
+    """
+    noise_power = cfg.noise_power_w
+    if pmi_feedback is None:
+        pmi_feedback = build_pmi_feedback_trace(cfg, channels)
+
+    wesn_input_features = build_multicast_wesn_input_features(
+        cfg=cfg,
+        channels=channels,
+        pmi_feedback=pmi_feedback,
+        noise_power=noise_power,
+    )
+    wesn_states = compute_wesn_states(wesn_input_features, rl_cfg, rng)
+    state_dim = wesn_states.shape[1]
+    real_dim = 2 * cfg.num_tx_antennas
+    alpha_levels_np = np.array(rl_cfg.alpha_level_grid, dtype=np.float64)
+    num_alpha_levels = int(alpha_levels_np.size)
+    zero_level_index = int(np.argmin(np.abs(alpha_levels_np)))
+
+    w_dir_init = rl_cfg.init_scale_out * rng.standard_normal((real_dim, state_dim))
+    w_alpha_init = rl_cfg.init_scale_out * rng.standard_normal((num_alpha_levels, state_dim))
+    w_dir = torch.nn.Parameter(torch.tensor(w_dir_init, dtype=torch.float64))
+    w_alpha = torch.nn.Parameter(torch.tensor(w_alpha_init, dtype=torch.float64))
+    optimizer = torch.optim.Adam([w_dir, w_alpha], lr=rl_cfg.lr_out)
+
+    throughput = np.zeros(cfg.num_slots, dtype=np.float64)
+    sum_rate_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    reward_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    rate_delta_baseline_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    beat_baseline_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    snr_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
+    user_rate_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
+    precoders = np.zeros((cfg.num_slots, cfg.num_tx_antennas), dtype=np.complex128)
+    selected_alpha_level_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    alpha_prob_trace = np.zeros((cfg.num_slots, num_alpha_levels), dtype=np.float64)
+    learned_direction_trace = np.zeros((cfg.num_slots, real_dim), dtype=np.float64)
+    sampled_direction_trace = np.zeros((cfg.num_slots, real_dim), dtype=np.float64)
+    grad_norm_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    loss_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+
+    batch_s: list[np.ndarray] = []
+    batch_centers: list[np.ndarray] = []
+    batch_directions: list[np.ndarray] = []
+    batch_alpha_indices: list[int] = []
+    batch_adv: list[float] = []
+    batch_indices: list[int] = []
+
+    def flush_batch() -> None:
+        nonlocal batch_s, batch_centers, batch_directions, batch_alpha_indices, batch_adv, batch_indices
+        if not batch_s:
+            return
+        s_batch = torch.tensor(np.stack(batch_s, axis=0), dtype=torch.float64)
+        center_batch = torch.tensor(np.stack(batch_centers, axis=0), dtype=torch.float64)
+        direction_batch = torch.tensor(np.stack(batch_directions, axis=0), dtype=torch.float64)
+        alpha_index_batch = torch.tensor(np.array(batch_alpha_indices), dtype=torch.long)
+        adv_batch = torch.tensor(np.array(batch_adv), dtype=torch.float64)
+        if rl_cfg.normalize_batch_advantage and adv_batch.numel() > 1:
+            adv_batch = adv_batch - torch.mean(adv_batch)
+            adv_std = torch.std(adv_batch, unbiased=False)
+            if float(adv_std.detach().cpu().item()) > 1e-12:
+                adv_batch = adv_batch / adv_std
+
+        mu_raw = torch.einsum("dn,bn->bd", w_dir, s_batch)
+        mu_tan = mu_raw - center_batch * torch.sum(mu_raw * center_batch, dim=-1, keepdim=True)
+        mu_tan = mu_tan / torch.clamp(torch.linalg.norm(mu_tan, dim=-1, keepdim=True), min=1e-12)
+        direction_log_prob = float(rl_cfg.learned_direction_kappa) * torch.sum(direction_batch * mu_tan, dim=-1)
+
+        alpha_logits = torch.einsum("ln,bn->bl", w_alpha, s_batch)
+        if rl_cfg.alpha_zero_logit_bias != 0.0:
+            alpha_logits[:, zero_level_index] += float(rl_cfg.alpha_zero_logit_bias)
+        alpha_log_probs = torch.log_softmax(alpha_logits / max(float(rl_cfg.candidate_temperature), 1e-12), dim=-1)
+        chosen_alpha_log_probs = torch.gather(alpha_log_probs, dim=-1, index=alpha_index_batch[:, None]).squeeze(-1)
+
+        loss = -torch.mean(adv_batch * (chosen_alpha_log_probs + direction_log_prob))
+        optimizer.zero_grad()
+        loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_([w_dir, w_alpha], rl_cfg.grad_clip_norm)
+        optimizer.step()
+
+        for idx in batch_indices:
+            loss_trace[idx] = float(loss.detach().cpu().item())
+            grad_norm_trace[idx] = float(grad_norm.detach().cpu().item())
+        batch_s = []
+        batch_centers = []
+        batch_directions = []
+        batch_alpha_indices = []
+        batch_adv = []
+        batch_indices = []
+
+    for t in range(cfg.num_slots):
+        print(f"WESN multicast learned_vmf_direction Slot {t + 1} / {cfg.num_slots}", end="\r")
+        s = wesn_states[t]
+        s_t = torch.tensor(s, dtype=torch.float64)
+        ref_beam = reference_baseline["precoders"][t]
+        ref_rate = float(reference_baseline["throughput"][t])
+        ref_user_rates = reference_baseline["user_rates"][t]
+        center_real = complex_unit_to_real(ref_beam)
+
+        with torch.no_grad():
+            mu_raw = torch.einsum("dn,n->d", w_dir, s_t).cpu().numpy()
+            mu_tan = tangent_project_real(center_real, mu_raw)
+            if not np.any(mu_tan):
+                mu_tan = random_tangent_direction(center_real, rng)
+            alpha_logits = torch.einsum("ln,n->l", w_alpha, s_t)
+            if rl_cfg.alpha_zero_logit_bias != 0.0:
+                alpha_logits[zero_level_index] += float(rl_cfg.alpha_zero_logit_bias)
+            alpha_probs = torch.softmax(alpha_logits / max(float(rl_cfg.candidate_temperature), 1e-12), dim=-1).cpu().numpy()
+
+        sampled_direction = sample_vmf(mu_tan, float(rl_cfg.learned_direction_kappa), rng)
+        sampled_direction = tangent_project_real(center_real, sampled_direction)
+        if not np.any(sampled_direction):
+            sampled_direction = random_tangent_direction(center_real, rng)
+        alpha_idx = int(rng.choice(num_alpha_levels, p=alpha_probs))
+        alpha_level = float(alpha_levels_np[alpha_idx])
+        candidate_real = unit_norm(center_real + float(rl_cfg.alpha_step_max_theta) * alpha_level * sampled_direction)
+        beam = real_to_common_beam(candidate_real, cfg.total_tx_power)
+        rate, sum_rate, snr, user_rates = compute_slot_multicast_rates(channels[t], beam, noise_power)
+        reward = compute_multicast_reward(
+            rate=rate,
+            ref_rate=ref_rate,
+            mode=rl_cfg.reward_mode,
+            eps=rl_cfg.reward_sinr_eps,
+            user_rates=user_rates,
+            ref_user_rates=ref_user_rates,
+            softmin_tau=rl_cfg.softmin_tau,
+        )
+        advantage = float(reward)
+        if rl_cfg.advantage_clip > 0:
+            advantage = float(np.clip(advantage, -rl_cfg.advantage_clip, rl_cfg.advantage_clip))
+
+        throughput[t] = rate
+        sum_rate_trace[t] = sum_rate
+        reward_trace[t] = reward
+        rate_delta_baseline_trace[t] = rate - ref_rate
+        beat_baseline_trace[t] = 1.0 if rate > ref_rate else 0.0
+        snr_trace[t] = snr
+        user_rate_trace[t] = user_rates
+        precoders[t] = beam
+        selected_alpha_level_trace[t] = alpha_level
+        alpha_prob_trace[t] = alpha_probs
+        learned_direction_trace[t] = mu_tan
+        sampled_direction_trace[t] = sampled_direction
+
+        batch_s.append(s)
+        batch_centers.append(center_real)
+        batch_directions.append(sampled_direction)
+        batch_alpha_indices.append(alpha_idx)
+        batch_adv.append(advantage)
+        batch_indices.append(t)
+        if len(batch_s) >= rl_cfg.batch_size:
+            flush_batch()
+
+    flush_batch()
+    print()
+    return {
+        "throughput": throughput,
+        "sum_rate": sum_rate_trace,
+        "reward": reward_trace,
+        "rate_delta_baseline": rate_delta_baseline_trace,
+        "beat_baseline": beat_baseline_trace,
+        "snr": snr_trace,
+        "user_rates": user_rate_trace,
+        "precoders": precoders,
+        "selected_alpha_level": selected_alpha_level_trace,
+        "selected_direction": np.zeros(cfg.num_slots, dtype=np.int64),
+        "direction_prob": np.ones((cfg.num_slots, 1), dtype=np.float64),
+        "alpha_prob": alpha_prob_trace,
+        "direction_names": np.array(["learned-vmf"], dtype=object),
+        "alpha_levels": alpha_levels_np,
+        "learned_direction": learned_direction_trace,
+        "sampled_direction": sampled_direction_trace,
         "grad_norm": grad_norm_trace,
         "loss": loss_trace,
     }
@@ -2616,7 +2981,7 @@ def sample_vmf(mu: np.ndarray, kappa: float, rng: np.random.Generator) -> np.nda
 def run_random_vmf_baseline(
     cfg: SimConfig, channels: np.ndarray, rng: np.random.Generator, fixed_kappa: float
 ) -> dict[str, np.ndarray]:
-    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    noise_power = cfg.noise_power_w
     throughput = np.zeros(cfg.num_slots, dtype=np.float64)
     k = cfg.num_users
     d = 2 * cfg.num_tx_antennas
@@ -2854,7 +3219,7 @@ def run_wesn_policy_rl(
     PMI vectors.  Because this construction only needs per-UE signal/leakage
     matrices, it supports any cfg.num_users.
     """
-    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    noise_power = cfg.noise_power_w
     k = cfg.num_users
     d = 2 * cfg.num_tx_antennas
     action_dim = k
@@ -4062,7 +4427,7 @@ def sim_cache_metadata(cfg: SimConfig) -> dict[str, float | int]:
         "num_rx_antennas_per_user": cfg.num_rx_antennas_per_user,
         "streams_per_user": cfg.streams_per_user,
         "num_slots": cfg.num_slots,
-        "snr_db": cfg.snr_db,
+        "noise_power_w": cfg.noise_power_w,
         "temporal_correlation": cfg.temporal_correlation,
         "channel_model": cfg.channel_model,
         "carrier_frequency_hz": cfg.carrier_frequency_hz,
@@ -4111,7 +4476,7 @@ def channel_pmi_cache_stem(cfg: SimConfig) -> str:
         f"nrx{cfg.num_rx_antennas_per_user}",
         f"streams{cfg.streams_per_user}",
         f"slots{cfg.num_slots}",
-        f"snr{_cache_value_to_slug(cfg.snr_db)}",
+        f"noise{_cache_value_to_slug(cfg.noise_power_w)}",
         f"ch{_cache_value_to_slug(cfg.channel_model)}",
         f"rho{_cache_value_to_slug(cfg.temporal_correlation)}",
         f"fc{_cache_value_to_slug(cfg.carrier_frequency_hz)}",
@@ -4371,7 +4736,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Single-group same-stream multicast beamforming + WESN common-beam perturbation RL")
     parser.add_argument("--num-slots", type=int, default=10000)
     parser.add_argument("--window-len", type=int, default=500)
-    parser.add_argument("--snr-db", type=float, default=10.0)
+    parser.add_argument("--noise-power-w", type=float, default=3.1622776601683794e-12, help="Receiver noise power in Watts. SNR is induced by Sionna pathloss/shadowing and this noise floor.")
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--num-users", type=int, default=3, help="Number of scheduled UEs/users.")
     parser.add_argument("--num-tx-antennas", type=int, default=4, help="Number of transmit antennas at the BS/virtual array.")
@@ -4392,8 +4757,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cell-radius-m", type=float, default=60.0, help="Maximum UE distance from BS for Sionna topology.")
     parser.add_argument("--min-ue-distance-m", type=float, default=50.0, help="Minimum UE distance from BS for Sionna topology.")
     parser.add_argument("--sionna-o2i-model", type=str, default="low", choices=["low", "high"], help="Sionna outdoor-to-indoor model parameter. UEs are currently placed outdoors.")
-    parser.add_argument("--sionna-enable-pathloss", action="store_true", help="Enable Sionna pathloss. Disabled by default to keep channel-power comparisons close to the toy model.")
-    parser.add_argument("--sionna-enable-shadow-fading", action="store_true", help="Enable Sionna shadow fading. Disabled by default to keep channel-power comparisons close to the toy model.")
+    parser.add_argument("--sionna-disable-pathloss", action="store_true", help="Disable Sionna pathloss. Pathloss is enabled by default.")
+    parser.add_argument("--sionna-disable-shadow-fading", action="store_true", help="Disable Sionna shadow fading. Shadow fading is enabled by default.")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_single_group_multicast"))
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
@@ -4438,16 +4803,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reward-mode",
         type=str,
-        default="min_rate_log_ratio",
+        default="soft_min_delta",
         choices=[
             "min_rate_delta",
             "normalized_min_rate_delta",
             "min_rate_log_ratio",
+            "soft_min_delta",
+            "normalized_soft_min_delta",
+            "soft_min_log_ratio",
             "throughput_delta",
             "normalized_throughput_delta",
         ],
         help="Scalar reward used for REINFORCE updates.",
     )
+    parser.add_argument("--softmin-tau", type=float, default=0.5, help="Temperature tau for soft-min training reward. Smaller is closer to hard min-rate.")
     parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
     parser.add_argument(
         "--reference-precoder",
@@ -4492,6 +4861,7 @@ def parse_args() -> argparse.Namespace:
         help="Number of uniformly spaced alpha levels from -1 to 1 for the discrete angle-step policy.",
     )
     parser.add_argument("--alpha-zero-logit-bias", type=float, default=2.0, help="Fixed logit bias added to the zero-alpha level so the initial policy favors the exact reference-precoder-center action.")
+    parser.add_argument("--learned-direction-kappa", type=float, default=10.0, help="vMF concentration for the learned common-beam direction policy.")
     parser.add_argument("--gaussian-init-theta", type=float, default=0.40, help="Initial physical theta mean for each UE before conversion to raw sigmoid coordinates.")
     parser.add_argument("--gaussian-init-phi", type=float, default=float(np.pi), help="Initial physical phi mean for each UE before conversion to raw sigmoid coordinates.")
     parser.add_argument("--no-exact-anchor-candidates", action="store_true", help="Disable deterministic exact SLNR / SLNR-residual / PMI candidates in the candidate pool.")
@@ -4513,7 +4883,7 @@ def main() -> None:
         num_users=args.num_users,
         num_rx_antennas_per_user=args.num_rx_antennas_per_user,
         num_slots=args.num_slots,
-        snr_db=args.snr_db,
+        noise_power_w=args.noise_power_w,
         temporal_correlation=args.rho,
         channel_model=args.channel_model,
         carrier_frequency_hz=args.carrier_frequency_hz,
@@ -4526,8 +4896,8 @@ def main() -> None:
         min_ue_distance_m=args.min_ue_distance_m,
         sionna_scenario=args.channel_model.split("sionna_", 1)[1] if args.channel_model.startswith("sionna_") else "umi",
         sionna_o2i_model=args.sionna_o2i_model,
-        sionna_enable_pathloss=args.sionna_enable_pathloss,
-        sionna_enable_shadow_fading=args.sionna_enable_shadow_fading,
+        sionna_enable_pathloss=not args.sionna_disable_pathloss,
+        sionna_enable_shadow_fading=not args.sionna_disable_shadow_fading,
         seed=args.seed,
         pmi_feedback_mode=args.pmi_feedback_mode,
         grad_ascent_iterations=args.grad_ascent_iterations,
@@ -4555,6 +4925,7 @@ def main() -> None:
         reward_mode=args.reward_mode,
         reference_precoder=args.reference_precoder,
         reward_sinr_eps=args.reward_sinr_eps,
+        softmin_tau=args.softmin_tau,
         best_of_n=args.best_of_n,
         candidate_temperature=args.candidate_temperature,
         normalize_candidate_scores=not args.no_normalize_candidate_scores,
@@ -4576,6 +4947,7 @@ def main() -> None:
         alpha_step_max_phi=args.alpha_step_max_phi,
         alpha_level_grid=tuple(np.linspace(-1.0, 1.0, args.num_alpha_levels)),
         alpha_zero_logit_bias=args.alpha_zero_logit_bias,
+        learned_direction_kappa=args.learned_direction_kappa,
         gaussian_init_theta=args.gaussian_init_theta,
         gaussian_init_phi=args.gaussian_init_phi,
         joint_pmi_aux_loss_weight=args.joint_pmi_aux_loss_weight,
@@ -4608,6 +4980,13 @@ def main() -> None:
         cache_dir=channel_pmi_cache_dir,
         force_recompute=args.force_recompute_channel_pmi,
     )
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    pre_precoding_snr_db = compute_pre_precoding_snr_db_trace(
+        cfg=cfg,
+        channels=channels,
+        pmi_feedback=pmi_feedback,
+    )
+    save_pre_precoding_snr_cdf(args.output_dir, pre_precoding_snr_db)
 
     multicast_baselines = run_multicast_common_baselines(
         cfg=cfg,
@@ -4616,6 +4995,24 @@ def main() -> None:
     )
     reference_results = multicast_baselines[rl_cfg.reference_precoder]
 
+    random_isotropic_results = run_multicast_random_perturbation_baseline(
+        cfg=cfg,
+        rl_cfg=rl_cfg,
+        channels=channels,
+        reference_baseline=reference_results,
+        rng=np.random.default_rng(cfg.seed + 20_000),
+        pmi_feedback=pmi_feedback,
+        mode="isotropic",
+    )
+    random_designed_results = run_multicast_random_perturbation_baseline(
+        cfg=cfg,
+        rl_cfg=rl_cfg,
+        channels=channels,
+        reference_baseline=reference_results,
+        rng=np.random.default_rng(cfg.seed + 20_010),
+        pmi_feedback=pmi_feedback,
+        mode="designed",
+    )
     weakest_only_results = run_wesn_multicast_policy_rl(
         cfg,
         rl_cfg,
@@ -4625,26 +5022,15 @@ def main() -> None:
         policy_variant="weakest_only",
         pmi_feedback=pmi_feedback,
     )
-    average_snr_only_results = run_wesn_multicast_policy_rl(
+    learned_vmf_results = run_wesn_multicast_learned_vmf_direction_rl(
         cfg,
         rl_cfg,
         channels,
         reference_results,
-        np.random.default_rng(cfg.seed + 20_002),
-        policy_variant="average_snr_only",
-        pmi_feedback=pmi_feedback,
-    )
-    two_direction_results = run_wesn_multicast_policy_rl(
-        cfg,
-        rl_cfg,
-        channels,
-        reference_results,
-        np.random.default_rng(cfg.seed + 20_003),
-        policy_variant="weakest_average_snr",
+        np.random.default_rng(cfg.seed + 20_004),
         pmi_feedback=pmi_feedback,
     )
 
-    args.output_dir.mkdir(parents=True, exist_ok=True)
     for name, results in multicast_baselines.items():
         np.save(args.output_dir / f"{name}_min_rate_trace.npy", results["throughput"])
         np.save(args.output_dir / f"{name}_sum_rate_trace.npy", results["sum_rate"])
@@ -4658,14 +5044,16 @@ def main() -> None:
                 np.save(args.output_dir / f"{prefix}_{key}_trace.npy", value)
 
     policy_results = {
+        "random_isotropic": random_isotropic_results,
+        "random_designed": random_designed_results,
         "weakest_only": weakest_only_results,
-        "average_snr_only": average_snr_only_results,
-        "weakest_average_snr": two_direction_results,
+        "learned_vmf_direction": learned_vmf_results,
     }
     policy_labels = {
+        "random_isotropic": "Random isotropic perturbation",
+        "random_designed": "Random weakest-user positive perturbation",
         "weakest_only": "WESN weakest-user only",
-        "average_snr_only": "WESN average-SNR only",
-        "weakest_average_snr": "WESN weakest-user + average-SNR",
+        "learned_vmf_direction": "WESN learned-vMF direction",
     }
     for prefix, results in policy_results.items():
         save_policy_arrays(prefix, results)
@@ -4673,8 +5061,9 @@ def main() -> None:
     min_curves = {
         "Gradient ascent reference": multicast_baselines["grad_ascent"]["throughput"],
         policy_labels["weakest_only"]: weakest_only_results["throughput"],
-        policy_labels["average_snr_only"]: average_snr_only_results["throughput"],
-        policy_labels["weakest_average_snr"]: two_direction_results["throughput"],
+        policy_labels["learned_vmf_direction"]: learned_vmf_results["throughput"],
+        policy_labels["random_isotropic"]: random_isotropic_results["throughput"],
+        policy_labels["random_designed"]: random_designed_results["throughput"],
     }
     x_size = min(moving_average(v, args.window_len).size for v in min_curves.values())
     x = np.arange(1, x_size + 1)
@@ -4691,10 +5080,33 @@ def main() -> None:
     fig.savefig(args.output_dir / "multicast_min_rate_across_time.png", dpi=150)
     plt.close(fig)
 
+    sum_curves = {
+        "Gradient ascent reference": multicast_baselines["grad_ascent"]["sum_rate"],
+        policy_labels["weakest_only"]: weakest_only_results["sum_rate"],
+        policy_labels["learned_vmf_direction"]: learned_vmf_results["sum_rate"],
+        policy_labels["random_isotropic"]: random_isotropic_results["sum_rate"],
+        policy_labels["random_designed"]: random_designed_results["sum_rate"],
+    }
+    x_size = min(moving_average(v, args.window_len).size for v in sum_curves.values())
+    x_sum = np.arange(1, x_size + 1)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for label, trace in sum_curves.items():
+        curve = moving_average(trace, args.window_len)
+        ax.plot(x_sum, curve[:x_size], lw=1.5, label=label)
+    ax.set_title("Single-Group Multicast Sum Rate")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Sum rate [bits/s/Hz]")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(args.output_dir / "multicast_sum_rate_across_time.png", dpi=150)
+    plt.close(fig)
+
     delta_curves = {
+        policy_labels["random_isotropic"]: random_isotropic_results["rate_delta_baseline"],
+        policy_labels["random_designed"]: random_designed_results["rate_delta_baseline"],
         policy_labels["weakest_only"]: weakest_only_results["rate_delta_baseline"],
-        policy_labels["average_snr_only"]: average_snr_only_results["rate_delta_baseline"],
-        policy_labels["weakest_average_snr"]: two_direction_results["rate_delta_baseline"],
+        policy_labels["learned_vmf_direction"]: learned_vmf_results["rate_delta_baseline"],
     }
     x_size = min(moving_average(v, args.window_len).size for v in delta_curves.values())
     x_delta = np.arange(1, x_size + 1)
@@ -4710,6 +5122,27 @@ def main() -> None:
     ax.legend(loc="best")
     fig.tight_layout()
     fig.savefig(args.output_dir / "multicast_min_rate_delta_vs_grad_ascent_reference.png", dpi=150)
+    plt.close(fig)
+
+    sum_delta_curves = {
+        label: trace - multicast_baselines["grad_ascent"]["sum_rate"]
+        for label, trace in sum_curves.items()
+        if label != "Gradient ascent reference"
+    }
+    x_size = min(moving_average(v, args.window_len).size for v in sum_delta_curves.values())
+    x_sum_delta = np.arange(1, x_size + 1)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for label, trace in sum_delta_curves.items():
+        curve = moving_average(trace, args.window_len)
+        ax.plot(x_sum_delta, curve[:x_size], lw=1.5, label=label)
+    ax.axhline(0.0, lw=1.0)
+    ax.set_title("Sum-Rate Delta vs Gradient-Ascent Reference")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Sum-rate delta [bits/s/Hz]")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(args.output_dir / "multicast_sum_rate_delta_vs_grad_ascent_reference.png", dpi=150)
     plt.close(fig)
 
     def save_direction_diagnostics(prefix: str, results: dict[str, np.ndarray], title: str) -> None:
@@ -4742,15 +5175,16 @@ def main() -> None:
         plt.close(fig)
 
     save_direction_diagnostics("weakest_only", weakest_only_results, "weakest-user only")
-    save_direction_diagnostics("average_snr_only", average_snr_only_results, "average-SNR only")
-    save_direction_diagnostics("weakest_average_snr", two_direction_results, "weakest-user + average-SNR")
+    save_direction_diagnostics("learned_vmf_direction", learned_vmf_results, "learned-vMF direction")
 
     print("Single-group multicast WESN common-beam perturbation RL run finished.")
     print(f"Gradient-ascent avg min UE rate       : {multicast_baselines['grad_ascent']['throughput'].mean():.4f} bits/s/Hz")
+    print(f"Gradient-ascent avg sum rate          : {multicast_baselines['grad_ascent']['sum_rate'].mean():.4f} bits/s/Hz")
     print(f"Reference precoder                    : {rl_cfg.reference_precoder}")
     for prefix, results in policy_results.items():
         label = policy_labels[prefix]
         print(f"{label} avg min UE rate          : {results['throughput'].mean():.4f} bits/s/Hz")
+        print(f"{label} avg sum rate             : {results['sum_rate'].mean():.4f} bits/s/Hz")
         print(f"{label} reward                   : {results['reward'].mean():.4f}")
         print(f"{label} delta vs baseline        : {results['rate_delta_baseline'].mean():.4f}")
         print(f"{label} beats baseline frac      : {results['beat_baseline'].mean():.4f}")
@@ -4761,6 +5195,8 @@ def main() -> None:
     print(f"Alpha softmax temperature        : {rl_cfg.candidate_temperature:.4f}")
     print(f"Alpha step max [theta, phi]      : [{rl_cfg.alpha_step_max_theta:.4f}, {rl_cfg.alpha_step_max_phi:.4f}]")
     print(f"Reward mode/reference precoder   : {rl_cfg.reward_mode} / {rl_cfg.reference_precoder}")
+    print(f"Soft-min tau                     : {rl_cfg.softmin_tau:.4f}")
+    print(f"Learned-direction vMF kappa      : {rl_cfg.learned_direction_kappa:.4f}")
     print(f"WESN skip window length          : {rl_cfg.skip_window_length}")
 
 if __name__ == "__main__":
