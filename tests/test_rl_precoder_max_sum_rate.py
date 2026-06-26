@@ -386,24 +386,61 @@ def build_pmi_feedback_trace(cfg: SimConfig, channels: np.ndarray) -> dict[str, 
     }
 
 def compute_slot_sum_rate(
-    user_channels: np.ndarray, precoder: np.ndarray, noise_power: float
+    user_channels: np.ndarray,
+    precoder: np.ndarray,
+    noise_power: float,
+    eps: float = 1e-12,
 ) -> tuple[float, np.ndarray]:
+    """Compute sum-rate with a local effective-channel LMMSE receiver at each UE.
+
+    For UE k, define the locally visible DMRS-style effective channels
+
+        g_{k,j} = H_k p_j,   j = 1,...,K.
+
+    This function assumes UE k has a perfect estimate of its own effective
+    post-precoding matrix
+
+        G_k = H_k P = [g_{k,1}, ..., g_{k,K}],
+
+    but it does not assume UE k knows any other UE's raw channel H_j, nor that
+    it knows H_k and P separately.  The receiver suppresses the other scheduled
+    streams using the local interference-plus-noise covariance
+
+        C_k = sum_{j != k} g_{k,j} g_{k,j}^H + sigma^2 I.
+
+    The resulting SINR is the generalized Rayleigh quotient
+
+        SINR_k = g_{k,k}^H C_k^{-1} g_{k,k}.
+
+    This corresponds to a perfect-DMRS local LMMSE/SINR-maximizing combiner.
+    """
     num_users = user_channels.shape[0]
+    num_rx_antennas = user_channels.shape[1]
     sinr = np.zeros(num_users, dtype=np.float64)
+    eye_rx = np.eye(num_rx_antennas, dtype=np.complex128)
 
     for k in range(num_users):
         hk = user_channels[k]
-        signal_vec = hk @ precoder[:, k]
-        uk = signal_vec / max(np.linalg.norm(signal_vec), 1e-12)
 
-        desired = np.abs(np.vdot(uk, hk @ precoder[:, k])) ** 2
-        interference = 0.0
+        # Local effective post-precoding channels available at UE k via DMRS:
+        # G_k[:, j] = H_k p_j.
+        g_eff = hk @ precoder
+        desired_vec = g_eff[:, k]
+
+        cov_int_noise = noise_power * eye_rx.copy()
         for j in range(num_users):
             if j != k:
-                interference += np.abs(np.vdot(uk, hk @ precoder[:, j])) ** 2
-        sinr[k] = desired / (interference + noise_power)
+                gj = g_eff[:, j]
+                cov_int_noise += np.outer(gj, gj.conj())
 
-    return float(np.sum(np.log2(1.0 + sinr))), sinr
+        try:
+            lmmse_direction = np.linalg.solve(cov_int_noise, desired_vec)
+        except np.linalg.LinAlgError:
+            lmmse_direction = np.linalg.pinv(cov_int_noise) @ desired_vec
+
+        sinr[k] = max(float(np.real(np.vdot(desired_vec, lmmse_direction))), 0.0)
+
+    return float(np.sum(np.log2(1.0 + np.maximum(sinr, eps)))), sinr
 
 
 
@@ -418,9 +455,9 @@ def compute_slot_sinr_proxy(
         interference_k = sum_{j != k} ||H_k p_j||_2^2
         proxy_sinr_k = desired_k / (interference_k + noise_power)
 
-    It is different from compute_slot_sum_rate(), which first forms a receive
-    combiner along the desired received vector and then projects interference
-    through that combiner.  The proxy is intentionally simpler and gives the RL
+    It is different from compute_slot_sum_rate(), which now uses a local
+    effective-channel LMMSE receiver based on G_k = H_k P. The proxy is
+    intentionally simpler and gives the RL
     update a user-wise, SINR-like signal rather than only a scalar sum-rate
     difference.
     """
@@ -771,6 +808,218 @@ def run_slnr_baseline(
         )
         throughput[t], sinr_trace[t] = compute_slot_sum_rate(channels[t], p_slnr, noise_power)
         precoders[t] = p_slnr
+
+    print()
+    return {
+        "throughput": throughput,
+        "sinr": sinr_trace,
+        "precoders": precoders,
+    }
+
+
+def compute_slot_sum_rate_mmse_receiver(
+    user_channels: np.ndarray,
+    precoder: np.ndarray,
+    noise_power: float,
+    eps: float = 1e-12,
+) -> tuple[float, np.ndarray]:
+    """Compute the single-stream-per-UE sum-rate with the SINR-maximizing linear receiver.
+
+    For UE k, the receiver is allowed to use the perfect local effective channel
+    G_k = H_k P, equivalently computed here from H_k and P for simulation.
+    The resulting SINR is
+
+        SINR_k = p_k^H H_k^H C_k^{-1} H_k p_k,
+
+    where C_k = sum_{j != k} H_k p_j p_j^H H_k^H + sigma^2 I is the
+    interference-plus-noise covariance.  This is the rate expression matched to
+    the WMMSE updates below. It matches the local perfect-DMRS LMMSE receiver
+    now used by compute_slot_sum_rate().
+    """
+    num_users = user_channels.shape[0]
+    num_rx_antennas = user_channels.shape[1]
+    sinr = np.zeros(num_users, dtype=np.float64)
+
+    eye_rx = np.eye(num_rx_antennas, dtype=np.complex128)
+    for k in range(num_users):
+        hk = user_channels[k]
+        pk = precoder[:, k]
+        desired_vec = hk @ pk
+        cov_int_noise = noise_power * eye_rx.copy()
+        for j in range(num_users):
+            if j == k:
+                continue
+            hjpj = hk @ precoder[:, j]
+            cov_int_noise += np.outer(hjpj, hjpj.conj())
+        try:
+            solved = np.linalg.solve(cov_int_noise, desired_vec)
+        except np.linalg.LinAlgError:
+            solved = np.linalg.pinv(cov_int_noise) @ desired_vec
+        sinr[k] = max(float(np.real(np.vdot(desired_vec, solved))), 0.0)
+
+    return float(np.sum(np.log2(1.0 + np.maximum(sinr, eps)))), sinr
+
+
+def build_full_csi_mrt_initial_precoder(
+    user_channels: np.ndarray,
+    total_tx_power: float,
+) -> np.ndarray:
+    """Initialize WMMSE with full-CSI dominant right singular vectors.
+
+    This uses the true H_k, not PMI feedback, and is only an initialization for
+    the non-convex WMMSE iterations.
+    """
+    num_users, _, num_tx_antennas = user_channels.shape
+    directions = np.zeros((num_tx_antennas, num_users), dtype=np.complex128)
+    for k in range(num_users):
+        _, _, vh = np.linalg.svd(user_channels[k], full_matrices=True)
+        directions[:, k] = vh.conj().T[:, 0]
+    return normalize_columns_equal_power(directions, total_tx_power)
+
+
+def _solve_wmmse_precoder_update(
+    a_mat: np.ndarray,
+    b_mat: np.ndarray,
+    total_tx_power: float,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Solve the WMMSE transmit update with a sum-power constraint.
+
+    The update has the closed form P(lambda) = (A + lambda I)^{-1} B.  The
+    scalar lambda >= 0 is chosen so that ||P(lambda)||_F^2 <= total_tx_power,
+    with equality unless the unconstrained lambda=0 solution already satisfies
+    the power constraint.
+    """
+    num_tx_antennas = a_mat.shape[0]
+    eye_tx = np.eye(num_tx_antennas, dtype=np.complex128)
+
+    def solve_for_lambda(lam: float) -> tuple[np.ndarray, float]:
+        mat = a_mat + float(lam) * eye_tx
+        try:
+            p_lam = np.linalg.solve(mat, b_mat)
+        except np.linalg.LinAlgError:
+            p_lam = np.linalg.pinv(mat) @ b_mat
+        power = float(np.real(np.sum(np.abs(p_lam) ** 2)))
+        return p_lam, power
+
+    p0, power0 = solve_for_lambda(0.0)
+    if power0 <= total_tx_power or power0 <= eps:
+        return p0
+
+    lam_low = 0.0
+    lam_high = 1.0
+    _, power_high = solve_for_lambda(lam_high)
+    while power_high > total_tx_power:
+        lam_high *= 2.0
+        _, power_high = solve_for_lambda(lam_high)
+        if lam_high > 1e12:
+            break
+
+    p_mid = p0
+    for _ in range(60):
+        lam_mid = 0.5 * (lam_low + lam_high)
+        p_mid, power_mid = solve_for_lambda(lam_mid)
+        if power_mid > total_tx_power:
+            lam_low = lam_mid
+        else:
+            lam_high = lam_mid
+    return p_mid
+
+
+def build_wmmse_precoder_full_csi(
+    user_channels: np.ndarray,
+    total_tx_power: float,
+    noise_power: float,
+    max_iters: int = 50,
+    tol: float = 1e-5,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Weighted-MMSE precoder using perfect full channel matrices H_k.
+
+    This implements the standard single-stream-per-user WMMSE block coordinate
+    descent for the weighted sum-rate objective with equal user weights:
+
+        maximize_P  sum_k log2(1 + SINR_k(P))
+        subject to  sum_k ||p_k||_2^2 <= total_tx_power.
+
+    It is a full-CSI oracle baseline and does not use PMI, Type-II feedback, or
+    any WESN/RL state.
+    """
+    num_users, num_rx_antennas, num_tx_antennas = user_channels.shape
+    p_mat = build_full_csi_mrt_initial_precoder(user_channels, total_tx_power)
+    eye_rx = np.eye(num_rx_antennas, dtype=np.complex128)
+
+    prev_rate = -np.inf
+    for _ in range(max(1, int(max_iters))):
+        # Receiver and MSE-weight update.
+        u_list: list[np.ndarray] = []
+        w_vec = np.zeros(num_users, dtype=np.float64)
+        for k in range(num_users):
+            hk = user_channels[k]
+            y_cov = noise_power * eye_rx.copy()
+            for j in range(num_users):
+                hjpj = hk @ p_mat[:, j]
+                y_cov += np.outer(hjpj, hjpj.conj())
+            desired_vec = hk @ p_mat[:, k]
+            try:
+                u_k = np.linalg.solve(y_cov, desired_vec)
+            except np.linalg.LinAlgError:
+                u_k = np.linalg.pinv(y_cov) @ desired_vec
+            mse_k = 1.0 - 2.0 * np.real(np.vdot(u_k, desired_vec)) + np.real(np.vdot(u_k, y_cov @ u_k))
+            mse_k = max(float(mse_k), eps)
+            u_list.append(u_k)
+            w_vec[k] = 1.0 / mse_k
+
+        # Transmit precoder update.
+        a_mat = np.zeros((num_tx_antennas, num_tx_antennas), dtype=np.complex128)
+        b_mat = np.zeros((num_tx_antennas, num_users), dtype=np.complex128)
+        for k in range(num_users):
+            hk = user_channels[k]
+            u_k = u_list[k]
+            hk_h_u = hk.conj().T @ u_k
+            a_mat += w_vec[k] * np.outer(hk_h_u, hk_h_u.conj())
+            b_mat[:, k] = w_vec[k] * hk_h_u
+        p_new = _solve_wmmse_precoder_update(a_mat, b_mat, total_tx_power, eps=eps)
+
+        rate, _ = compute_slot_sum_rate_mmse_receiver(user_channels, p_new, noise_power, eps=eps)
+        p_mat = p_new
+        if np.isfinite(prev_rate) and abs(rate - prev_rate) <= float(tol) * max(1.0, abs(prev_rate)):
+            break
+        prev_rate = rate
+
+    return p_mat
+
+
+def run_wmmse_baseline(
+    cfg: SimConfig,
+    channels: np.ndarray,
+    max_iters: int = 50,
+    tol: float = 1e-5,
+) -> dict[str, np.ndarray]:
+    """Run the perfect-full-CSI WMMSE performance-ceiling baseline."""
+    if cfg.streams_per_user != 1:
+        raise ValueError("This WMMSE baseline currently assumes one stream per UE.")
+
+    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    throughput = np.zeros(cfg.num_slots, dtype=np.float64)
+    sinr_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
+    precoders = np.zeros(
+        (cfg.num_slots, cfg.num_tx_antennas, cfg.num_users), dtype=np.complex128
+    )
+
+    for t in range(cfg.num_slots):
+        print(f"WMMSE full-CSI Slot {t + 1} / {cfg.num_slots}", end="\r")
+        p_wmmse = build_wmmse_precoder_full_csi(
+            channels[t],
+            total_tx_power=cfg.total_tx_power,
+            noise_power=noise_power,
+            max_iters=max_iters,
+            tol=tol,
+        )
+        throughput[t], sinr_trace[t] = compute_slot_sum_rate_mmse_receiver(
+            channels[t], p_wmmse, noise_power
+        )
+        precoders[t] = p_wmmse
 
     print()
     return {
@@ -3314,6 +3563,44 @@ def moving_average(trace: np.ndarray, window_len: int) -> np.ndarray:
     return np.convolve(trace, kernel, mode="valid")
 
 
+def reference_throughput_from_delta(results: dict[str, np.ndarray]) -> np.ndarray:
+    """Recover the selected reference baseline throughput from stored delta traces."""
+    if "reference_throughput" in results:
+        return np.asarray(results["reference_throughput"], dtype=np.float64)
+    return np.asarray(results["throughput"], dtype=np.float64) - np.asarray(results["rate_delta_baseline"], dtype=np.float64)
+
+
+def rate_gain_percent_vs_reference(results: dict[str, np.ndarray], eps: float = 1e-12) -> np.ndarray:
+    """Return 100 * (R_method - R_ref) / |R_ref| for each slot.
+
+    This is a per-slot percentage trace. For plots, prefer
+    smoothed_rate_gain_percent_vs_reference() so the plotted percentage is
+    computed from smoothed throughput traces rather than from the mean of
+    per-slot ratios.
+    """
+    delta = np.asarray(results["rate_delta_baseline"], dtype=np.float64)
+    ref = reference_throughput_from_delta(results)
+    return 100.0 * delta / np.maximum(np.abs(ref), eps)
+
+
+def smoothed_rate_gain_percent_vs_reference(
+    results: dict[str, np.ndarray],
+    window_len: int,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Return 100 * (MA{R_method} - MA{R_ref}) / |MA{R_ref}|.
+
+    This avoids averaging per-slot ratios, which can overweight slots where the
+    reference baseline is small.
+    """
+    method_avg = moving_average(np.asarray(results["throughput"], dtype=np.float64), window_len)
+    ref_avg = moving_average(reference_throughput_from_delta(results), window_len)
+    x_size = min(method_avg.size, ref_avg.size)
+    method_avg = method_avg[:x_size]
+    ref_avg = ref_avg[:x_size]
+    return 100.0 * (method_avg - ref_avg) / np.maximum(np.abs(ref_avg), eps)
+
+
 
 def make_action_coord_labels(num_coords: int) -> list[str]:
     """Labels for arbitrary-K per-UE alpha/action coordinates."""
@@ -3339,6 +3626,7 @@ def save_plots(
     rl_results: dict[str, np.ndarray],
     output_dir: Path,
     window_len: int,
+    wmmse_throughput: np.ndarray | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     rl_throughput = rl_results["throughput"]
@@ -3367,6 +3655,7 @@ def save_plots(
     zf_avg = moving_average(zf_throughput, window_len)
     slnr_avg = moving_average(slnr_throughput, window_len)
     random_vmf_avg = moving_average(random_vmf_throughput, window_len)
+    wmmse_avg = moving_average(wmmse_throughput, window_len) if wmmse_throughput is not None else None
     rl_avg = moving_average(rl_throughput, window_len)
     reward_avg = moving_average(reward, window_len)
     beat_zf_avg = moving_average(beat_zf, window_len)
@@ -3392,6 +3681,8 @@ def save_plots(
     fig1, ax1 = plt.subplots(figsize=(8, 4.5))
     ax1.plot(x_tput, zf_avg, lw=1.5, label="ZF baseline")
     ax1.plot(x_tput, slnr_avg, lw=1.5, label="SLNR baseline")
+    if wmmse_avg is not None:
+        ax1.plot(x_tput[:wmmse_avg.size], wmmse_avg, lw=1.5, label="WMMSE full-CSI ceiling")
     # ax1.plot(x_tput, random_vmf_avg, lw=1.5, label="Random vMF baseline")
     ax1.plot(x_tput, rl_avg, lw=1.5, label="WESN")
     ax1.set_title("Throughput Across Time")
@@ -3692,18 +3983,25 @@ def save_two_policy_comparison_plots(
     multi_results: dict[str, np.ndarray],
     output_dir: Path,
     window_len: int,
+    wmmse_throughput: np.ndarray | None = None,
 ) -> None:
     """Save comparison plots for the one-direction and multi-direction policies."""
     output_dir.mkdir(parents=True, exist_ok=True)
     zf_avg = moving_average(zf_throughput, window_len)
     slnr_avg = moving_average(slnr_throughput, window_len)
+    wmmse_avg = moving_average(wmmse_throughput, window_len) if wmmse_throughput is not None else None
     single_tput_avg = moving_average(single_results["throughput"], window_len)
     multi_tput_avg = moving_average(multi_results["throughput"], window_len)
-    x = np.arange(1, min(zf_avg.size, slnr_avg.size, single_tput_avg.size, multi_tput_avg.size) + 1)
+    x_size = min(zf_avg.size, slnr_avg.size, single_tput_avg.size, multi_tput_avg.size)
+    if wmmse_avg is not None:
+        x_size = min(x_size, wmmse_avg.size)
+    x = np.arange(1, x_size + 1)
 
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(x, zf_avg[:x.size], lw=1.5, label="ZF baseline")
     ax.plot(x, slnr_avg[:x.size], lw=1.5, label="SLNR baseline")
+    if wmmse_avg is not None:
+        ax.plot(x, wmmse_avg[:x.size], lw=1.5, label="WMMSE full-CSI ceiling")
     ax.plot(x, single_tput_avg[:x.size], lw=1.5, label="WESN: 1 direction")
     ax.plot(x, multi_tput_avg[:x.size], lw=1.5, label="WESN: 3 directions")
     ax.set_title("Throughput Across Time")
@@ -3730,13 +4028,16 @@ def save_two_policy_comparison_plots(
     fig.savefig(output_dir / "reward_across_time_single_vs_multi_direction.png", dpi=150)
     plt.close(fig)
 
+    single_gain_pct_avg = smoothed_rate_gain_percent_vs_reference(single_results, window_len)
+    multi_gain_pct_avg = smoothed_rate_gain_percent_vs_reference(multi_results, window_len)
+    xg = np.arange(1, min(single_gain_pct_avg.size, multi_gain_pct_avg.size) + 1)
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(xr, moving_average(single_results["rate_delta_baseline"], window_len)[:xr.size], lw=1.5, label="WESN: 1 direction")
-    ax.plot(xr, moving_average(multi_results["rate_delta_baseline"], window_len)[:xr.size], lw=1.5, label="WESN: 3 directions")
+    ax.plot(xg, single_gain_pct_avg[:xg.size], lw=1.5, label="WESN: 1 direction")
+    ax.plot(xg, multi_gain_pct_avg[:xg.size], lw=1.5, label="WESN: 3 directions")
     ax.axhline(0.0, lw=1.0)
-    ax.set_title("Throughput Delta vs Reference Baseline Across Time")
+    ax.set_title("Throughput Gain vs Reference Baseline Across Time")
     ax.set_xlabel("Slot index")
-    ax.set_ylabel("Rate delta [bits/s/Hz]")
+    ax.set_ylabel("Rate gain [%]")
     ax.grid(True, alpha=0.35)
     ax.legend(loc="best")
     fig.tight_layout()
@@ -3818,12 +4119,14 @@ def save_three_policy_comparison_plots(
     three_results: dict[str, np.ndarray],
     output_dir: Path,
     window_len: int,
+    wmmse_throughput: np.ndarray | None = None,
 ) -> None:
     """Save comparison plots for one-, two-, and three-direction learned policies."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
     zf_avg = moving_average(zf_throughput, window_len)
     slnr_avg = moving_average(slnr_throughput, window_len)
+    wmmse_avg = moving_average(wmmse_throughput, window_len) if wmmse_throughput is not None else None
     single_tput_avg = moving_average(single_results["throughput"], window_len)
     two_tput_avg = moving_average(two_results["throughput"], window_len)
     three_tput_avg = moving_average(three_results["throughput"], window_len)
@@ -3858,11 +4161,15 @@ def save_three_policy_comparison_plots(
     ]
     for filename, wesn_curves in throughput_plot_specs:
         x_size = min(zf_avg.size, slnr_avg.size, *(curve.size for curve, _ in wesn_curves))
+        if wmmse_avg is not None:
+            x_size = min(x_size, wmmse_avg.size)
         x = np.arange(1, x_size + 1)
 
         fig, ax = plt.subplots(figsize=(8, 4.5))
         ax.plot(x, zf_avg[:x_size], lw=1.5, label="ZF baseline")
         ax.plot(x, slnr_avg[:x_size], lw=1.5, label="SLNR baseline")
+        if wmmse_avg is not None:
+            ax.plot(x, wmmse_avg[:x_size], lw=1.5, label="WMMSE full-CSI ceiling")
         for curve, label in wesn_curves:
             ax.plot(x, curve[:x_size], lw=1.5, label=label)
         ax.set_title("Throughput Across Time")
@@ -3877,9 +4184,9 @@ def save_three_policy_comparison_plots(
     single_reward_avg = moving_average(single_results["reward"], window_len)
     two_reward_avg = moving_average(two_results["reward"], window_len)
     three_reward_avg = moving_average(three_results["reward"], window_len)
-    single_delta_avg = moving_average(single_results["rate_delta_baseline"], window_len)
-    two_delta_avg = moving_average(two_results["rate_delta_baseline"], window_len)
-    three_delta_avg = moving_average(three_results["rate_delta_baseline"], window_len)
+    single_delta_avg = smoothed_rate_gain_percent_vs_reference(single_results, window_len)
+    two_delta_avg = smoothed_rate_gain_percent_vs_reference(two_results, window_len)
+    three_delta_avg = smoothed_rate_gain_percent_vs_reference(three_results, window_len)
 
     policy_plot_specs = [
         ("1dir", [(single_results, "1 direction")]),
@@ -3929,9 +4236,9 @@ def save_three_policy_comparison_plots(
         for curve, label in delta_curves:
             ax.plot(x, curve[:x_size], lw=1.5, label=f"WESN: {label}")
         ax.axhline(0.0, lw=1.0)
-        ax.set_title("Throughput Delta vs Reference Baseline Across Time")
+        ax.set_title("Throughput Gain vs Reference Baseline Across Time")
         ax.set_xlabel("Slot index")
-        ax.set_ylabel("Rate delta [bits/s/Hz]")
+        ax.set_ylabel("Rate gain [%]")
         ax.grid(True, alpha=0.35)
         ax.legend(loc="best")
         fig.tight_layout()
@@ -4009,11 +4316,13 @@ def save_four_policy_comparison_plots(
     multi_iter_results: dict[str, np.ndarray],
     output_dir: Path,
     window_len: int,
+    wmmse_throughput: np.ndarray | None = None,
 ) -> None:
     """Save summary comparison plots including the sequential multi-iteration policy."""
     output_dir.mkdir(parents=True, exist_ok=True)
     zf_avg = moving_average(zf_throughput, window_len)
     slnr_avg = moving_average(slnr_throughput, window_len)
+    wmmse_avg = moving_average(wmmse_throughput, window_len) if wmmse_throughput is not None else None
     policies = [
         (single_results, "WESN: 1 direction"),
         (two_results, "WESN: 2 directions"),
@@ -4023,10 +4332,14 @@ def save_four_policy_comparison_plots(
 
     tput_curves = [(moving_average(res["throughput"], window_len), label) for res, label in policies]
     x_size = min(zf_avg.size, slnr_avg.size, *(curve.size for curve, _ in tput_curves))
+    if wmmse_avg is not None:
+        x_size = min(x_size, wmmse_avg.size)
     x = np.arange(1, x_size + 1)
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(x, zf_avg[:x_size], lw=1.5, label="ZF baseline")
     ax.plot(x, slnr_avg[:x_size], lw=1.5, label="SLNR baseline")
+    if wmmse_avg is not None:
+        ax.plot(x, wmmse_avg[:x_size], lw=1.5, label="WMMSE full-CSI ceiling")
     for curve, label in tput_curves:
         ax.plot(x, curve[:x_size], lw=1.5, label=label)
     ax.set_title("Throughput Across Time")
@@ -4053,16 +4366,16 @@ def save_four_policy_comparison_plots(
     fig.savefig(output_dir / "reward_across_time_1dir_2dir_3dir_multi_iter.png", dpi=150)
     plt.close(fig)
 
-    delta_curves = [(moving_average(res["rate_delta_baseline"], window_len), label) for res, label in policies]
+    delta_curves = [(moving_average(rate_gain_percent_vs_reference(res), window_len), label) for res, label in policies]
     x_size = min(curve.size for curve, _ in delta_curves)
     x = np.arange(1, x_size + 1)
     fig, ax = plt.subplots(figsize=(8, 4.5))
     for curve, label in delta_curves:
         ax.plot(x, curve[:x_size], lw=1.5, label=label)
     ax.axhline(0.0, lw=1.0)
-    ax.set_title("Throughput Delta vs Reference Baseline Across Time")
+    ax.set_title("Throughput Gain vs Reference Baseline Across Time")
     ax.set_xlabel("Slot index")
-    ax.set_ylabel("Rate delta [bits/s/Hz]")
+    ax.set_ylabel("Rate gain [%]")
     ax.grid(True, alpha=0.35)
     ax.legend(loc="best")
     fig.tight_layout()
@@ -4123,6 +4436,7 @@ def sim_cache_metadata(cfg: SimConfig) -> dict[str, float | int]:
         "sionna_enable_shadow_fading": cfg.sionna_enable_shadow_fading,
         "seed": cfg.seed,
         "total_tx_power": cfg.total_tx_power,
+        "rate_receiver_model": "local_effective_lmmse_hkp_v1",
         "pmi_feedback_mode": cfg.pmi_feedback_mode,
         "type_ii_feedback_architecture": cfg.type_ii_feedback_architecture,
         "type_ii_nfft": cfg.type_ii_nfft,
@@ -4335,6 +4649,47 @@ def load_or_run_slnr_baseline(
     return slnr_results
 
 
+def load_or_run_wmmse_baseline(
+    cfg: SimConfig,
+    channels: np.ndarray,
+    cache_dir: Path,
+    force_recompute: bool = False,
+    max_iters: int = 50,
+    tol: float = 1e-5,
+) -> dict[str, np.ndarray]:
+    """Load perfect-full-CSI WMMSE baseline from cache if compatible; otherwise compute it."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    meta_path = cache_dir / "wmmse_full_csi_baseline_meta.json"
+    metadata = sim_cache_metadata(cfg) | {
+        "baseline": "wmmse_full_csi",
+        "wmmse_max_iters": int(max_iters),
+        "wmmse_tol": float(tol),
+        "rate_receiver": "mmse_sinr_maximizing",
+    }
+
+    paths = {
+        "throughput": cache_dir / "wmmse_full_csi_throughput_trace.npy",
+        "sinr": cache_dir / "wmmse_full_csi_sinr_trace.npy",
+        "precoders": cache_dir / "wmmse_full_csi_precoders_trace.npy",
+    }
+
+    can_load = (
+        not force_recompute
+        and _metadata_matches(meta_path, metadata)
+        and all(path.exists() for path in paths.values())
+    )
+    if can_load:
+        print(f"Loading cached full-CSI WMMSE baseline from {cache_dir}")
+        return {name: np.load(path) for name, path in paths.items()}
+
+    print("Cached full-CSI WMMSE baseline not found or incompatible; recomputing.")
+    wmmse_results = run_wmmse_baseline(cfg, channels, max_iters=max_iters, tol=tol)
+    for name, path in paths.items():
+        np.save(path, wmmse_results[name])
+    _write_metadata(meta_path, metadata)
+    return wmmse_results
+
+
 def load_or_run_random_vmf_baseline(
     cfg: SimConfig,
     channels: np.ndarray,
@@ -4369,13 +4724,196 @@ def load_or_run_random_vmf_baseline(
     return random_results
 
 
+
+# Central selector for which top-level precoding strategies are evaluated,
+# saved, printed, and included in the selected-algorithm throughput plot.
+# RL algorithms still need the selected reference baselines (ZF/SLNR) as
+# internal dependencies; those dependencies may be computed even when omitted
+# from this list, but they are not treated as requested top-level algorithms.
+AVAILABLE_ALGORITHMS: tuple[str, ...] = (
+    "zf",
+    "slnr",
+    "wmmse",
+    # "random_vmf",
+    # "wesn_single_direction",
+    "wesn_two_direction",
+    # "wesn_multi_direction",
+    "wesn_multi_iteration",
+)
+DEFAULT_ALGORITHMS: tuple[str, ...] = AVAILABLE_ALGORITHMS
+ALGORITHM_LABELS: dict[str, str] = {
+    "zf": "ZF baseline",
+    "slnr": "SLNR baseline",
+    "wmmse": "WMMSE full-CSI ceiling",
+    "random_vmf": "Random vMF baseline",
+    "wesn_single_direction": "WESN: 1 direction",
+    "wesn_two_direction": "WESN: 2 directions",
+    "wesn_multi_direction": "WESN: 3 directions",
+    "wesn_multi_iteration": "WESN: multi-iteration",
+}
+ALGORITHM_OUTPUT_PREFIXES: dict[str, str] = {
+    "zf": "zf",
+    "slnr": "slnr",
+    "wmmse": "wmmse_full_csi",
+    "random_vmf": "random_vmf_baseline",
+    "wesn_single_direction": "single_direction",
+    "wesn_two_direction": "two_direction",
+    "wesn_multi_direction": "multi_direction",
+    "wesn_multi_iteration": "multi_iteration",
+}
+RL_ALGORITHMS: frozenset[str] = frozenset(
+    {
+        "wesn_single_direction",
+        "wesn_two_direction",
+        "wesn_multi_direction",
+        "wesn_multi_iteration",
+    }
+)
+
+
+def parse_algorithm_selection(raw_algorithms: str | None) -> tuple[str, ...]:
+    """Parse a comma-separated algorithm list.
+
+    Use "all" (the default) for all algorithms in DEFAULT_ALGORITHMS.
+    """
+    if raw_algorithms is None or raw_algorithms.strip() == "" or raw_algorithms.strip().lower() == "all":
+        return DEFAULT_ALGORITHMS
+    selected = tuple(item.strip().lower() for item in raw_algorithms.split(",") if item.strip())
+    unknown = sorted(set(selected) - set(AVAILABLE_ALGORITHMS))
+    if unknown:
+        raise ValueError(
+            f"Unknown algorithm(s): {unknown}. Valid choices are: {', '.join(AVAILABLE_ALGORITHMS)}"
+        )
+    # Preserve user order while removing duplicates.
+    return tuple(dict.fromkeys(selected))
+
+
+def save_selected_algorithm_throughput_plot(
+    algorithm_results: dict[str, dict[str, np.ndarray]],
+    algorithms: tuple[str, ...],
+    output_dir: Path,
+    window_len: int,
+) -> None:
+    """Plot only the algorithms requested by the algorithms selector."""
+    throughput_curves: list[tuple[str, np.ndarray]] = []
+    for name in algorithms:
+        results = algorithm_results.get(name)
+        if results is None or "throughput" not in results:
+            continue
+        throughput_curves.append((ALGORITHM_LABELS.get(name, name), moving_average(results["throughput"], window_len)))
+
+    if not throughput_curves:
+        return
+
+    x_size = min(curve.size for _, curve in throughput_curves)
+    x = np.arange(1, x_size + 1)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for label, curve in throughput_curves:
+        ax.plot(x, curve[:x_size], lw=1.5, label=label)
+    ax.set_title("Throughput Across Time")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Sum-rate [bits/s/Hz]")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / "throughput_across_time_selected_algorithms.png", dpi=150)
+    plt.close(fig)
+
+
+def save_selected_algorithm_rate_delta_plot(
+    algorithm_results: dict[str, dict[str, np.ndarray]],
+    algorithms: tuple[str, ...],
+    output_dir: Path,
+    window_len: int,
+) -> None:
+    """Plot rate-gain percentage vs each selected RL algorithm's reference baseline.
+
+    Only algorithms with a rate_delta_baseline trace are included. Conventional
+    baselines such as ZF/SLNR/WMMSE usually do not have a meaningful
+    per-algorithm reference delta, so they are skipped here.
+    """
+    delta_curves: list[tuple[str, np.ndarray]] = []
+    for name in algorithms:
+        results = algorithm_results.get(name)
+        if results is None or "rate_delta_baseline" not in results or "throughput" not in results:
+            continue
+        delta_curves.append((ALGORITHM_LABELS.get(name, name), smoothed_rate_gain_percent_vs_reference(results, window_len)))
+
+    if not delta_curves:
+        return
+
+    x_size = min(curve.size for _, curve in delta_curves)
+    x = np.arange(1, x_size + 1)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for label, curve in delta_curves:
+        ax.plot(x, curve[:x_size], lw=1.5, label=label)
+    ax.axhline(0.0, lw=1.0)
+    ax.set_title("Throughput Gain vs Reference Baseline Across Time")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Rate gain [%]")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / "rate_delta_vs_baseline_selected_algorithms.png", dpi=150)
+    plt.close(fig)
+
+
+def save_selected_algorithm_reward_plot(
+    algorithm_results: dict[str, dict[str, np.ndarray]],
+    algorithms: tuple[str, ...],
+    output_dir: Path,
+    window_len: int,
+) -> None:
+    """Plot reward for selected RL algorithms only."""
+    reward_curves: list[tuple[str, np.ndarray]] = []
+    for name in algorithms:
+        results = algorithm_results.get(name)
+        if results is None or "reward" not in results:
+            continue
+        reward_curves.append((ALGORITHM_LABELS.get(name, name), moving_average(results["reward"], window_len)))
+
+    if not reward_curves:
+        return
+
+    x_size = min(curve.size for _, curve in reward_curves)
+    x = np.arange(1, x_size + 1)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for label, curve in reward_curves:
+        ax.plot(x, curve[:x_size], lw=1.5, label=label)
+    ax.set_title("RL Reward Across Time")
+    ax.set_xlabel("Slot index")
+    ax.set_ylabel("Reward vs selected reference")
+    ax.grid(True, alpha=0.35)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(output_dir / "reward_across_time_selected_algorithms.png", dpi=150)
+    plt.close(fig)
+
+
+def clean_existing_plots(output_dir: Path) -> None:
+    """Remove stale plot files so old algorithm curves do not appear after changing algorithms.
+
+    This only removes PNG files under output_dir. Cached channels/baselines and saved
+    NumPy traces are intentionally preserved.
+    """
+    if not output_dir.exists():
+        return
+    for png_path in output_dir.rglob("*.png"):
+        try:
+            png_path.unlink()
+        except OSError:
+            pass
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF/SLNR baselines + batched WESN reference-precoder perturbation RL")
     parser.add_argument("--num-slots", type=int, default=10000)
     parser.add_argument("--window-len", type=int, default=500)
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
-    parser.add_argument("--num-users", type=int, default=3, help="Number of scheduled UEs/users.")
+    parser.add_argument("--num-users", type=int, default=4, help="Number of scheduled UEs/users.")
     parser.add_argument("--num-tx-antennas", type=int, default=4, help="Number of transmit antennas at the BS/virtual array.")
     parser.add_argument("--num-rx-antennas-per-user", type=int, default=2, help="Number of receive antennas per UE.")
     parser.add_argument(
@@ -4398,10 +4936,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sionna-enable-shadow-fading", action="store_true", help="Enable Sionna shadow fading. Disabled by default to keep channel-power comparisons close to the toy model.")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", type=Path, default=Path("results/rl_precoder_max_sum_rate"))
+    parser.add_argument(
+        "--keep-old-plots",
+        action="store_true",
+        help=(
+            "Deprecated/no-op compatibility flag. Existing PNG plots are now kept by default "
+            "so image viewers do not close when open plot files are removed."
+        ),
+    )
+    parser.add_argument(
+        "--clear-old-plots",
+        action="store_true",
+        help=(
+            "Delete existing PNG plots under output_dir before saving new plots. "
+            "Use this only when you explicitly want to remove stale plot files."
+        ),
+    )
+    parser.add_argument(
+        "--save-legacy-comparison-plots",
+        action="store_true",
+        help="Also save the older comparison/diagnostic plot suites. These may include dependency baselines such as ZF/SLNR inside WESN diagnostic subdirectories.",
+    )
     parser.add_argument("--baseline-cache-dir", type=Path, default=None)
     parser.add_argument("--channel-pmi-cache-dir", type=Path, default=None, help="Directory used to cache generated channels and PMI traces. Defaults to output_dir/channel_pmi_cache.")
     parser.add_argument("--force-recompute-channel-pmi", action="store_true", help="Ignore cached channels/PMI and regenerate them before running baselines/RL.")
     parser.add_argument("--force-recompute-baselines", action="store_true")
+    parser.add_argument("--wmmse-max-iters", type=int, default=50, help="Maximum WMMSE block-coordinate iterations per slot for the full-CSI oracle baseline.")
+    parser.add_argument("--wmmse-tol", type=float, default=1e-5, help="Relative sum-rate convergence tolerance for the full-CSI WMMSE oracle baseline.")
     parser.add_argument(
         "--pmi-feedback-mode",
         type=str,
@@ -4487,11 +5048,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-alpha-levels",
         type=int,
-        default=21,
+        default=16,
         help="Number of uniformly spaced alpha levels from -1 to 1 for the discrete angle-step policy.",
     )
     parser.add_argument("--alpha-zero-logit-bias", type=float, default=2.0, help="Fixed logit bias added to the zero-alpha level so the initial policy favors the exact reference-precoder-center action.")
-    parser.add_argument("--multi-iter-max-steps", type=int, default=30, help="Maximum number of inner refinement iterations for the sequential multi-iteration WESN policy.")
+    parser.add_argument("--multi-iter-max-steps", type=int, default=20, help="Maximum number of inner refinement iterations for the sequential multi-iteration WESN policy.")
     parser.add_argument("--multi-iter-step-penalty", type=float, default=0.0, help="Optional penalty subtracted from the terminal reward per executed multi-iteration refinement step.")
     parser.add_argument("--no-multi-iter-stop-action", action="store_true", help="Disable the stop action in the multi-iteration policy; the policy then always runs for H_max inner steps.")
     parser.add_argument("--gaussian-init-theta", type=float, default=0.40, help="Initial physical theta mean for each UE before conversion to raw sigmoid coordinates.")
@@ -4505,6 +5066,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-mixture", type=float, default=0, help="Learning rate for the trainable mixture/reuse probability logit.")
     parser.add_argument("--positive-rate-bonus-lambda", type=float, default=0.0, help="Scale lambda for the positive rate-delta bonus: lambda * max(rate - reference_rate, 0)^p.")
     parser.add_argument("--positive-rate-bonus-power", type=float, default=0.5, help="Exponent p for the positive rate-delta bonus. Default 0.5 amplifies small positive deltas.")
+
+    parser.add_argument(
+        "--algorithms",
+        type=str,
+        default="all",
+        help=(
+            "Comma-separated top-level algorithms to evaluate/plot. Use 'all' for the default full set. "
+            "Valid names: " + ", ".join(AVAILABLE_ALGORITHMS)
+        ),
+    )
     return parser.parse_args()
 
 
@@ -4610,184 +5181,274 @@ def main() -> None:
         force_recompute=args.force_recompute_channel_pmi,
     )
 
-    zf_results = load_or_run_zf_baseline(
-        cfg=cfg,
-        channels=channels,
-        cache_dir=baseline_cache_dir,
-        force_recompute=args.force_recompute_baselines,
-        pmi_feedback=pmi_feedback,
-    )
-    slnr_results = load_or_run_slnr_baseline(
-        cfg=cfg,
-        channels=channels,
-        cache_dir=baseline_cache_dir,
-        force_recompute=args.force_recompute_baselines,
-        pmi_feedback=pmi_feedback,
-    )
-    random_vmf_results = load_or_run_random_vmf_baseline(
-        cfg=cfg,
-        channels=channels,
-        rng=rng_random_vmf,
-        fixed_kappa=rl_cfg.fixed_kappa,
-        cache_dir=baseline_cache_dir,
-        force_recompute=args.force_recompute_baselines,
-    )
-    single_direction_results = run_wesn_policy_rl(
-        cfg,
-        rl_cfg,
-        channels,
-        zf_results,
-        slnr_results,
-        rng_rl,
-        policy_variant="single_direction",
-        pmi_feedback=pmi_feedback,
-    )
+    algorithms = parse_algorithm_selection(args.algorithms)
+    algorithm_set = set(algorithms)
+    requested_rl = algorithm_set & RL_ALGORITHMS
+
+    # ZF/SLNR are internal dependencies for all WESN policies because the WESN
+    # state uses PMI features from ZF and the policy/reward can use ZF or SLNR
+    # as the reference. They are only saved/plotted/printed as top-level
+    # algorithms if they are included in `algorithms`.
+    need_zf = "zf" in algorithm_set or bool(requested_rl)
+    need_slnr = "slnr" in algorithm_set or bool(requested_rl)
+    if requested_rl and rl_cfg.reference_precoder == "slnr":
+        need_slnr = True
+    if requested_rl and rl_cfg.reference_precoder == "zf":
+        need_zf = True
+
+    algorithm_results: dict[str, dict[str, np.ndarray]] = {}
+    zf_results: dict[str, np.ndarray] | None = None
+    slnr_results: dict[str, np.ndarray] | None = None
+
+    if need_zf:
+        zf_results = load_or_run_zf_baseline(
+            cfg=cfg,
+            channels=channels,
+            cache_dir=baseline_cache_dir,
+            force_recompute=args.force_recompute_baselines,
+            pmi_feedback=pmi_feedback,
+        )
+        if "zf" in algorithm_set:
+            algorithm_results["zf"] = zf_results
+
+    if need_slnr:
+        slnr_results = load_or_run_slnr_baseline(
+            cfg=cfg,
+            channels=channels,
+            cache_dir=baseline_cache_dir,
+            force_recompute=args.force_recompute_baselines,
+            pmi_feedback=pmi_feedback,
+        )
+        if "slnr" in algorithm_set:
+            algorithm_results["slnr"] = slnr_results
+
+    if "wmmse" in algorithm_set:
+        algorithm_results["wmmse"] = load_or_run_wmmse_baseline(
+            cfg=cfg,
+            channels=channels,
+            cache_dir=baseline_cache_dir,
+            force_recompute=args.force_recompute_baselines,
+            max_iters=args.wmmse_max_iters,
+            tol=args.wmmse_tol,
+        )
+
+    if "random_vmf" in algorithm_set:
+        algorithm_results["random_vmf"] = load_or_run_random_vmf_baseline(
+            cfg=cfg,
+            channels=channels,
+            rng=rng_random_vmf,
+            fixed_kappa=rl_cfg.fixed_kappa,
+            cache_dir=baseline_cache_dir,
+            force_recompute=args.force_recompute_baselines,
+        )
+
+    if requested_rl:
+        if zf_results is None or slnr_results is None:
+            raise RuntimeError("WESN algorithms require ZF and SLNR dependency results.")
+
+    if "wesn_single_direction" in algorithm_set:
+        algorithm_results["wesn_single_direction"] = run_wesn_policy_rl(
+            cfg,
+            rl_cfg,
+            channels,
+            zf_results,
+            slnr_results,
+            rng_rl,
+            policy_variant="single_direction",
+            pmi_feedback=pmi_feedback,
+        )
+
     # Use separate RNG streams so each learned policy has an independent but
     # reproducible exploration trajectory while using the same channels and
     # deterministic baselines.
-    rng_rl_two = np.random.default_rng(cfg.seed + 30_000)
-    torch.manual_seed(cfg.seed + 1)
-    two_direction_results = run_wesn_policy_rl(
-        cfg,
-        rl_cfg,
-        channels,
-        zf_results,
-        slnr_results,
-        rng_rl_two,
-        policy_variant="two_direction",
-        pmi_feedback=pmi_feedback,
-    )
-    rng_rl_multi = np.random.default_rng(cfg.seed + 40_000)
-    torch.manual_seed(cfg.seed + 2)
-    multi_direction_results = run_wesn_policy_rl(
-        cfg,
-        rl_cfg,
-        channels,
-        zf_results,
-        slnr_results,
-        rng_rl_multi,
-        policy_variant="multi_direction",
-        pmi_feedback=pmi_feedback,
-    )
-    rng_rl_multi_iter = np.random.default_rng(cfg.seed + 50_000)
-    torch.manual_seed(cfg.seed + 3)
-    multi_iteration_results = run_wesn_policy_rl_multi_iteration(
-        cfg,
-        rl_cfg,
-        channels,
-        zf_results,
-        slnr_results,
-        rng_rl_multi_iter,
-        pmi_feedback=pmi_feedback,
-    )
+    if "wesn_two_direction" in algorithm_set:
+        rng_rl_two = np.random.default_rng(cfg.seed + 30_000)
+        torch.manual_seed(cfg.seed + 1)
+        algorithm_results["wesn_two_direction"] = run_wesn_policy_rl(
+            cfg,
+            rl_cfg,
+            channels,
+            zf_results,
+            slnr_results,
+            rng_rl_two,
+            policy_variant="two_direction",
+            pmi_feedback=pmi_feedback,
+        )
+
+    if "wesn_multi_direction" in algorithm_set:
+        rng_rl_multi = np.random.default_rng(cfg.seed + 40_000)
+        torch.manual_seed(cfg.seed + 2)
+        algorithm_results["wesn_multi_direction"] = run_wesn_policy_rl(
+            cfg,
+            rl_cfg,
+            channels,
+            zf_results,
+            slnr_results,
+            rng_rl_multi,
+            policy_variant="multi_direction",
+            pmi_feedback=pmi_feedback,
+        )
+
+    if "wesn_multi_iteration" in algorithm_set:
+        rng_rl_multi_iter = np.random.default_rng(cfg.seed + 50_000)
+        torch.manual_seed(cfg.seed + 3)
+        algorithm_results["wesn_multi_iteration"] = run_wesn_policy_rl_multi_iteration(
+            cfg,
+            rl_cfg,
+            channels,
+            zf_results,
+            slnr_results,
+            rng_rl_multi_iter,
+            pmi_feedback=pmi_feedback,
+        )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    np.save(args.output_dir / "zf_throughput_trace.npy", zf_results["throughput"])
-    np.save(args.output_dir / "slnr_throughput_trace.npy", slnr_results["throughput"])
-    np.save(args.output_dir / "slnr_sinr_trace.npy", slnr_results["sinr"])
-    np.save(args.output_dir / "slnr_precoders_trace.npy", slnr_results["precoders"])
-    np.save(args.output_dir / "random_vmf_baseline_throughput_trace.npy", random_vmf_results["throughput"])
+    if args.clear_old_plots:
+        clean_existing_plots(args.output_dir)
 
-    def save_policy_arrays(prefix: str, results: dict[str, np.ndarray]) -> None:
+    def save_result_arrays(prefix: str, results: dict[str, np.ndarray]) -> None:
         for key, value in results.items():
             if isinstance(value, np.ndarray):
                 np.save(args.output_dir / f"{prefix}_{key}_trace.npy", value)
 
-    save_policy_arrays("single_direction", single_direction_results)
-    save_policy_arrays("two_direction", two_direction_results)
-    save_policy_arrays("multi_direction", multi_direction_results)
-    save_policy_arrays("multi_iteration", multi_iteration_results)
+    for algorithm_name in algorithms:
+        results = algorithm_results.get(algorithm_name)
+        if results is None:
+            continue
+        save_result_arrays(ALGORITHM_OUTPUT_PREFIXES.get(algorithm_name, algorithm_name), results)
 
-    save_three_policy_comparison_plots(
-        zf_throughput=zf_results["throughput"],
-        slnr_throughput=slnr_results["throughput"],
-        single_results=single_direction_results,
-        two_results=two_direction_results,
-        three_results=multi_direction_results,
+    save_selected_algorithm_throughput_plot(
+        algorithm_results=algorithm_results,
+        algorithms=algorithms,
         output_dir=args.output_dir,
         window_len=args.window_len,
     )
-    save_four_policy_comparison_plots(
-        zf_throughput=zf_results["throughput"],
-        slnr_throughput=slnr_results["throughput"],
-        single_results=single_direction_results,
-        two_results=two_direction_results,
-        three_results=multi_direction_results,
-        multi_iter_results=multi_iteration_results,
+    save_selected_algorithm_rate_delta_plot(
+        algorithm_results=algorithm_results,
+        algorithms=algorithms,
+        output_dir=args.output_dir,
+        window_len=args.window_len,
+    )
+    save_selected_algorithm_reward_plot(
+        algorithm_results=algorithm_results,
+        algorithms=algorithms,
         output_dir=args.output_dir,
         window_len=args.window_len,
     )
 
-    # Keep the old single-policy diagnostic plots too, but write them into
-    # separate subdirectories so they do not overwrite each other.
-    save_plots(
-        zf_throughput=zf_results["throughput"],
-        slnr_throughput=slnr_results["throughput"],
-        random_vmf_throughput=random_vmf_results["throughput"],
-        rl_results=single_direction_results,
-        output_dir=args.output_dir / "single_direction_diagnostics",
-        window_len=args.window_len,
-    )
-    save_plots(
-        zf_throughput=zf_results["throughput"],
-        slnr_throughput=slnr_results["throughput"],
-        random_vmf_throughput=random_vmf_results["throughput"],
-        rl_results=two_direction_results,
-        output_dir=args.output_dir / "two_direction_diagnostics",
-        window_len=args.window_len,
-    )
-    save_plots(
-        zf_throughput=zf_results["throughput"],
-        slnr_throughput=slnr_results["throughput"],
-        random_vmf_throughput=random_vmf_results["throughput"],
-        rl_results=multi_direction_results,
-        output_dir=args.output_dir / "multi_direction_diagnostics",
-        window_len=args.window_len,
-    )
-    save_plots(
-        zf_throughput=zf_results["throughput"],
-        slnr_throughput=slnr_results["throughput"],
-        random_vmf_throughput=random_vmf_results["throughput"],
-        rl_results=multi_iteration_results,
-        output_dir=args.output_dir / "multi_iteration_diagnostics",
-        window_len=args.window_len,
-    )
+    single_direction_results = algorithm_results.get("wesn_single_direction")
+    two_direction_results = algorithm_results.get("wesn_two_direction")
+    multi_direction_results = algorithm_results.get("wesn_multi_direction")
+    multi_iteration_results = algorithm_results.get("wesn_multi_iteration")
+    wmmse_results = algorithm_results.get("wmmse")
+    random_vmf_results = algorithm_results.get("random_vmf")
+
+    if args.save_legacy_comparison_plots:
+        # Keep the richer legacy comparison plots when all required WESN variants
+        # are selected. These comparison plots use only selected WESN policies, and
+        # include WMMSE only when WMMSE itself was requested.
+
+        if (
+            zf_results is not None
+            and slnr_results is not None
+            and single_direction_results is not None
+            and two_direction_results is not None
+            and multi_direction_results is not None
+        ):
+            save_three_policy_comparison_plots(
+                zf_throughput=zf_results["throughput"],
+                slnr_throughput=slnr_results["throughput"],
+                single_results=single_direction_results,
+                two_results=two_direction_results,
+                three_results=multi_direction_results,
+                output_dir=args.output_dir,
+                window_len=args.window_len,
+                wmmse_throughput=wmmse_results["throughput"] if wmmse_results is not None else None,
+            )
+
+        if (
+            zf_results is not None
+            and slnr_results is not None
+            and single_direction_results is not None
+            and two_direction_results is not None
+            and multi_direction_results is not None
+            and multi_iteration_results is not None
+        ):
+            save_four_policy_comparison_plots(
+                zf_throughput=zf_results["throughput"],
+                slnr_throughput=slnr_results["throughput"],
+                single_results=single_direction_results,
+                two_results=two_direction_results,
+                three_results=multi_direction_results,
+                multi_iter_results=multi_iteration_results,
+                output_dir=args.output_dir,
+                window_len=args.window_len,
+                wmmse_throughput=wmmse_results["throughput"] if wmmse_results is not None else None,
+            )
+
+        # Keep the old single-policy diagnostic plots for selected WESN policies.
+        # random_vmf_throughput is required by the helper but is not currently drawn
+        # on the throughput plot, so use zeros when random_vmf is not requested.
+        if zf_results is not None and slnr_results is not None:
+            random_vmf_throughput = (
+                random_vmf_results["throughput"] if random_vmf_results is not None else np.zeros_like(zf_results["throughput"])
+            )
+            diagnostic_specs = [
+                ("wesn_single_direction", "single_direction_diagnostics"),
+                ("wesn_two_direction", "two_direction_diagnostics"),
+                ("wesn_multi_direction", "multi_direction_diagnostics"),
+                ("wesn_multi_iteration", "multi_iteration_diagnostics"),
+            ]
+            for algorithm_name, subdir in diagnostic_specs:
+                results = algorithm_results.get(algorithm_name)
+                if results is None:
+                    continue
+                save_plots(
+                    zf_throughput=zf_results["throughput"],
+                    slnr_throughput=slnr_results["throughput"],
+                    random_vmf_throughput=random_vmf_throughput,
+                    rl_results=results,
+                    output_dir=args.output_dir / subdir,
+                    window_len=args.window_len,
+                    wmmse_throughput=wmmse_results["throughput"] if wmmse_results is not None else None,
+                )
 
     print("Simple WESN-FB PMI reference-precoder perturbation RL run finished.")
-    print(f"ZF average throughput             : {zf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"SLNR baseline throughput          : {slnr_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"Random vMF baseline throughput    : {random_vmf_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"Reference precoder                : {rl_cfg.reference_precoder}")
-    print(f"WESN 1-direction throughput       : {single_direction_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"WESN 2-direction throughput       : {two_direction_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"WESN 3-direction throughput       : {multi_direction_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"WESN multi-iteration throughput   : {multi_iteration_results['throughput'].mean():.4f} bits/s/Hz")
-    print(f"WESN 1-direction reward           : {single_direction_results['reward'].mean():.4f}")
-    print(f"WESN 2-direction reward           : {two_direction_results['reward'].mean():.4f}")
-    print(f"WESN 3-direction reward           : {multi_direction_results['reward'].mean():.4f}")
-    print(f"WESN multi-iteration reward       : {multi_iteration_results['reward'].mean():.4f}")
-    print(f"WESN 1-direction delta vs baseline: {single_direction_results['rate_delta_baseline'].mean():.4f}")
-    print(f"WESN 2-direction delta vs baseline: {two_direction_results['rate_delta_baseline'].mean():.4f}")
-    print(f"WESN 3-direction delta vs baseline: {multi_direction_results['rate_delta_baseline'].mean():.4f}")
-    print(f"WESN multi-iteration delta vs baseline: {multi_iteration_results['rate_delta_baseline'].mean():.4f}")
-    print(f"WESN 1-direction beats baseline frac: {single_direction_results['beat_baseline'].mean():.4f}")
-    print(f"WESN 2-direction beats baseline frac: {two_direction_results['beat_baseline'].mean():.4f}")
-    print(f"WESN 3-direction beats baseline frac: {multi_direction_results['beat_baseline'].mean():.4f}")
-    print(f"WESN multi-iteration beats baseline frac: {multi_iteration_results['beat_baseline'].mean():.4f}")
-    print(f"WESN multi-iteration mean inner steps: {multi_iteration_results['num_inner_steps'].mean():.4f}")
-    print(f"WESN multi-iteration mean stop fraction per UE: {multi_iteration_results['selected_stop'].mean(axis=0)}")
-    print(f"Mean selected direction index [theta0, phi0, theta1, phi1] for 2-direction policy: {two_direction_results['selected_direction'].mean(axis=0)}")
-    print(f"2-direction names                : {list(two_direction_results['direction_names'])}")
-    print(f"Mean selected direction index [theta0, phi0, theta1, phi1] for 3-direction policy: {multi_direction_results['selected_direction'].mean(axis=0)}")
-    print(f"3-direction names                : {list(multi_direction_results['direction_names'])}")
-    print(f"Alpha levels                     : {rl_cfg.alpha_level_grid}")
-    print(f"Alpha zero logit bias            : {rl_cfg.alpha_zero_logit_bias:.4f}")
-    print(f"Alpha softmax temperature        : {rl_cfg.candidate_temperature:.4f}")
-    print(f"Alpha step max [theta, phi]      : [{rl_cfg.alpha_step_max_theta:.4f}, {rl_cfg.alpha_step_max_phi:.4f}]")
-    print(f"Multi-iteration max steps/stop   : {rl_cfg.multi_iter_max_steps} / {rl_cfg.multi_iter_include_stop_action}")
-    print(f"Multi-iteration step penalty     : {rl_cfg.multi_iter_step_penalty:.4f}")
-    print(f"Reward mode/reference precoder   : {rl_cfg.reward_mode} / {rl_cfg.reference_precoder}")
-    print(f"WESN skip window length          : {rl_cfg.skip_window_length}")
+    print(f"Algorithms requested              : {', '.join(algorithms)}")
+    for algorithm_name in algorithms:
+        results = algorithm_results.get(algorithm_name)
+        if results is None or "throughput" not in results:
+            continue
+        print(
+            f"{ALGORITHM_LABELS.get(algorithm_name, algorithm_name):34s}: "
+            f"{results['throughput'].mean():.4f} bits/s/Hz"
+        )
+
+    if requested_rl:
+        print(f"Reference precoder                : {rl_cfg.reference_precoder}")
+        for algorithm_name in algorithms:
+            if algorithm_name not in RL_ALGORITHMS:
+                continue
+            results = algorithm_results.get(algorithm_name)
+            if results is None:
+                continue
+            label = ALGORITHM_LABELS.get(algorithm_name, algorithm_name)
+            print(f"{label:34s} reward              : {results['reward'].mean():.4f}")
+            print(f"{label:34s} delta vs baseline   : {results['rate_delta_baseline'].mean():.4f}")
+            print(f"{label:34s} beats baseline frac : {results['beat_baseline'].mean():.4f}")
+
+    if multi_iteration_results is not None:
+        print(f"WESN multi-iteration mean inner steps: {multi_iteration_results['num_inner_steps'].mean():.4f}")
+        print(f"WESN multi-iteration mean stop fraction per UE: {multi_iteration_results['selected_stop'].mean(axis=0)}")
+    if two_direction_results is not None:
+        print(f"Mean selected direction index for 2-direction policy: {two_direction_results['selected_direction'].mean(axis=0)}")
+        print(f"2-direction names                : {list(two_direction_results['direction_names'])}")
+    if multi_direction_results is not None:
+        print(f"Mean selected direction index for 3-direction policy: {multi_direction_results['selected_direction'].mean(axis=0)}")
+        print(f"3-direction names                : {list(multi_direction_results['direction_names'])}")
+    if requested_rl:
+        print(f"Alpha levels                     : {rl_cfg.alpha_level_grid}")
+        print(f"Alpha zero logit bias            : {rl_cfg.alpha_zero_logit_bias:.4f}")
 
 if __name__ == "__main__":
     main()
