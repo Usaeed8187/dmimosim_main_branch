@@ -4489,6 +4489,19 @@ def channel_pmi_cache_stem(cfg: SimConfig) -> str:
     return "channel_pmi_" + "_".join(parts)
 
 
+def baseline_cache_stem(cfg: SimConfig, baseline_name: str, extra_parts: tuple[str, ...] = ()) -> str:
+    """Filename stem for channel-dependent baseline caches.
+
+    The channel/PMI stem already encodes simulation dimensions, num_slots, seed,
+    SNR, channel model, PMI mode, and other settings that change deterministic
+    baseline traces.  Prefixing it with the baseline name lets multiple
+    conventional baselines and slot counts coexist in the same cache directory.
+    """
+    parts = [baseline_name, channel_pmi_cache_stem(cfg)]
+    parts.extend(extra_parts)
+    return "_".join(parts)
+
+
 def load_or_generate_channels_and_pmi(
     cfg: SimConfig,
     cache_dir: Path,
@@ -4586,14 +4599,15 @@ def load_or_run_zf_baseline(
     the same simulation configuration and channel seed.
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    meta_path = cache_dir / "zf_baseline_meta.json"
+    stem = baseline_cache_stem(cfg, "zf")
+    meta_path = cache_dir / f"{stem}_meta.json"
     metadata = sim_cache_metadata(cfg)
 
     paths = {
-        "throughput": cache_dir / "zf_throughput_trace.npy",
-        "sinr": cache_dir / "zf_sinr_trace.npy",
-        "precoders": cache_dir / "zf_precoders_trace.npy",
-        "pmi_features": cache_dir / "zf_pmi_features_trace.npy",
+        "throughput": cache_dir / f"{stem}_throughput_trace.npy",
+        "sinr": cache_dir / f"{stem}_sinr_trace.npy",
+        "precoders": cache_dir / f"{stem}_precoders_trace.npy",
+        "pmi_features": cache_dir / f"{stem}_pmi_features_trace.npy",
     }
 
     can_load = (
@@ -4602,7 +4616,7 @@ def load_or_run_zf_baseline(
         and all(path.exists() for path in paths.values())
     )
     if can_load:
-        print(f"Loading cached ZF baseline from {cache_dir}")
+        print(f"Loading cached ZF baseline from {cache_dir / stem}")
         return {name: np.load(path) for name, path in paths.items()}
 
     print("Cached ZF baseline not found or incompatible; recomputing.")
@@ -4623,13 +4637,14 @@ def load_or_run_slnr_baseline(
 ) -> dict[str, np.ndarray]:
     """Load PMI-only SLNR baseline from cache if compatible; otherwise compute it."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    meta_path = cache_dir / "slnr_baseline_meta.json"
+    stem = baseline_cache_stem(cfg, "slnr")
+    meta_path = cache_dir / f"{stem}_meta.json"
     metadata = sim_cache_metadata(cfg) | {"baseline": "pmi_only_slnr"}
 
     paths = {
-        "throughput": cache_dir / "slnr_throughput_trace.npy",
-        "sinr": cache_dir / "slnr_sinr_trace.npy",
-        "precoders": cache_dir / "slnr_precoders_trace.npy",
+        "throughput": cache_dir / f"{stem}_throughput_trace.npy",
+        "sinr": cache_dir / f"{stem}_sinr_trace.npy",
+        "precoders": cache_dir / f"{stem}_precoders_trace.npy",
     }
 
     can_load = (
@@ -4638,7 +4653,7 @@ def load_or_run_slnr_baseline(
         and all(path.exists() for path in paths.values())
     )
     if can_load:
-        print(f"Loading cached SLNR baseline from {cache_dir}")
+        print(f"Loading cached SLNR baseline from {cache_dir / stem}")
         return {name: np.load(path) for name, path in paths.items()}
 
     print("Cached SLNR baseline not found or incompatible; recomputing.")
@@ -4659,7 +4674,15 @@ def load_or_run_wmmse_baseline(
 ) -> dict[str, np.ndarray]:
     """Load perfect-full-CSI WMMSE baseline from cache if compatible; otherwise compute it."""
     cache_dir.mkdir(parents=True, exist_ok=True)
-    meta_path = cache_dir / "wmmse_full_csi_baseline_meta.json"
+    stem = baseline_cache_stem(
+        cfg,
+        "wmmse_full_csi",
+        extra_parts=(
+            f"iters{int(max_iters)}",
+            f"tol{_cache_value_to_slug(float(tol))}",
+        ),
+    )
+    meta_path = cache_dir / f"{stem}_meta.json"
     metadata = sim_cache_metadata(cfg) | {
         "baseline": "wmmse_full_csi",
         "wmmse_max_iters": int(max_iters),
@@ -4668,9 +4691,9 @@ def load_or_run_wmmse_baseline(
     }
 
     paths = {
-        "throughput": cache_dir / "wmmse_full_csi_throughput_trace.npy",
-        "sinr": cache_dir / "wmmse_full_csi_sinr_trace.npy",
-        "precoders": cache_dir / "wmmse_full_csi_precoders_trace.npy",
+        "throughput": cache_dir / f"{stem}_throughput_trace.npy",
+        "sinr": cache_dir / f"{stem}_sinr_trace.npy",
+        "precoders": cache_dir / f"{stem}_precoders_trace.npy",
     }
 
     can_load = (
@@ -4679,7 +4702,7 @@ def load_or_run_wmmse_baseline(
         and all(path.exists() for path in paths.values())
     )
     if can_load:
-        print(f"Loading cached full-CSI WMMSE baseline from {cache_dir}")
+        print(f"Loading cached full-CSI WMMSE baseline from {cache_dir / stem}")
         return {name: np.load(path) for name, path in paths.items()}
 
     print("Cached full-CSI WMMSE baseline not found or incompatible; recomputing.")
@@ -4948,7 +4971,7 @@ def parse_args() -> argparse.Namespace:
         "--clear-old-plots",
         action="store_true",
         help=(
-            "Delete existing PNG plots under output_dir before saving new plots. "
+            "Delete existing PNG plots under output_dir/plots before saving new plots. "
             "Use this only when you explicitly want to remove stale plot files."
         ),
     )
@@ -4980,7 +5003,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-window-length",
         type=int,
-        default=4,
+        default=8,
         help="Number of recent PMI feature vectors included in the WESN skip/readout connection. Use 1 for the one-step skip connection.",
     )
 
@@ -5303,13 +5326,17 @@ def main() -> None:
         )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    npy_output_dir = args.output_dir / "npy_files"
+    plot_output_dir = args.output_dir / "plots"
+    npy_output_dir.mkdir(parents=True, exist_ok=True)
+    plot_output_dir.mkdir(parents=True, exist_ok=True)
     if args.clear_old_plots:
-        clean_existing_plots(args.output_dir)
+        clean_existing_plots(plot_output_dir)
 
     def save_result_arrays(prefix: str, results: dict[str, np.ndarray]) -> None:
         for key, value in results.items():
             if isinstance(value, np.ndarray):
-                np.save(args.output_dir / f"{prefix}_{key}_trace.npy", value)
+                np.save(npy_output_dir / f"{prefix}_{key}_trace.npy", value)
 
     for algorithm_name in algorithms:
         results = algorithm_results.get(algorithm_name)
@@ -5320,19 +5347,19 @@ def main() -> None:
     save_selected_algorithm_throughput_plot(
         algorithm_results=algorithm_results,
         algorithms=algorithms,
-        output_dir=args.output_dir,
+        output_dir=plot_output_dir,
         window_len=args.window_len,
     )
     save_selected_algorithm_rate_delta_plot(
         algorithm_results=algorithm_results,
         algorithms=algorithms,
-        output_dir=args.output_dir,
+        output_dir=plot_output_dir,
         window_len=args.window_len,
     )
     save_selected_algorithm_reward_plot(
         algorithm_results=algorithm_results,
         algorithms=algorithms,
-        output_dir=args.output_dir,
+        output_dir=plot_output_dir,
         window_len=args.window_len,
     )
 
@@ -5361,7 +5388,7 @@ def main() -> None:
                 single_results=single_direction_results,
                 two_results=two_direction_results,
                 three_results=multi_direction_results,
-                output_dir=args.output_dir,
+                output_dir=plot_output_dir,
                 window_len=args.window_len,
                 wmmse_throughput=wmmse_results["throughput"] if wmmse_results is not None else None,
             )
@@ -5381,7 +5408,7 @@ def main() -> None:
                 two_results=two_direction_results,
                 three_results=multi_direction_results,
                 multi_iter_results=multi_iteration_results,
-                output_dir=args.output_dir,
+                output_dir=plot_output_dir,
                 window_len=args.window_len,
                 wmmse_throughput=wmmse_results["throughput"] if wmmse_results is not None else None,
             )
@@ -5408,7 +5435,7 @@ def main() -> None:
                     slnr_throughput=slnr_results["throughput"],
                     random_vmf_throughput=random_vmf_throughput,
                     rl_results=results,
-                    output_dir=args.output_dir / subdir,
+                    output_dir=plot_output_dir / subdir,
                     window_len=args.window_len,
                     wmmse_throughput=wmmse_results["throughput"] if wmmse_results is not None else None,
                 )
