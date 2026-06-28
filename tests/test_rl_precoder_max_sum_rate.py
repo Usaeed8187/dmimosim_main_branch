@@ -4934,9 +4934,21 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Simple MU-MIMO ZF/SLNR baselines + batched WESN reference-precoder perturbation RL")
     parser.add_argument("--num-slots", type=int, default=10000)
     parser.add_argument("--window-len", type=int, default=500)
+    parser.add_argument("--num-users", type=int, default=4, help="Number of scheduled UEs/users.")
+    parser.add_argument("--multi-iter-max-steps", type=int, default=20, help="Maximum number of inner refinement iterations for the sequential multi-iteration WESN policy.")
+    parser.add_argument(
+        "--reference-precoder",
+        type=str,
+        default="slnr",
+        choices=["zf", "slnr"],
+        help=(
+            "Reference precoder used both as the perturbation center and as the "
+            "baseline inside the RL reward. Use slnr to perturb/reward relative "
+            "to SLNR, or zf to perturb/reward relative to ZF."
+        ),
+    )
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
-    parser.add_argument("--num-users", type=int, default=4, help="Number of scheduled UEs/users.")
     parser.add_argument("--num-tx-antennas", type=int, default=4, help="Number of transmit antennas at the BS/virtual array.")
     parser.add_argument("--num-rx-antennas-per-user", type=int, default=2, help="Number of receive antennas per UE.")
     parser.add_argument(
@@ -5034,17 +5046,6 @@ def parse_args() -> argparse.Namespace:
         help="Scalar reward used for REINFORCE updates.",
     )
     parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
-    parser.add_argument(
-        "--reference-precoder",
-        type=str,
-        default="slnr",
-        choices=["zf", "slnr"],
-        help=(
-            "Reference precoder used both as the perturbation center and as the "
-            "baseline inside the RL reward. Use slnr to perturb/reward relative "
-            "to SLNR, or zf to perturb/reward relative to ZF."
-        ),
-    )
     parser.add_argument("--best-of-n", type=int, default=1, help="Must be 1 for exact on-policy candidate-based training. Use --max-fb-resamples for per-UE candidate directions.")
     parser.add_argument("--candidate-temperature", type=float, default=0.8, help="Softmax temperature for candidate selection; smaller is stricter.")
     parser.add_argument("--no-normalize-candidate-scores", action="store_true", help="Disable per-pool z-score normalization of phase and SLNR candidate scores.")
@@ -5075,7 +5076,6 @@ def parse_args() -> argparse.Namespace:
         help="Number of uniformly spaced alpha levels from -1 to 1 for the discrete angle-step policy.",
     )
     parser.add_argument("--alpha-zero-logit-bias", type=float, default=2.0, help="Fixed logit bias added to the zero-alpha level so the initial policy favors the exact reference-precoder-center action.")
-    parser.add_argument("--multi-iter-max-steps", type=int, default=20, help="Maximum number of inner refinement iterations for the sequential multi-iteration WESN policy.")
     parser.add_argument("--multi-iter-step-penalty", type=float, default=0.0, help="Optional penalty subtracted from the terminal reward per executed multi-iteration refinement step.")
     parser.add_argument("--no-multi-iter-stop-action", action="store_true", help="Disable the stop action in the multi-iteration policy; the policy then always runs for H_max inner steps.")
     parser.add_argument("--gaussian-init-theta", type=float, default=0.40, help="Initial physical theta mean for each UE before conversion to raw sigmoid coordinates.")
