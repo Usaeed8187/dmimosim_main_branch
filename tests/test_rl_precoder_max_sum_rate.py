@@ -77,6 +77,13 @@ class RLConfig:
     reward_mode: str = "rate_log_ratio"
     reference_precoder: str = "slnr"
     reward_sinr_eps: float = 1e-12
+    # Diagnostic only for now: maintain a reference-like running throughput
+    # baseline using slots where the executed learned precoder is close to the
+    # internally computed reference precoder. This trace is plotted but is not
+    # used in the RL reward yet.
+    reference_like_baseline_alpha_max: float = 0.02
+    reference_like_baseline_sigma_d: float = 0.15
+    reference_like_baseline_eps: float = 1e-12
     # Keep this at 1 for exact on-policy training. The per-UE candidate
     # sampler already uses max_fb_resamples candidate directions.
     best_of_n: int = 1
@@ -1414,6 +1421,61 @@ def beam_similarity(p_a: np.ndarray, p_b: np.ndarray) -> np.ndarray:
     return np.array(sims, dtype=np.float64)
 
 
+def phase_align_precoder_columns_to_reference(
+    reference_precoder: np.ndarray,
+    learned_precoder: np.ndarray,
+    eps: float = 1e-12,
+) -> np.ndarray:
+    """Phase-align each learned precoder column to the matching reference column.
+
+    The multi-user SINR is invariant to an independent complex phase rotation
+    on each stream/beam.  Before measuring whole-precoder distance, remove this
+    harmless per-column phase difference so the distance reflects beam/precoder
+    geometry rather than arbitrary stream phase.
+    """
+    aligned = np.asarray(learned_precoder, dtype=np.complex128).copy()
+    reference = np.asarray(reference_precoder, dtype=np.complex128)
+    if aligned.shape != reference.shape:
+        raise ValueError(
+            f"reference_precoder and learned_precoder must have the same shape; "
+            f"got {reference.shape} and {aligned.shape}."
+        )
+    for k in range(reference.shape[1]):
+        inner = np.vdot(reference[:, k], aligned[:, k])
+        if np.abs(inner) > eps:
+            aligned[:, k] *= np.exp(-1j * np.angle(inner))
+    return aligned
+
+
+def phase_aligned_precoder_distance(
+    reference_precoder: np.ndarray,
+    learned_precoder: np.ndarray,
+    eps: float = 1e-12,
+) -> float:
+    """Return normalized whole-precoder distance after per-column phase alignment."""
+    aligned = phase_align_precoder_columns_to_reference(
+        reference_precoder=reference_precoder,
+        learned_precoder=learned_precoder,
+        eps=eps,
+    )
+    denom = max(float(np.linalg.norm(reference_precoder, ord="fro")), eps)
+    return float(np.linalg.norm(reference_precoder - aligned, ord="fro") / denom)
+
+
+def reference_like_baseline_update_weight(
+    precoder_distance: float,
+    alpha_max: float,
+    sigma_d: float,
+    eps: float = 1e-12,
+) -> float:
+    """Convert reference/learned precoder distance into an EMA update weight.
+
+    Near-reference executed precoders should update the reference-like baseline
+    strongly; far perturbations should barely update it.
+    """
+    sigma = max(float(sigma_d), eps)
+    d = max(float(precoder_distance), 0.0)
+    return float(max(float(alpha_max), 0.0) * np.exp(-0.5 * (d / sigma) ** 2))
 
 
 def complex_hermitian_to_real_quadratic(a_complex: np.ndarray) -> np.ndarray:
@@ -2642,7 +2704,6 @@ def run_wesn_policy_rl(
     alpha_prob_trace = np.zeros((cfg.num_slots, action_dim, num_alpha_levels), dtype=np.float64)
     selected_direction_trace = np.zeros((cfg.num_slots, action_dim), dtype=np.int64)
     direction_prob_trace = np.zeros((cfg.num_slots, action_dim, num_directions), dtype=np.float64)
-
     batch_s: list[np.ndarray] = []
     batch_alpha_indices: list[np.ndarray] = []
     batch_branch_is_learned: list[float] = []
@@ -3138,6 +3199,10 @@ def run_wesn_policy_rl_multi_iteration(
     stop_prob_trace = np.zeros((cfg.num_slots, action_dim), dtype=np.float64)
     selected_stop_trace = np.zeros((cfg.num_slots, action_dim), dtype=np.float64)
     num_inner_steps_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    reference_like_rate_baseline_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    reference_like_precoder_distance_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    reference_like_baseline_update_weight_trace = np.zeros(cfg.num_slots, dtype=np.float64)
+    reference_like_rate_baseline: float | None = None
 
     batch_traj_states: list[np.ndarray] = []
     batch_traj_choices: list[np.ndarray] = []
@@ -3438,6 +3503,28 @@ def run_wesn_policy_rl_multi_iteration(
         beam_similarity_trace[t] = beam_similarity(beams, zf_baseline["precoders"][t])
         best_of_n_score_trace[t] = reward
         best_of_n_selected_trace[t] = 0.0
+
+        ref_like_distance = phase_aligned_precoder_distance(
+            reference_precoder=ref_precoder_t,
+            learned_precoder=beams,
+            eps=rl_cfg.reference_like_baseline_eps,
+        )
+        ref_like_update_weight = reference_like_baseline_update_weight(
+            precoder_distance=ref_like_distance,
+            alpha_max=rl_cfg.reference_like_baseline_alpha_max,
+            sigma_d=rl_cfg.reference_like_baseline_sigma_d,
+            eps=rl_cfg.reference_like_baseline_eps,
+        )
+        if reference_like_rate_baseline is None:
+            reference_like_rate_baseline = float(rate)
+        reference_like_rate_baseline_trace[t] = float(reference_like_rate_baseline)
+        reference_like_precoder_distance_trace[t] = ref_like_distance
+        reference_like_baseline_update_weight_trace[t] = ref_like_update_weight
+        reference_like_rate_baseline = (
+            (1.0 - ref_like_update_weight) * float(reference_like_rate_baseline)
+            + ref_like_update_weight * float(rate)
+        )
+
         signal_trace[t] = signal
         leakage_trace[t] = leakage
         empirical_mean_norm_trace[t] = np.linalg.norm(x_current, axis=1)
@@ -3485,6 +3572,9 @@ def run_wesn_policy_rl_multi_iteration(
 
     return {
         "throughput": throughput,
+        "reference_like_rate_baseline": reference_like_rate_baseline_trace,
+        "reference_like_precoder_distance": reference_like_precoder_distance_trace,
+        "reference_like_baseline_update_weight": reference_like_baseline_update_weight_trace,
         "reward": reward_trace,
         "rate_delta": rate_delta_trace,
         "rate_delta_baseline": rate_delta_baseline_trace,
@@ -4823,7 +4913,10 @@ def save_selected_algorithm_throughput_plot(
         results = algorithm_results.get(name)
         if results is None or "throughput" not in results:
             continue
-        throughput_curves.append((ALGORITHM_LABELS.get(name, name), moving_average(results["throughput"], window_len)))
+        label = ALGORITHM_LABELS.get(name, name)
+        throughput_curves.append((label, moving_average(results["throughput"], window_len)))
+        if name == "wesn_multi_iteration" and "reference_like_rate_baseline" in results:
+            throughput_curves.append((f"CQI-based baseline", moving_average(results["reference_like_rate_baseline"], window_len)))
 
     if not throughput_curves:
         return
