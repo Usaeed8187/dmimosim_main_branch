@@ -81,7 +81,7 @@ class RLConfig:
     # baseline using slots where the executed learned precoder is close to the
     # internally computed reference precoder. This trace is plotted but is not
     # used in the RL reward yet.
-    reference_like_baseline_alpha_max: float = 0.02
+    reference_like_baseline_alpha_max: float = 0.01
     reference_like_baseline_sigma_d: float = 0.15
     reference_like_baseline_eps: float = 1e-12
     # Keep this at 1 for exact on-policy training. The per-UE candidate
@@ -448,6 +448,21 @@ def compute_slot_sum_rate(
         sinr[k] = max(float(np.real(np.vdot(desired_vec, lmmse_direction))), 0.0)
 
     return float(np.sum(np.log2(1.0 + np.maximum(sinr, eps)))), sinr
+
+
+CQI_SINR_DB_LEVELS = np.array([0.2, 4.3, 5.9, 8.1, 10.3, 14.1, 18.7, 21.0], dtype=np.float64)
+
+
+def quantize_ue_sinr_to_cqi_linear(sinr: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Map linear per-UE SINR to the nearest CQI SINR report level."""
+    sinr_db = 10.0 * np.log10(np.maximum(np.asarray(sinr, dtype=np.float64), eps))
+    level_idx = np.argmin(np.abs(sinr_db[..., np.newaxis] - CQI_SINR_DB_LEVELS), axis=-1)
+    return 10.0 ** (CQI_SINR_DB_LEVELS[level_idx] / 10.0)
+
+
+def compute_cqi_quantized_sum_rate_from_sinr(sinr: np.ndarray, eps: float = 1e-12) -> float:
+    quantized_sinr = quantize_ue_sinr_to_cqi_linear(sinr, eps=eps)
+    return float(np.sum(np.log2(1.0 + np.maximum(quantized_sinr, eps))))
 
 
 
@@ -3515,14 +3530,17 @@ def run_wesn_policy_rl_multi_iteration(
             sigma_d=rl_cfg.reference_like_baseline_sigma_d,
             eps=rl_cfg.reference_like_baseline_eps,
         )
+        cqi_quantized_rate = compute_cqi_quantized_sum_rate_from_sinr(
+            actual_sinr, eps=rl_cfg.reward_sinr_eps
+        )
         if reference_like_rate_baseline is None:
-            reference_like_rate_baseline = float(rate)
+            reference_like_rate_baseline = cqi_quantized_rate
         reference_like_rate_baseline_trace[t] = float(reference_like_rate_baseline)
         reference_like_precoder_distance_trace[t] = ref_like_distance
         reference_like_baseline_update_weight_trace[t] = ref_like_update_weight
         reference_like_rate_baseline = (
             (1.0 - ref_like_update_weight) * float(reference_like_rate_baseline)
-            + ref_like_update_weight * float(rate)
+            + ref_like_update_weight * cqi_quantized_rate
         )
 
         signal_trace[t] = signal
