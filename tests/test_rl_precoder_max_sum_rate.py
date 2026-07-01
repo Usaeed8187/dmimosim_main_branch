@@ -500,40 +500,47 @@ def compute_slot_sinr_proxy(
 
 def compute_rl_reward(
     reward_mode: str,
-    rate: float,
-    zf_rate: float,
     actual_sinr: np.ndarray,
-    zf_actual_sinr: np.ndarray,
-    proxy_sinr: np.ndarray,
-    zf_proxy_sinr: np.ndarray,
+    reference_actual_sinr: np.ndarray,
     eps: float,
 ) -> float:
     """Compute the scalar RL reward used in REINFORCE.
 
     Supported modes:
-      - throughput_delta: old reward, R_RL - R_ZF.
-      - normalized_throughput_delta: (R_RL - R_ZF) / (|R_ZF| + eps).
-      - actual_sinr_log_ratio: mean_k log((SINR_RL,k + eps)/(SINR_ZF,k + eps)).
-      - rate_log_ratio: sum_k log((1 + SINR_RL,k + eps)/(1 + SINR_ZF,k + eps)).
-      - sinr_proxy_log_ratio: same log-ratio but using the simpler SINR proxy.
+      - rate_log_ratio: continuous-valued sum-rate improvement over the reference.
+      - cqi_reference_rate_log_ratio: continuous-valued sum-rate improvement over
+        the reference after quantizing the reference UE SINRs to CQI levels.
 
     The default is rate_log_ratio so the policy is trained using a smooth
-    objective that directly matches sum-rate improvement over ZF.
+    objective that directly matches sum-rate improvement over the selected
+    reference precoder.
     """
-    if reward_mode == "throughput_delta":
-        return float(rate - zf_rate)
-    if reward_mode == "normalized_throughput_delta":
-        return float((rate - zf_rate) / (abs(zf_rate) + eps))
-    if reward_mode == "actual_sinr_log_ratio":
-        return float(np.mean(np.log((actual_sinr + eps) / (zf_actual_sinr + eps))))
     if reward_mode == "rate_log_ratio":
-        return float(np.sum(np.log((1.0 + actual_sinr + eps) / (1.0 + zf_actual_sinr + eps))))
-    if reward_mode == "sinr_proxy_log_ratio":
-        return float(np.mean(np.log((proxy_sinr + eps) / (zf_proxy_sinr + eps))))
+        reference_sinr = np.asarray(reference_actual_sinr, dtype=np.float64)
+    elif reward_mode == "cqi_reference_rate_log_ratio":
+        reference_sinr = quantize_ue_sinr_to_cqi_linear(reference_actual_sinr, eps=eps)
+    else:
+        raise ValueError(
+            f"Unknown reward_mode={reward_mode!r}. Expected one of: "
+            "rate_log_ratio, cqi_reference_rate_log_ratio."
+        )
+    return float(np.sum(np.log((1.0 + actual_sinr + eps) / (1.0 + reference_sinr + eps))))
+
+
+def compute_reward_reference_rate(
+    reward_mode: str,
+    continuous_reference_rate: float,
+    reference_actual_sinr: np.ndarray,
+    eps: float,
+) -> float:
+    """Return the scalar reference rate used by reward-side bonuses."""
+    if reward_mode == "rate_log_ratio":
+        return float(continuous_reference_rate)
+    if reward_mode == "cqi_reference_rate_log_ratio":
+        return compute_cqi_quantized_sum_rate_from_sinr(reference_actual_sinr, eps=eps)
     raise ValueError(
         f"Unknown reward_mode={reward_mode!r}. Expected one of: "
-        "throughput_delta, normalized_throughput_delta, "
-        "actual_sinr_log_ratio, rate_log_ratio, sinr_proxy_log_ratio."
+        "rate_log_ratio, cqi_reference_rate_log_ratio."
     )
 
 
@@ -2900,20 +2907,22 @@ def run_wesn_policy_rl(
             proxy_sinr = compute_pmi_sinr_proxy_from_precoder(
                 q_vectors, beams, noise_power, eps=rl_cfg.reward_sinr_eps
             )
+            reward_ref_rate = compute_reward_reference_rate(
+                reward_mode=rl_cfg.reward_mode,
+                continuous_reference_rate=ref_rate,
+                reference_actual_sinr=ref_actual_sinr,
+                eps=rl_cfg.reward_sinr_eps,
+            )
             base_reward = compute_rl_reward(
                 reward_mode=rl_cfg.reward_mode,
-                rate=rate,
-                zf_rate=ref_rate,
                 actual_sinr=actual_sinr,
-                zf_actual_sinr=ref_actual_sinr,
-                proxy_sinr=proxy_sinr,
-                zf_proxy_sinr=ref_proxy_sinr,
+                reference_actual_sinr=ref_actual_sinr,
                 eps=rl_cfg.reward_sinr_eps,
             )
             reward = add_positive_rate_delta_bonus(
                 base_reward=base_reward,
                 rate=rate,
-                ref_rate=ref_rate,
+                ref_rate=reward_ref_rate,
                 bonus_lambda=rl_cfg.positive_rate_bonus_lambda,
                 bonus_power=rl_cfg.positive_rate_bonus_power,
             )
@@ -2934,20 +2943,22 @@ def run_wesn_policy_rl(
             rate = ref_rate
             actual_sinr = ref_actual_sinr
             proxy_sinr = ref_proxy_sinr
+            reward_ref_rate = compute_reward_reference_rate(
+                reward_mode=rl_cfg.reward_mode,
+                continuous_reference_rate=ref_rate,
+                reference_actual_sinr=ref_actual_sinr,
+                eps=rl_cfg.reward_sinr_eps,
+            )
             base_reward = compute_rl_reward(
                 reward_mode=rl_cfg.reward_mode,
-                rate=rate,
-                zf_rate=ref_rate,
                 actual_sinr=actual_sinr,
-                zf_actual_sinr=ref_actual_sinr,
-                proxy_sinr=proxy_sinr,
-                zf_proxy_sinr=ref_proxy_sinr,
+                reference_actual_sinr=ref_actual_sinr,
                 eps=rl_cfg.reward_sinr_eps,
             )
             reward = add_positive_rate_delta_bonus(
                 base_reward=base_reward,
                 rate=rate,
-                ref_rate=ref_rate,
+                ref_rate=reward_ref_rate,
                 bonus_lambda=rl_cfg.positive_rate_bonus_lambda,
                 bonus_power=rl_cfg.positive_rate_bonus_power,
             )
@@ -3476,20 +3487,22 @@ def run_wesn_policy_rl_multi_iteration(
             actual_sinr = ref_actual_sinr
             proxy_sinr = ref_proxy_sinr
 
+        reward_ref_rate = compute_reward_reference_rate(
+            reward_mode=rl_cfg.reward_mode,
+            continuous_reference_rate=ref_rate,
+            reference_actual_sinr=ref_actual_sinr,
+            eps=rl_cfg.reward_sinr_eps,
+        )
         base_reward = compute_rl_reward(
             reward_mode=rl_cfg.reward_mode,
-            rate=rate,
-            zf_rate=ref_rate,
             actual_sinr=actual_sinr,
-            zf_actual_sinr=ref_actual_sinr,
-            proxy_sinr=proxy_sinr,
-            zf_proxy_sinr=ref_proxy_sinr,
+            reference_actual_sinr=ref_actual_sinr,
             eps=rl_cfg.reward_sinr_eps,
         )
         reward = add_positive_rate_delta_bonus(
             base_reward=base_reward,
             rate=rate,
-            ref_rate=ref_rate,
+            ref_rate=reward_ref_rate,
             bonus_lambda=rl_cfg.positive_rate_bonus_lambda,
             bonus_power=rl_cfg.positive_rate_bonus_power,
         )
@@ -5146,15 +5159,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reward-mode",
         type=str,
-        default="rate_log_ratio",
+        default="cqi_reference_rate_log_ratio",
         choices=[
-            "throughput_delta",
-            "normalized_throughput_delta",
-            "actual_sinr_log_ratio",
             "rate_log_ratio",
-            "sinr_proxy_log_ratio",
+            "cqi_reference_rate_log_ratio",
         ],
-        help="Scalar reward used for REINFORCE updates.",
+        help=(
+            "Scalar reward used for REINFORCE updates. rate_log_ratio uses the "
+            "continuous reference rate; cqi_reference_rate_log_ratio quantizes "
+            "the reference UE SINRs to CQI levels first."
+        ),
     )
     parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
     parser.add_argument("--best-of-n", type=int, default=1, help="Must be 1 for exact on-policy candidate-based training. Use --max-fb-resamples for per-UE candidate directions.")
