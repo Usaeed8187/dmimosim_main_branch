@@ -57,7 +57,6 @@ class SimConfig:
 class RLConfig:
     lr_out: float = 3e-2
     fixed_kappa: float = 3.0
-    reward_baseline_beta: float = 0.99  # Deprecated/ignored: no moving-average advantage baseline is used.
     advantage_clip: float = 1.0
     grad_clip_norm: float = 1.0
     init_scale_out: float = 1e-2
@@ -74,15 +73,13 @@ class RLConfig:
     max_fb_resamples: int = 16
     leakage_norm_eps: float = 1e-12
     signal_norm_eps: float = 1e-12
-    reward_mode: str = "rate_log_ratio"
     reference_precoder: str = "slnr"
     reward_sinr_eps: float = 1e-12
-    # Diagnostic only for now: maintain a reference-like running throughput
-    # baseline using slots where the executed learned precoder is close to the
-    # internally computed reference precoder. This trace is plotted but is not
-    # used in the RL reward yet.
+    # Maintain a reference-like running CQI throughput baseline using slots where
+    # the executed learned precoder is close to the internally computed reference
+    # precoder. The RL reward is the current CQI throughput minus this baseline.
     reference_like_baseline_alpha_max: float = 0.01
-    reference_like_baseline_sigma_d: float = 0.15
+    reference_like_baseline_sigma_d: float = 0.5
     reference_like_baseline_eps: float = 1e-12
     # Keep this at 1 for exact on-policy training. The per-UE candidate
     # sampler already uses max_fb_resamples candidate directions.
@@ -165,7 +162,6 @@ class RLConfig:
     # chooses stop or a PMI-informed direction/alpha move, then receives one
     # terminal reward from the final precoder.
     multi_iter_max_steps: int = 3
-    multi_iter_step_penalty: float = 0.0
     multi_iter_include_stop_action: bool = True
     # Deprecated constant initial physical-angle center, retained only so older
     # command lines do not break. The active policy uses a slot-dependent
@@ -444,13 +440,25 @@ def compute_slot_sum_rate(
     return float(np.sum(np.log2(1.0 + np.maximum(sinr, eps)))), sinr
 
 
-CQI_SINR_DB_LEVELS = np.array([0.2, 4.3, 5.9, 8.1, 10.3, 14.1, 18.7, 21.0], dtype=np.float64)
+CQI_SINR_DB_LEVELS = np.array(
+    [
+        -6.7, -4.7, -2.3, 0.2, 2.4, 4.3, 5.9, 8.1,
+        10.3, 11.7, 14.1, 16.3, 18.7, 21.0, 22.7,
+    ],
+    dtype=np.float64,
+)
 
 
 def quantize_ue_sinr_to_cqi_linear(sinr: np.ndarray, eps: float = 1e-12) -> np.ndarray:
-    """Map linear per-UE SINR to the nearest CQI SINR report level."""
+    """Map linear per-UE SINR to the largest CQI SINR report level not exceeding it.
+
+    This is a floor-style SINR quantizer:
+      - if SINR_dB is below the first level, it is clipped to the first level;
+      - otherwise, it maps to max{level <= SINR_dB}.
+    """
     sinr_db = 10.0 * np.log10(np.maximum(np.asarray(sinr, dtype=np.float64), eps))
-    level_idx = np.argmin(np.abs(sinr_db[..., np.newaxis] - CQI_SINR_DB_LEVELS), axis=-1)
+    level_idx = np.searchsorted(CQI_SINR_DB_LEVELS, sinr_db, side="right") - 1
+    level_idx = np.clip(level_idx, 0, CQI_SINR_DB_LEVELS.size - 1)
     return 10.0 ** (CQI_SINR_DB_LEVELS[level_idx] / 10.0)
 
 
@@ -494,35 +502,6 @@ def compute_slot_sinr_proxy(
         proxy_sinr[k] = desired / (interference + noise_power)
 
     return proxy_sinr
-
-
-def compute_rl_reward(
-    reward_mode: str,
-    actual_sinr: np.ndarray,
-    reference_actual_sinr: np.ndarray,
-    eps: float,
-) -> float:
-    """Compute the scalar RL reward used in REINFORCE.
-
-    Supported modes:
-      - rate_log_ratio: continuous-valued sum-rate improvement over the reference.
-      - cqi_reference_rate_log_ratio: continuous-valued sum-rate improvement over
-        the reference after quantizing the reference UE SINRs to CQI levels.
-
-    The default is rate_log_ratio so the policy is trained using a smooth
-    objective that directly matches sum-rate improvement over the selected
-    reference precoder.
-    """
-    if reward_mode == "rate_log_ratio":
-        reference_sinr = np.asarray(reference_actual_sinr, dtype=np.float64)
-    elif reward_mode == "cqi_reference_rate_log_ratio":
-        reference_sinr = quantize_ue_sinr_to_cqi_linear(reference_actual_sinr, eps=eps)
-    else:
-        raise ValueError(
-            f"Unknown reward_mode={reward_mode!r}. Expected one of: "
-            "rate_log_ratio, cqi_reference_rate_log_ratio."
-        )
-    return float(np.sum(np.log((1.0 + actual_sinr + eps) / (1.0 + reference_sinr + eps))))
 
 
 def pmi_features_from_channels(user_channels: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
@@ -2935,28 +2914,12 @@ def run_wesn_policy_rl_multi_iteration(
         cqi_ue_rates = compute_cqi_quantized_ue_rates_from_sinr(
             actual_sinr, eps=rl_cfg.reward_sinr_eps
         )
+        cqi_sum_rate = float(np.sum(cqi_ue_rates))
         if reference_like_ue_rate_baseline is None:
             reference_like_ue_rate_baseline = cqi_ue_rates.copy()
         reference_sum_rate = float(np.sum(reference_like_ue_rate_baseline))
 
-        # Multi-iteration CQI mode uses the reference-like CQI baseline instead
-        # of the instantaneous conventional-reference SINR.
-        if rl_cfg.reward_mode == "cqi_reference_rate_log_ratio":
-            base_reward = float(rate) - reference_sum_rate
-        else:
-            base_reward = compute_rl_reward(
-                reward_mode=rl_cfg.reward_mode,
-                actual_sinr=actual_sinr,
-                reference_actual_sinr=ref_actual_sinr,
-                eps=rl_cfg.reward_sinr_eps,
-            )
-        reward = float(base_reward)
-        if (
-            rl_cfg.reward_mode != "cqi_reference_rate_log_ratio"
-            and slot_from_learned
-            and rl_cfg.multi_iter_step_penalty != 0.0
-        ):
-            reward = float(reward - float(rl_cfg.multi_iter_step_penalty) * float(steps_executed))
+        reward = float(cqi_sum_rate - reference_sum_rate)
 
         advantage = float(reward)
         if rl_cfg.advantage_clip > 0:
@@ -4077,6 +4040,12 @@ def parse_args() -> argparse.Namespace:
             "to SLNR, or zf to perturb/reward relative to ZF."
         ),
     )
+    parser.add_argument(
+        "--num-alpha-levels",
+        type=int,
+        default=21,
+        help="Number of uniformly spaced alpha levels from -1 to 1 for the discrete angle-step policy.",
+    )
     parser.add_argument("--snr-db", type=float, default=10.0)
     parser.add_argument("--rho", type=float, default=0.95)
     parser.add_argument("--num-tx-antennas", type=int, default=4, help="Number of transmit antennas at the BS/virtual array.")
@@ -4153,7 +4122,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr-out", type=float, default=3e-2)
     parser.add_argument("--fixed-kappa", type=float, default=3.0)
-    parser.add_argument("--reward-baseline-beta", type=float, default=0.99, help="Deprecated/ignored: no moving-average advantage baseline is used.")
     parser.add_argument("--advantage-clip", type=float, default=1.0)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--init-scale-out", type=float, default=1e-2)
@@ -4162,21 +4130,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-fb-resamples", type=int, default=32)
     parser.add_argument("--leakage-norm-eps", type=float, default=1e-12)
     parser.add_argument("--signal-norm-eps", type=float, default=1e-12)
-    parser.add_argument(
-        "--reward-mode",
-        type=str,
-        default="cqi_reference_rate_log_ratio",
-        choices=[
-            "rate_log_ratio",
-            "cqi_reference_rate_log_ratio",
-        ],
-        help=(
-            "Scalar reward used for REINFORCE updates. rate_log_ratio uses the "
-            "continuous reference rate; for multi-iteration, "
-            "cqi_reference_rate_log_ratio uses throughput minus the "
-            "reference-like CQI baseline."
-        ),
-    )
     parser.add_argument("--reward-sinr-eps", type=float, default=1e-12)
     parser.add_argument("--best-of-n", type=int, default=1, help="Must be 1 for exact on-policy candidate-based training. Use --max-fb-resamples for per-UE candidate directions.")
     parser.add_argument("--candidate-temperature", type=float, default=0.8, help="Softmax temperature for candidate selection; smaller is stricter.")
@@ -4201,14 +4154,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gaussian-raw-std-phi", type=float, default=0.30, help="Fixed raw-coordinate exploration std for phi coordinates in the 4D diagonal Gaussian policy.")
     parser.add_argument("--alpha-step-max-theta", type=float, default=0.25, help="Maximum physical theta step used by alpha_max * tanh(u_alpha) along the PMI proxy-gradient direction.")
     parser.add_argument("--alpha-step-max-phi", type=float, default=0.75, help="Maximum physical phi step used by alpha_max * alpha_level along the PMI proxy-gradient direction.")
-    parser.add_argument(
-        "--num-alpha-levels",
-        type=int,
-        default=16,
-        help="Number of uniformly spaced alpha levels from -1 to 1 for the discrete angle-step policy.",
-    )
     parser.add_argument("--alpha-zero-logit-bias", type=float, default=2.0, help="Fixed logit bias added to the zero-alpha level so the initial policy favors the exact reference-precoder-center action.")
-    parser.add_argument("--multi-iter-step-penalty", type=float, default=0.0, help="Optional penalty subtracted from the terminal reward per executed multi-iteration refinement step.")
     parser.add_argument("--no-multi-iter-stop-action", action="store_true", help="Disable the stop action in the multi-iteration policy; the policy then always runs for H_max inner steps.")
     parser.add_argument("--gaussian-init-theta", type=float, default=0.40, help="Initial physical theta mean for each UE before conversion to raw sigmoid coordinates.")
     parser.add_argument("--gaussian-init-phi", type=float, default=float(np.pi), help="Initial physical phi mean for each UE before conversion to raw sigmoid coordinates.")
@@ -4260,7 +4206,6 @@ def main() -> None:
     rl_cfg = RLConfig(
         lr_out=args.lr_out,
         fixed_kappa=args.fixed_kappa,
-        reward_baseline_beta=args.reward_baseline_beta,
         advantage_clip=args.advantage_clip,
         grad_clip_norm=args.grad_clip_norm,
         init_scale_out=args.init_scale_out,
@@ -4274,7 +4219,6 @@ def main() -> None:
         max_fb_resamples=args.max_fb_resamples,
         leakage_norm_eps=args.leakage_norm_eps,
         signal_norm_eps=args.signal_norm_eps,
-        reward_mode=args.reward_mode,
         reference_precoder=args.reference_precoder,
         reward_sinr_eps=args.reward_sinr_eps,
         best_of_n=args.best_of_n,
@@ -4299,7 +4243,6 @@ def main() -> None:
         alpha_level_grid=tuple(np.linspace(-1.0, 1.0, args.num_alpha_levels)),
         alpha_zero_logit_bias=args.alpha_zero_logit_bias,
         multi_iter_max_steps=args.multi_iter_max_steps,
-        multi_iter_step_penalty=args.multi_iter_step_penalty,
         multi_iter_include_stop_action=not args.no_multi_iter_stop_action,
         gaussian_init_theta=args.gaussian_init_theta,
         gaussian_init_phi=args.gaussian_init_phi,
