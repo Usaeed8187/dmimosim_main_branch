@@ -377,9 +377,15 @@ def build_pmi_feedback_trace(cfg: SimConfig, channels: np.ndarray) -> dict[str, 
     else:
         raise ValueError(f"Unsupported pmi_feedback_mode={mode!r}.")
 
+    # Keep channel gain separate from PMI.  In particular, do not substitute
+    # CQI here: CQI describes post-processing SINR, whereas WMMSE-PMI needs the
+    # gain of the channel mode represented by the PMI vector.
+    dominant_singular_values = np.linalg.svd(channels, compute_uv=False)[..., 0]
+
     return {
         "features": np.stack(features, axis=0),
         "q_vectors": np.stack(q_vectors, axis=0),
+        "dominant_singular_values": np.asarray(dominant_singular_values, dtype=np.float64),
     }
 
 def compute_slot_sum_rate(
@@ -979,6 +985,96 @@ def run_wmmse_baseline(
         print(f"WMMSE full-CSI Slot {t + 1} / {cfg.num_slots}", end="\r")
         p_wmmse = build_wmmse_precoder_full_csi(
             channels[t],
+            total_tx_power=cfg.total_tx_power,
+            noise_power=noise_power,
+            max_iters=max_iters,
+            tol=tol,
+        )
+        throughput[t], sinr_trace[t] = compute_slot_sum_rate_mmse_receiver(
+            channels[t], p_wmmse, noise_power
+        )
+        precoders[t] = p_wmmse
+
+    print()
+    return {
+        "throughput": throughput,
+        "sinr": sinr_trace,
+        "precoders": precoders,
+    }
+
+
+def build_rank_one_channels_from_pmi(
+    q_vectors: np.ndarray,
+    dominant_singular_values: np.ndarray,
+) -> np.ndarray:
+    """Construct virtual rank-one channels from PMI and channel-mode gain.
+
+    For UE k, Type-II PMI approximates the dominant right singular vector
+    q_k.  Together with its dominant singular value sigma_k, the virtual
+    channel used for precoder design is
+
+        H_hat_k = sigma_k q_k^H.
+
+    The unknown left singular vector is deliberately omitted.  With spatially
+    white receiver noise it is only a receive-side unitary rotation and is not
+    needed by the transmit precoder optimization.
+    """
+    q_vectors = normalize_pmi_q_vectors(q_vectors)
+    dominant_singular_values = np.asarray(dominant_singular_values, dtype=np.float64)
+    if dominant_singular_values.shape != (q_vectors.shape[0],):
+        raise ValueError(
+            "dominant_singular_values must have shape [num_users], got "
+            f"{dominant_singular_values.shape} for q_vectors shape {q_vectors.shape}."
+        )
+    if np.any(dominant_singular_values < 0.0):
+        raise ValueError("Dominant singular values must be nonnegative.")
+    return dominant_singular_values[:, None, None] * q_vectors[:, None, :].conj()
+
+
+def run_wmmse_pmi_baseline(
+    cfg: SimConfig,
+    channels: np.ndarray,
+    pmi_feedback: dict[str, np.ndarray],
+    max_iters: int = 50,
+    tol: float = 1e-5,
+) -> dict[str, np.ndarray]:
+    """Run rank-one WMMSE designed from PMI and dominant singular values.
+
+    WMMSE sees only H_hat_k = sigma_k q_k^H.  The resulting precoder is then
+    evaluated on the true channel with the same local MMSE receiver used by
+    the other baselines.  Thus the reported rate includes Type-II PMI
+    quantization and rank-one channel-approximation losses.
+    """
+    if cfg.streams_per_user != 1:
+        raise ValueError("The WMMSE-PMI baseline currently assumes one stream per UE.")
+
+    q_trace = np.asarray(pmi_feedback["q_vectors"], dtype=np.complex128)
+    singular_value_trace = np.asarray(
+        pmi_feedback["dominant_singular_values"], dtype=np.float64
+    )
+    expected_q_shape = (cfg.num_slots, cfg.num_users, cfg.num_tx_antennas)
+    expected_s_shape = (cfg.num_slots, cfg.num_users)
+    if q_trace.shape != expected_q_shape:
+        raise ValueError(f"PMI q-vector shape {q_trace.shape} does not match {expected_q_shape}.")
+    if singular_value_trace.shape != expected_s_shape:
+        raise ValueError(
+            f"Dominant singular-value shape {singular_value_trace.shape} does not match {expected_s_shape}."
+        )
+
+    noise_power = cfg.total_tx_power / (10.0 ** (cfg.snr_db / 10.0))
+    throughput = np.zeros(cfg.num_slots, dtype=np.float64)
+    sinr_trace = np.zeros((cfg.num_slots, cfg.num_users), dtype=np.float64)
+    precoders = np.zeros(
+        (cfg.num_slots, cfg.num_tx_antennas, cfg.num_users), dtype=np.complex128
+    )
+
+    for t in range(cfg.num_slots):
+        print(f"WMMSE PMI Slot {t + 1} / {cfg.num_slots}", end="\r")
+        rank_one_channels = build_rank_one_channels_from_pmi(
+            q_trace[t], singular_value_trace[t]
+        )
+        p_wmmse = build_wmmse_precoder_full_csi(
+            rank_one_channels,
             total_tx_power=cfg.total_tx_power,
             noise_power=noise_power,
             max_iters=max_iters,
@@ -3506,7 +3602,7 @@ def save_plots(
             plt.close(fig_alpha_prob)
 
 
-def sim_cache_metadata(cfg: SimConfig) -> dict[str, float | int]:
+def sim_cache_metadata(cfg: SimConfig) -> dict[str, object]:
     """Metadata that determines whether cached channel-dependent baselines are valid."""
     return {
         "num_tx_antennas": cfg.num_tx_antennas,
@@ -3536,6 +3632,7 @@ def sim_cache_metadata(cfg: SimConfig) -> dict[str, float | int]:
         "type_ii_feedback_architecture": cfg.type_ii_feedback_architecture,
         "type_ii_nfft": cfg.type_ii_nfft,
         "type_ii_num_ofdm_symbols": cfg.type_ii_num_ofdm_symbols,
+        "pmi_feedback_schema": "q_vectors_plus_dominant_singular_values_v1",
     }
 
 
@@ -3627,6 +3724,7 @@ def load_or_generate_channels_and_pmi(
             pmi_feedback = {
                 "features": data["pmi_features"],
                 "q_vectors": data["pmi_q_vectors"],
+                "dominant_singular_values": data["dominant_singular_values"],
             }
         expected_channel_shape = (
             cfg.num_slots,
@@ -3635,6 +3733,7 @@ def load_or_generate_channels_and_pmi(
             cfg.num_tx_antennas,
         )
         expected_q_shape = (cfg.num_slots, cfg.num_users, cfg.num_tx_antennas)
+        expected_singular_value_shape = (cfg.num_slots, cfg.num_users)
         if channels.shape != expected_channel_shape:
             raise ValueError(
                 f"Cached channel shape {channels.shape} does not match expected {expected_channel_shape}. "
@@ -3644,6 +3743,13 @@ def load_or_generate_channels_and_pmi(
             raise ValueError(
                 f"Cached PMI q-vector shape {pmi_feedback['q_vectors'].shape} does not match expected {expected_q_shape}. "
                 "Delete the cache file or rerun with --force-recompute-channel-pmi."
+            )
+        if pmi_feedback["dominant_singular_values"].shape != expected_singular_value_shape:
+            raise ValueError(
+                "Cached dominant singular-value shape "
+                f"{pmi_feedback['dominant_singular_values'].shape} does not match expected "
+                f"{expected_singular_value_shape}. Delete the cache file or rerun with "
+                "--force-recompute-channel-pmi."
             )
         return channels, pmi_feedback
 
@@ -3659,6 +3765,7 @@ def load_or_generate_channels_and_pmi(
         channels=channels,
         pmi_features=pmi_feedback["features"],
         pmi_q_vectors=pmi_feedback["q_vectors"],
+        dominant_singular_values=pmi_feedback["dominant_singular_values"],
     )
     _write_metadata(meta_path, metadata)
     print(f"Saved channels and PMI cache to {data_path}")
@@ -3808,6 +3915,62 @@ def load_or_run_wmmse_baseline(
     return wmmse_results
 
 
+def load_or_run_wmmse_pmi_baseline(
+    cfg: SimConfig,
+    channels: np.ndarray,
+    pmi_feedback: dict[str, np.ndarray],
+    cache_dir: Path,
+    force_recompute: bool = False,
+    max_iters: int = 50,
+    tol: float = 1e-5,
+) -> dict[str, np.ndarray]:
+    """Load or run rank-one WMMSE based on PMI and dominant singular values."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    stem = baseline_cache_stem(
+        cfg,
+        "wmmse_pmi_rank_one",
+        extra_parts=(
+            f"iters{int(max_iters)}",
+            f"tol{_cache_value_to_slug(float(tol))}",
+        ),
+    )
+    meta_path = cache_dir / f"{stem}_meta.json"
+    metadata = sim_cache_metadata(cfg) | {
+        "baseline": "wmmse_pmi_rank_one",
+        "channel_design_model": "dominant_singular_value_times_configured_pmi_v1",
+        "wmmse_max_iters": int(max_iters),
+        "wmmse_tol": float(tol),
+        "rate_receiver": "true_channel_mmse_sinr_maximizing",
+    }
+    paths = {
+        "throughput": cache_dir / f"{stem}_throughput_trace.npy",
+        "sinr": cache_dir / f"{stem}_sinr_trace.npy",
+        "precoders": cache_dir / f"{stem}_precoders_trace.npy",
+    }
+
+    can_load = (
+        not force_recompute
+        and _metadata_matches(meta_path, metadata)
+        and all(path.exists() for path in paths.values())
+    )
+    if can_load:
+        print(f"Loading cached PMI-based WMMSE baseline from {cache_dir / stem}")
+        return {name: np.load(path) for name, path in paths.items()}
+
+    print("Cached PMI-based WMMSE baseline not found or incompatible; recomputing.")
+    results = run_wmmse_pmi_baseline(
+        cfg,
+        channels,
+        pmi_feedback=pmi_feedback,
+        max_iters=max_iters,
+        tol=tol,
+    )
+    for name, path in paths.items():
+        np.save(path, results[name])
+    _write_metadata(meta_path, metadata)
+    return results
+
+
 def load_or_run_random_vmf_baseline(
     cfg: SimConfig,
     channels: np.ndarray,
@@ -3852,6 +4015,7 @@ AVAILABLE_ALGORITHMS: tuple[str, ...] = (
     "zf",
     "slnr",
     "wmmse",
+    "wmmse_pmi",
     # "random_vmf",
     "wesn_multi_iteration",
 )
@@ -3860,6 +4024,7 @@ ALGORITHM_LABELS: dict[str, str] = {
     "zf": "ZF baseline",
     "slnr": "SLNR baseline",
     "wmmse": "WMMSE full-CSI ceiling",
+    "wmmse_pmi": "WMMSE PMI + dominant singular value",
     "random_vmf": "Random vMF baseline",
     "wesn_multi_iteration": "WESN: multi-iteration",
 }
@@ -3867,6 +4032,7 @@ ALGORITHM_OUTPUT_PREFIXES: dict[str, str] = {
     "zf": "zf",
     "slnr": "slnr",
     "wmmse": "wmmse_full_csi",
+    "wmmse_pmi": "wmmse_pmi",
     "random_vmf": "random_vmf_baseline",
     "wesn_multi_iteration": "multi_iteration",
 }
@@ -4095,8 +4261,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--channel-pmi-cache-dir", type=Path, default=None, help="Directory used to cache generated channels and PMI traces. Defaults to output_dir/channel_pmi_cache.")
     parser.add_argument("--force-recompute-channel-pmi", action="store_true", help="Ignore cached channels/PMI and regenerate them before running baselines/RL.")
     parser.add_argument("--force-recompute-baselines", action="store_true")
-    parser.add_argument("--wmmse-max-iters", type=int, default=50, help="Maximum WMMSE block-coordinate iterations per slot for the full-CSI oracle baseline.")
-    parser.add_argument("--wmmse-tol", type=float, default=1e-5, help="Relative sum-rate convergence tolerance for the full-CSI WMMSE oracle baseline.")
+    parser.add_argument("--wmmse-max-iters", type=int, default=50, help="Maximum WMMSE block-coordinate iterations per slot for the full-CSI and PMI-based baselines.")
+    parser.add_argument("--wmmse-tol", type=float, default=1e-5, help="Relative sum-rate convergence tolerance for the full-CSI and PMI-based WMMSE baselines.")
     parser.add_argument(
         "--pmi-feedback-mode",
         type=str,
@@ -4319,6 +4485,17 @@ def main() -> None:
         algorithm_results["wmmse"] = load_or_run_wmmse_baseline(
             cfg=cfg,
             channels=channels,
+            cache_dir=baseline_cache_dir,
+            force_recompute=args.force_recompute_baselines,
+            max_iters=args.wmmse_max_iters,
+            tol=args.wmmse_tol,
+        )
+
+    if "wmmse_pmi" in algorithm_set:
+        algorithm_results["wmmse_pmi"] = load_or_run_wmmse_pmi_baseline(
+            cfg=cfg,
+            channels=channels,
+            pmi_feedback=pmi_feedback,
             cache_dir=baseline_cache_dir,
             force_recompute=args.force_recompute_baselines,
             max_iters=args.wmmse_max_iters,
