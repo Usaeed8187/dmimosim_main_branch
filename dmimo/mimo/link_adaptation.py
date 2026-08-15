@@ -5,6 +5,159 @@ import sionna
 
 from dmimo.mimo import rankAdaptation
 
+
+# 3GPP TS 38.214, Table 5.1.3.1-1 (PDSCH MCS table 1).  Target
+# code rates are specified by 3GPP as R x 1024; keep the integer values here
+# and divide only when constructing the array used by the PHY.
+MCS_TABLE_38_214_QM_RATE_X1024 = np.array(
+    [
+        (2, 120), (2, 157), (2, 193), (2, 251), (2, 308),
+        (2, 379), (2, 449), (2, 526), (2, 602), (2, 679),
+        (4, 340), (4, 378), (4, 434), (4, 490), (4, 553),
+        (4, 616), (4, 658),
+        (6, 438), (6, 466), (6, 517), (6, 567), (6, 616),
+        (6, 666), (6, 719), (6, 772), (6, 822), (6, 873),
+        (6, 910), (6, 948),
+    ],
+    dtype=np.float64,
+)
+
+
+_LONG_BETA = np.array(
+    [1.49, 1.61, 3.36, 4.56, 6.42, 13.76, 25.16, 28.38],
+    dtype=np.float64,
+)
+_LONG_SINR_DB = np.array(
+    [0.2, 4.3, 5.9, 8.1, 10.3, 14.1, 18.7, 21.0],
+    dtype=np.float64,
+)
+_LONG_MCS_CANDIDATES = np.array(
+    [
+        (2, 0.30), (2, 0.60),
+        (4, 0.37), (4, 0.50), (4, 0.60), (4, 0.66),
+        (6, 0.55), (6, 0.75), (6, 0.85),
+    ],
+    dtype=np.float64,
+)
+
+
+def _linear_interp_with_extrapolation(x, xp, fp):
+    """One-dimensional interpolation with linear end extrapolation."""
+    x = np.asarray(x, dtype=np.float64)
+    values = np.interp(x, xp, fp)
+    below = x < xp[0]
+    above = x > xp[-1]
+    values[below] = fp[0] + (x[below] - xp[0]) * (
+        (fp[1] - fp[0]) / (xp[1] - xp[0])
+    )
+    values[above] = fp[-1] + (x[above] - xp[-1]) * (
+        (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
+    )
+    return values
+
+
+def get_link_adaptation_table(table_name):
+    """Return EESM parameters and ``[Qm, R]`` candidates.
+
+    The modulation orders and target rates in the ``38.214`` table are the
+    exact entries of PDSCH MCS Table 1.  3GPP does not standardize EESM beta
+    values or effective-SINR switching thresholds.  Until link-level BLER
+    calibration is available for every MCS, those parameters are interpolated
+    over spectral efficiency from the simulator's legacy ``long`` anchors.
+    """
+    table_name = str(table_name).lower()
+    if table_name == "long":
+        return _LONG_BETA.copy(), _LONG_SINR_DB.copy(), _LONG_MCS_CANDIDATES.copy()
+    if table_name == "short":
+        return (
+            np.array([1.61, 6.42, 28.38], dtype=np.float64),
+            np.array([4.3, 10.3, 22.7], dtype=np.float64),
+            np.array([(2, 0.60), (4, 0.50), (6, 0.65)], dtype=np.float64),
+        )
+    if table_name != "38.214":
+        raise ValueError(
+            f"Unknown link-adaptation table '{table_name}'. "
+            "Expected 'short', 'long', or '38.214'."
+        )
+
+    candidates = MCS_TABLE_38_214_QM_RATE_X1024.copy()
+    candidates[:, 1] /= 1024.0
+    spectral_efficiency = candidates[:, 0] * candidates[:, 1]
+
+    # The legacy long table has eight calibrated EESM anchors and a ninth
+    # terminal candidate.  Interpolate from the eight parameterized anchors.
+    anchor_spectral_efficiency = (
+        _LONG_MCS_CANDIDATES[:-1, 0] * _LONG_MCS_CANDIDATES[:-1, 1]
+    )
+    beta = _linear_interp_with_extrapolation(
+        spectral_efficiency, anchor_spectral_efficiency, _LONG_BETA
+    )
+    sinr_db = _linear_interp_with_extrapolation(
+        spectral_efficiency, anchor_spectral_efficiency, _LONG_SINR_DB
+    )
+    return beta, sinr_db, candidates
+
+
+def sionna_ldpc5g_supported_mcs_mask(mcs_candidates, codeword_length):
+    """Return entries supported by Sionna's unsegmented LDPC5GEncoder.
+
+    This mirrors the encoder's base-graph and code-length checks.  It is a
+    limitation of the current simulator's one-LDPC-block-per-codeword layout,
+    not a restriction of the 38.214 MCS table itself.
+    """
+    candidates = np.asarray(mcs_candidates, dtype=np.float64)
+    n = int(codeword_length)
+    supported = np.zeros(candidates.shape[0], dtype=bool)
+    for idx, rate_target in enumerate(candidates[:, 1]):
+        k = int(n * rate_target)
+        if k < 12 or k > 8448 or n < 0 or n > 316 * 384:
+            continue
+        rate = k / n
+        if rate < 1 / 5 or rate > 0.95:
+            continue
+        if k <= 292:
+            base_graph = "bg2"
+        elif k <= 3824 and rate <= 0.67:
+            base_graph = "bg2"
+        elif rate <= 0.25:
+            base_graph = "bg2"
+        else:
+            base_graph = "bg1"
+        if base_graph == "bg1":
+            supported[idx] = k <= 8448 and rate >= 1 / 3
+        else:
+            supported[idx] = k <= 3840 and rate >= 1 / 5
+    return supported
+
+
+def project_mcs_indices_to_sionna_supported(
+    mcs_indices,
+    mcs_candidates,
+    codeword_length,
+):
+    """Map recommendations to the closest no-more-aggressive supported MCS."""
+    candidates = np.asarray(mcs_candidates, dtype=np.float64)
+    supported = sionna_ldpc5g_supported_mcs_mask(candidates, codeword_length)
+    if not np.any(supported):
+        raise ValueError(
+            f"No MCS is supported for LDPC codeword length {codeword_length}."
+        )
+    spectral_efficiency = candidates[:, 0] * candidates[:, 1]
+    supported_indices = np.flatnonzero(supported)
+    projected = np.empty(np.asarray(mcs_indices).shape, dtype=np.int64)
+    for output_index, recommended in np.ndenumerate(np.asarray(mcs_indices)):
+        recommended = int(np.clip(recommended, 0, candidates.shape[0] - 1))
+        eligible = supported_indices[
+            spectral_efficiency[supported_indices]
+            <= spectral_efficiency[recommended] + 1e-12
+        ]
+        if eligible.size == 0:
+            selected = supported_indices[np.argmin(spectral_efficiency[supported_indices])]
+        else:
+            selected = eligible[np.argmax(spectral_efficiency[eligible])]
+        projected[output_index] = int(selected)
+    return projected
+
 class linkAdaptation(Layer):
     """link adaptation for SU-MIMO and MU-MIMO"""
 
@@ -16,7 +169,7 @@ class linkAdaptation(Layer):
                 nfft,
                 N_s,
                 data_sym_position,
-                lookup_table_size,
+                lookup_table_size="38.214",
                 dtype=tf.complex64,
                 **kwargs):
         super().__init__(trainable=False, dtype=dtype, **kwargs)
@@ -42,6 +195,11 @@ class linkAdaptation(Layer):
 
         self.use_mmse_eesm_method = True
         self.lookup_table_size = lookup_table_size
+        # Sionna's LDPC5GEncoder supports code rates >= 1/5.  Table-1 MCS
+        # indices 0--2 remain represented by get_link_adaptation_table(), but
+        # require additional repetition/rate matching before this PHY can use
+        # them for an actual transmission.
+        self.minimum_mcs_index = 3 if str(lookup_table_size).lower() == "38.214" else 0
 
         self.N_s = N_s
         
@@ -68,19 +226,9 @@ class linkAdaptation(Layer):
 
         if self.use_mmse_eesm_method:
 
-            if self.lookup_table_size == 'long':
-
-                beta_list = np.array([1.49, 1.61, 3.36, 4.56, 6.42, 13.76, 25.16, 28.38])
-                refer_sinr_db = np.array([0.2, 4.3, 5.9, 8.1, 10.3, 14.1, 18.7, 21.0])
-                
-                mcs_candidates = np.array([np.array([2,0.3]), np.array([2,0.6]), 
-                                        np.array([4,0.37]), np.array([4,0.5]), np.array([4,0.6]), np.array([4,0.66]),
-                                        np.array([6,0.55]), np.array([6,0.75]), np.array([6,0.85])])
-            else:
-
-                beta_list = np.array([1.61, 6.42, 28.38])
-                refer_sinr_db = np.array([4.3, 10.3, 22.7])
-                mcs_candidates = np.array([np.array([2,0.6]), np.array([4,0.5]), np.array([6,0.65])])
+            beta_list, refer_sinr_db, mcs_candidates = get_link_adaptation_table(
+                self.lookup_table_size
+            )
 
 
             qam_order_arr = np.zeros((self.N_s))
@@ -180,19 +328,9 @@ class linkAdaptation(Layer):
 
         if self.use_mmse_eesm_method:
 
-            if self.lookup_table_size == 'long':
-
-                beta_list = np.array([1.49, 1.61, 3.36, 4.56, 6.42, 13.76, 25.16, 28.38])
-                refer_sinr_db = np.array([0.2, 4.3, 5.9, 8.1, 10.3, 14.1, 18.7, 21.0])
-                
-                mcs_candidates = np.array([np.array([2,0.3]), np.array([2,0.6]), 
-                                        np.array([4,0.37]), np.array([4,0.5]), np.array([4,0.6]), np.array([4,0.66]),
-                                        np.array([6,0.55]), np.array([6,0.75]), np.array([6,0.85])])
-            else:
-
-                beta_list = np.array([1.61, 6.42, 28.38])
-                refer_sinr_db = np.array([4.3, 10.3, 22.7])
-                mcs_candidates = np.array([np.array([2,0.6]), np.array([4,0.5]), np.array([6,0.65])])
+            beta_list, refer_sinr_db, mcs_candidates = get_link_adaptation_table(
+                self.lookup_table_size
+            )
 
 
             qam_order_arr = np.zeros((self.N_s, num_rx_nodes))
@@ -267,9 +405,38 @@ class linkAdaptation(Layer):
 
         
     
-    def lookup_table(self, sinr_eff_list, refer_sinr_db, mcs_candidates, return_mcs_index):
+    def lookup_table(
+        self,
+        sinr_eff_list,
+        refer_sinr_db,
+        mcs_candidates,
+        return_mcs_index=False,
+    ):
 
         assert len(sinr_eff_list) == refer_sinr_db.shape[0]
+
+        # The 38.214 table has one calibrated/interpolated EESM threshold per
+        # candidate.  Legacy tables retain their boundary-threshold behavior
+        # for backward compatibility.
+        if refer_sinr_db.shape[0] == mcs_candidates.shape[0]:
+            minimum_mcs_index = min(
+                int(getattr(self, "minimum_mcs_index", 0)),
+                mcs_candidates.shape[0] - 1,
+            )
+            admissible = np.flatnonzero(
+                np.asarray(sinr_eff_list) >= np.asarray(refer_sinr_db)
+            )
+            admissible = admissible[admissible >= minimum_mcs_index]
+            mcs_idx = (
+                int(admissible[-1])
+                if admissible.size
+                else minimum_mcs_index
+            )
+            curr_qam_order, curr_code_rate = mcs_candidates[mcs_idx, :]
+            cqi_snr = refer_sinr_db[mcs_idx]
+            return curr_qam_order, curr_code_rate, cqi_snr, (
+                mcs_idx if return_mcs_index else None
+            )
 
         mcs_idx = 0
         for idx in range(refer_sinr_db.shape[0]):
@@ -283,4 +450,5 @@ class linkAdaptation(Layer):
         if not return_mcs_index:
             mcs_index = None
 
-        return curr_qam_order, curr_code_rate, refer_sinr_db[mcs_idx], mcs_idx
+        cqi_snr = refer_sinr_db[min(mcs_idx, refer_sinr_db.shape[0] - 1)]
+        return curr_qam_order, curr_code_rate, cqi_snr, mcs_idx

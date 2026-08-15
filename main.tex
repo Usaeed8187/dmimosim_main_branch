@@ -1,0 +1,1337 @@
+\documentclass[lettersize,journal]{IEEEtran}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\usepackage{balance}
+\usepackage{tabularx}
+\usepackage{booktabs}
+
+
+\begin{document}
+
+\title{
+Channel Prediction for Mobile Distributed MIMO (MD-MIMO) Through Kalman-Structured Online Learning
+}
+
+
+\author{Usama Saeed,
+        Yibin Liang,
+        Nima Mohammadi,        
+        Daniel J. Jakubisin,
+        and Lingjia Liu
+\thanks{U. Saeed, Y. Liang, N. Mohammadi and L. Liu are with the Bradley Department of Electrical and Computer Engineering, Virginia Tech, USA. The corresponding author is L. Liu (ljliu@ieee.org).}
+\thanks{D. J. Jakubisin is with the National Security Institute, Virginia Tech, USA.}
+\thanks{
+Efforts sponsored by the U.S. Government under the Training and Readiness Accelerator II (TReX II), OTA. The U.S. Government is authorized to reproduce and distribute reprints for Governmental purposes notwithstanding any copyright notation thereon.}}
+
+\maketitle
+\thispagestyle{empty}
+\pagestyle{empty}
+
+\begin{abstract}
+Mobile distributed MIMO (MD-MIMO) extends conventional distributed MIMO by enabling mobility of the distributed radio units (RUs) and replacing wired fronthaul with wireless links. 
+However, MD-MIMO performance depends heavily on the availability of accurate channel state information (CSI), which becomes stale quickly in high-mobility environments. 
+Channel prediction, therefore, emerges as a key enabling technology for realizing the potential gains of MD-MIMO.
+Kalman filter-based prediction methods achieve minimum mean-square error (MMSE) performance assuming the availability of accurate channel dynamics, but their performance degrades substantially under model mismatch in practical environments.
+In this paper, we address this limitation by designing a channel prediction framework that combines model-based structure with data-driven AI/ML learning strategies.
+In this physics-based AI approach, we leverage statistics of the Kalman predictor to configure the dynamics of a Windowed Echo State Network (WESN), embedding model-based autoregressive structure into the neural network while retaining low-complexity online training for robustness to imperfect system knowledge. 
+Through extensive simulations under practical 3GPP evaluation methodologies, we demonstrate that the introduced approach outperforms both Kalman filtering and state-of-the-art learning-based baselines in terms of channel prediction accuracy and downlink throughput for MD-MIMO under realistic mobility and feedback constraints.
+
+\end{abstract}
+
+\section{Introduction}
+% D-MIMO -> MD-MIMO -> CSI aging -> prediction -> Kalman limitations -> ML limitations -> RC/WESN -> proposed configured WESN.
+Distributed Multiple-Input Multiple-Output (D-MIMO) has emerged as a key architectural paradigm for next-generation wireless networks, enabling geographically separated radio units (RUs) to cooperate for joint transmission and reception \cite{comp, mtrp}. 
+By spatially distributing transmit antennas across the coverage area, D-MIMO enhances coverage and spatial multiplexing performance compared to conventional co-located MIMO systems. 
+Such a distributed framework is particularly well-suited for NextG networks, where dense deployments, heterogeneous infrastructures, and the need for flexible network reconfiguration are expected to be fundamental.
+
+Mobile Distributed MIMO (MD-MIMO) further extends this paradigm by replacing conventional fiber-based fronthaul (FH) with wireless FH and by allowing Distributed Units (DUs) and Radio Units (RUs) to be mobile, thereby significantly enhancing deployment flexibility and adaptability for NextG networks \cite{md_mimo_mag, icnc_dmimo, wiopt}. 
+Compared to conventional D-MIMO, MD-MIMO promises increased deployment flexibility, rapid reconfigurability, and reduced operating and deployment costs, making it particularly attractive for highly dynamic environments. 
+MD-MIMO can enable rapid deployment in scenarios such as Vehicle-to-Everything (V2X), UAV-assisted networks, emergency response, and tactical communications.
+However, these advantages come at the cost of increased system complexity. 
+MD-MIMO must coordinate joint transmission across spatially distributed mobile RUs while operating under limited and delayed CSI. 
+As a result, the same features that make MD-MIMO attractive also impose stricter physical-layer coordination challenges.
+
+Accurate CSI is essential for Coherent Joint Transmission (CJT), as the distributed RUs must jointly construct a downlink precoder whose phases and amplitudes align at the intended User Equipments (UEs) while suppressing inter-user interference. 
+In practical frequency-division duplex (FDD) systems, CSI is estimated at the UE and fed back to the DU through quantized codebook-based mechanisms, resulting in imperfect and delayed channel knowledge at the transmitter \cite{wiopt}. 
+This leads to the well-known phenomenon of CSI aging, where a mismatch arises between the channel used for precoding and the actual channel during transmission \cite{kim_kalman_ml}. 
+The impact of this mismatch is particularly severe in D-MIMO systems \cite{channel_aging_hardware_CF, rate_splitting} and even worse in MD-MIMO \cite{kumar_csi_aging}, as both UE mobility and RU mobility contribute to rapid channel variation.
+Additionally, MD-MIMO introduces additional coordination and fronthaul operations before joint transmission. 
+These operations increase the effective latency between CSI acquisition and data transmission.
+As a result, the precoder becomes misaligned with the true channel, degrading coherent combining gains and reducing the effectiveness of interference suppression. 
+These effects are further exacerbated in high-mobility environments, where the channel may change significantly between estimation, feedback, and downlink transmission.
+
+Channel prediction is therefore a key mechanism for mitigating CSI aging without increasing pilot and CSI feedback overhead. 
+Rather than feeding back CSI corresponding to the current channel realization, the UE predicts the future channel that will be observed when the DU applies the downlink precoder. 
+This prediction horizon is directly tied to the feedback and processing delay, and grows with the latency introduced by CSI feedback delay and MD-MIMO fronthaul coordination. 
+As a result, channel prediction becomes particularly critical in MD-MIMO systems, where both UE and RU mobility accelerate channel variation and amplify CSI mismatch.
+In this context, prediction is an enabling technology for MD-MIMO CJT operation \cite{wiopt, kim_kalman_ml}.
+
+Conventional channel prediction methods, including autoregressive (AR) modeling, Wiener filtering, and Kalman filtering, exploit temporal correlation in wireless channels. 
+In particular, Kalman filtering provides a minimum mean-square error (MMSE) predictor under a linear Gaussian state-space model \cite{kim_kalman_ml, ekf}. 
+However, the performance of Kalman filtering-based predictors relies on accurate knowledge of the underlying model parameters, including the state transition dynamics and noise statistics. 
+In practice, these quantities are not known a priori and must be estimated from data \cite{kim_kalman_ml}. 
+This highlights a key practical limitation: model-based predictors depend on estimated dynamics that may deviate from the true channel evolution, particularly in realistic propagation environments with complex scattering, mobility, and non-stationarity. 
+As a result, performance can degrade when the assumed model does not accurately capture the underlying channel behavior \cite{lstm_vs_kf, kf_model_mismatch}.
+
+To address these limitations, machine learning (ML)-based channel prediction methods have been introduced to learn channel dynamics directly from data. 
+Recent approaches include Recurrent Neural Networks (RNNs) \cite{lstm_vs_kf}, attention-based models such as transformers \cite{channelformer, linformer}, and structured state-space sequence models \cite{channelmamba}.
+Learning-based channel predictors can be broadly categorized into offline and online approaches.
+In offline learning, model parameters are trained in advance using a pre-collected dataset and are typically fixed during deployment.
+In online learning, the predictor updates its trainable parameters during operation using newly observed data.
+While offline data-driven methods can reduce the reliance on explicit system identification, they introduce new practical challenges.
+First, many ML-based predictors incur significantly higher computational complexity than Kalman filtering-based approaches, particularly during training~\cite{kim_kalman_ml}.
+Second, offline learning methods require large and representative training datasets to achieve good performance across diverse channel conditions~\cite{chan_pred_meta_learning}.
+In practice, collecting such datasets is challenging because the training data must capture a wide range of RU mobilities, UE mobilities, network geometries, blockage conditions, and propagation environments.
+Moreover, offline-trained models may not generalize well when deployed in environments that differ from the training data~\cite{chan_pred_meta_learning}.
+This issue is particularly acute for channel prediction, where channel statistics can evolve rapidly over time.
+These challenges highlight the need for channel prediction methods that support online learning, enabling adaptation to changing channel conditions with limited data \cite{small_dataset}.
+
+Reservoir computing (RC), and in particular Echo State Networks (ESNs), provide an attractive framework for online learning in wireless problems \cite{universal_receiver, jiarui_real_time}. 
+In ESNs, the recurrent dynamics are fixed and only a linear readout layer is trained, significantly reducing training complexity compared to fully trainable neural networks \cite{jaeger2007echo}. 
+This structure enables efficient online adaptation using limited training data, while still providing temporal memory through the recurrent reservoir. 
+The Windowed ESN (WESN) \cite{wesn} extends the standard ESN by augmenting the ESN input with a sliding window of recent observations, thereby exposing short-term channel history directly to the reservoir and readout.
+As a result, WESN balances modeling flexibility and computational efficiency, and has been applied in wireless communication tasks such as MIMO-OFDM symbol detection \cite{universal_receiver, shashank_xai, wesn, tensor_RC} and even MIMO-OFDM channel prediction~\cite{wiopt, icnc_dmimo}. 
+In the context of MD-MIMO, this is especially appealing, as it allows online adaptation to time-varying channels, making RC-based predictors better aligned with practical PHY-layer constraints than fully offline deep learning approaches.
+
+However, conventional RC approaches typically rely on randomly initialized reservoirs \cite{wiopt}, so their recurrent dynamics are not explicitly designed to take advantage of domain knowledge.
+In this work, we address this limitation by configuring a WESN using the structure of a Kalman filtering-based predictor. Specifically, we design the reservoir using the steady-state Kalman predictor as a target dynamical system. 
+This leads to a hybrid approach that combines model-based and data-driven learning: the configured reservoir embeds the structure of a Kalman-filtering-based linear predictor, while the readout layer is trained online to compensate for model mismatch and imperfect knowledge of channel dynamics.
+We integrate this predictor into an MD-MIMO CJT pipeline with practical 3GPP Type-II codebook-based CSI feedback and evaluate its impact on both channel prediction Normalized Mean Square Error (NMSE) and end-to-end downlink throughput.
+
+The main contributions of this work are:
+
+\begin{itemize}
+
+
+\item We formulate a WESN-based online learning architecture for MD-MIMO OFDM channel prediction.
+We adapt the WESN formulation to the MD-MIMO OFDM setting by applying it on a per UE-RU link basis.
+
+\item We introduce a weight configuration approach for the WESN predictor, where the reservoir is designed using the structure of the steady-state Kalman predictor rather than initialized randomly. By interpreting the Kalman predictor as a linear dynamical system and approximating its transfer function through a bank of first-order infinite impulse response (IIR) filters, the resulting reservoir intrinsically captures the dominant temporal dynamics of the wireless channel.
+
+\item We demonstrate through link-level simulations of MD-MIMO CJT systems that the configured WESN achieves improved channel prediction accuracy compared to Kalman-filtering-based predictors and learning-based baselines. 
+These gains are shown to translate directly into improved precoding quality and increased system throughput under realistic conditions, including CSI feedback delay and codebook-based CSI feedback.
+
+\end{itemize}
+
+Our results demonstrate that while increasing the number of RUs enhances multiplexing and reliability gains, these gains are highly sensitive to CSI aging. Channel prediction significantly mitigates this degradation, enabling robust coherent joint transmission under realistic feedback constraints.
+
+The remainder of this paper is organized as follows: 
+Section II introduces the MD-MIMO system model and the CJT downlink signal formulation. 
+Section III describes practical CJT operation under imperfect CSI, including codebook-based feedback and CSI aging. 
+Section IV reviews the preliminaries on Kalman filtering and ESNs. 
+Section V presents the configured WESN framework for channel prediction, including the derivation of the reservoir dynamics from steady-state Kalman predictor statistics. 
+Section VI provides a detailed complexity analysis comparing configured WESN with conventional Kalman filtering.
+Section VII integrates the introduced predictor into the CJT downlink pipeline. 
+Section VIII presents simulation results demonstrating the performance gains in terms of both channel prediction accuracy and system throughput.
+Finally, Section IX concludes the paper.
+
+\section{System Model}
+
+We consider an MD-MIMO downlink architecture in which a mobile Distributed Unit (DU) coordinates a set of $G$ geographically distributed Radio Units (RUs), as illustrated in Fig.~\ref{fig:Two_phase_MD_MIMO}. RU $g$ is equipped with $N_g$ antennas, $g\in\{0,\dots,G-1\}$. The DU performs centralized baseband processing, including payload generation, CSI processing, and downlink precoder computation, while the RUs serve as distributed transmit front-ends. Through coordination across the RUs, the system forms a virtual transmit array for CJT in the downlink.
+
+\begin{figure}
+    \centering    \includegraphics[width=0.95\linewidth]{fig/Two_phase_MD_MIMO_new.png}
+    \caption{Two-link MD-MIMO operation. Link~1 (top): RU~0 broadcasts the downlink payload over the wireless fronthaul to distributed RUs~1--3. Link~2 (bottom): RUs~0--3 jointly transmit to the UEs through coherent joint transmission.}
+    \label{fig:Two_phase_MD_MIMO}
+\end{figure}
+
+
+To enable wireless fronthaul, we assume that RU $0$ is co-located with the DU and has a reliable local connection to it (e.g., wired or in-box interface). RU $0$ acts as the wireless FH transmitter, while the remaining RUs $g\in\{1,\dots,G-1\}$ receive the fronthaul transmission and recover the payload intended for joint downlink transmission. End-to-end MD-MIMO downlink operation therefore proceeds over two links:
+\begin{itemize}
+    \item \textbf{Link 1 (wireless FH):} RU $0$ transmits the downlink payload to the distributed RUs $g=1,\dots,G-1$,
+    \item \textbf{Link 2 (CJT downlink):} all RUs jointly transmit to the UEs using coherent downlink precoding.
+\end{itemize}
+
+Both links operate under FDD, requiring explicit CSI feedback. The two links are separated in time through Time Division Multiplexing (TDM) to avoid mutual interference. 
+Link~1 focuses on reliable wireless payload delivery from the DU-side RU to the distributed RUs, whereas Link~2 exploits the spatial degrees of freedom of the distributed array for multi-user downlink transmission.
+In this work, we assume perfect Link~1 and focus on channel prediction as an enabling technology for Link~2.
+
+\subsection{Link-2 CJT Signal Model}
+
+After Link~1, all participating RUs are assumed to hold identical copies of the symbol vector corresponding to the downlink payload. Link~2 then performs coherent joint transmission from the distributed RU set to the UEs. The aggregate set of transmit antennas across all RUs forms a distributed virtual array with $N_{\mathrm{tot}} = \sum_{g=0}^{G-1} N_g$ transmit antennas.
+
+Let $K$ denote the number of simultaneously served UEs. UE $k$ is equipped with $M_k$ antennas and is intended to receive $d_k$ spatial streams. Define the aggregate transmit symbol vector:
+\begin{equation}
+\mathbf{s}
+=
+\begin{bmatrix}
+\mathbf{s}_1^T & \mathbf{s}_2^T & \cdots & \mathbf{s}_K^T
+\end{bmatrix}^T
+\in \mathbb{C}^{d\times 1},
+\end{equation}
+where $\mathbf{s}_k \in \mathbb{C}^{d_k\times 1}$ and $d = \sum_{k=1}^{K} d_k.$
+
+Let $\mathbf{W}_{\mathrm{DL}} \in \mathbb{C}^{N_{\mathrm{tot}}\times d}$ denote the global downlink precoding matrix applied across all RUs. Let $\mathbf{H}_{k,g} \in \mathbb{C}^{M_k\times N_g}$ denote the channel from RU $g$ to UE $k$. The aggregate channel from all RUs to UE $k$ is given by
+\begin{equation}
+\mathbf{H}_k
+=
+\begin{bmatrix}
+\mathbf{H}_{k,0} & \mathbf{H}_{k,1} & \cdots & \mathbf{H}_{k,G-1}
+\end{bmatrix}
+\in \mathbb{C}^{M_k\times N_{\mathrm{tot}}}.
+\label{eq:agg_channel}
+\end{equation}
+
+The received signal at UE $k$ is therefore
+\begin{equation}
+\mathbf{y}_k
+=
+\mathbf{H}_k \mathbf{W}_{\mathrm{DL}} \mathbf{s}
++
+\mathbf{n}_k,
+\label{eq:cjt_rx_signal}
+\end{equation}
+where $\mathbf{n}_k \sim \mathcal{CN}(\mathbf{0},\sigma_k^2\mathbf{I})$ denotes additive Gaussian noise.
+
+When timing, carrier-frequency, and phase synchronization are maintained across the RUs, the distributed antennas can combine coherently at the UE. Under accurate CSI, this enables both distributed beamforming gain and spatial multiplexing gain. However, in practical FDD operation, the downlink precoder must be computed from fed-back and quantized CSI, and is therefore sensitive to feedback imperfections and delay.
+
+% \subsection{Notation}
+
+% Bold lowercase letters denote vectors and bold uppercase letters denote matrices. $(\cdot)^T$, $(\cdot)^H$, and $(\cdot)^{-1}$ denote transpose, Hermitian transpose, and matrix inverse, respectively. $\mathrm{vec}(\cdot)$ denotes vectorization by column stacking, and $\mathrm{unvec}(\cdot)$ denotes the inverse operation when dimensions are clear from context. $\mathbb{C}^{m\times n}$ denotes the space of complex-valued $m\times n$ matrices. $\mathbf{I}_n$ denotes the $n\times n$ identity matrix. A circularly symmetric complex Gaussian vector with mean $\boldsymbol{\mu}$ and covariance $\mathbf{C}$ is denoted by $\mathcal{CN}(\boldsymbol{\mu},\mathbf{C})$.
+
+% % For notational convenience, the RU index is $g\in\{0,\dots,G-1\}$ and the UE index is $k\in\{1,\dots,K\}$. The pair $(k,g)$ refers to the channel between UE $k$ and RU $g$. Time is indexed by $t$ whenever temporal evolution is relevant.
+
+\section{Practical CJT Operation Under Imperfect CSI}
+\label{sec:practical_op}
+
+In practical FDD systems, CJT relies on CSI acquired at the UE and fed back to the distributed unit (DU). Unlike idealized settings with perfect instantaneous CSI, real-world deployments are subject to quantization constraints and feedback delay, both of which significantly impact CJT performance.
+
+\subsection{Codebook-Based CSI Feedback}
+
+We assume standardized codebook-based CSI feedback, where each UE reports quantized channel information using a Type-II codebook \cite{codebook_tut}.
+In distributed MIMO systems, conventional CSI feedback methods designed for co-located antenna arrays are not directly applicable due to the spatial separation of radio units (RUs).
+To address this, we adopt the CB2 distributed CSI feedback structure from \cite{dmimo_csi_fb} in which per-RU spatial bases are selected independently and combined to form a global representation.
+This enables CJT precoder construction using quantized CSI while preserving the distributed spatial structure.
+
+\subsection{CSI Aging and Feedback Delay}
+
+Let $P_{\mathrm{fb}}$ denote the feedback delay between CSI estimation at the UE and its use at the DU. Due to mobility, the channel evolves over this delay, resulting in a mismatch between the precoder and the instantaneous channel.
+
+At time $t$, the DU constructs the downlink precoder using CSI corresponding to time $t - P_{\mathrm{fb}}$. This temporal mismatch degrades coherent combining gains, particularly in MD-MIMO systems where multiple distributed links must align in phase.
+To mitigate CSI aging, the UE predicts the future channel state corresponding to time $t + P_{\mathrm{fb}}$. 
+This prediction is then used to calculate codebook-based CSI feedback.
+
+\section{Preliminaries}
+
+In this section, we review two fundamental building blocks used in the channel prediction method introduced in this work: linear state-space estimation via Kalman filtering and Windowed Echo State Network (WESN). This section is kept general and independent of any specific application.
+
+\subsection{Kalman Filtering}
+
+A discrete-time linear state-space model can be expressed as:
+\begin{align}
+\mathbf{x}_t &= \mathbf{F} \mathbf{x}_{t-1} + \mathbf{w}_t, \\
+\mathbf{y}_t &= \mathbf{H} \mathbf{x}_t + \mathbf{n}_t,
+\end{align}
+where:
+\begin{itemize}
+    \item $\mathbf{x}_t \in \mathbb{C}^{N_x \times 1}$ is the latent state vector,
+    \item $\mathbf{y}_t \in \mathbb{C}^{N_y \times 1}$ is the observation vector,
+    \item $\mathbf{F} \in \mathbb{C}^{N_x \times N_x}$ is the state transition matrix,
+    \item $\mathbf{H} \in \mathbb{C}^{N_y \times N_x}$ is the observation matrix,
+    \item $\mathbf{w}_t \sim \mathcal{CN}(\mathbf{0}, \mathbf{Q})$, $\mathbf{Q} \in \mathbb{C}^{N_x \times N_x}$,
+    \item $\mathbf{n}_t \sim \mathcal{CN}(\mathbf{0}, \mathbf{R})$, $\mathbf{R} \in \mathbb{C}^{N_y \times N_y}$.
+\end{itemize}
+
+The Kalman filter provides the minimum mean-square error (MMSE) estimate of the state through the recursion:
+\begin{align}
+\hat{\mathbf{x}}_{t|t-1} &= \mathbf{F} \hat{\mathbf{x}}_{t-1|t-1}, \\
+\mathbf{P}_{t|t-1} &= \mathbf{F} \mathbf{P}_{t-1|t-1} \mathbf{F}^H + \mathbf{Q}, \\
+\mathbf{K}_t &= \mathbf{P}_{t|t-1} \mathbf{H}^H \left( \mathbf{H} \mathbf{P}_{t|t-1} \mathbf{H}^H + \mathbf{R} \right)^{-1}, \\
+\hat{\mathbf{x}}_{t|t} &= \hat{\mathbf{x}}_{t|t-1} + \mathbf{K}_t \left( \mathbf{y}_t - \mathbf{H} \hat{\mathbf{x}}_{t|t-1} \right), \\
+\mathbf{P}_{t|t} &= \left( \mathbf{I} - \mathbf{K}_t \mathbf{H} \right) \mathbf{P}_{t|t-1},
+\end{align}
+where:
+\begin{itemize}
+    \item $\hat{\mathbf{x}}_{t|t-1}$ and $\hat{\mathbf{x}}_{t|t}$ are the predicted and updated state estimates,
+    \item $\mathbf{P}_{t|t-1}, \mathbf{P}_{t|t} \in \mathbb{C}^{N_x \times N_x}$ are the corresponding error covariance matrices,
+    \item $\mathbf{K}_t \in \mathbb{C}^{N_x \times N_y}$ is the Kalman gain.
+\end{itemize}
+
+This recursive structure defines a linear dynamical system that maps past observations to future state estimates.
+
+\subsection{Windowed Echo State Network}
+
+Echo State Network (ESN) belongs to the class of reservoir computing models for temporal sequence processing. 
+In this work, we use a Windowed ESN (WESN) that explicitly incorporates short-term temporal context.
+An ESN architecture is illustrated in Fig.~\ref{fig:ESN}.
+
+\begin{figure}
+    \centering    \includegraphics[width=0.95\linewidth]{fig/ESN_architecture.png}
+    \caption{Vanilla ESN architecture}
+    \label{fig:ESN}
+\end{figure}
+
+
+\subsubsection{Windowed Input Representation}
+
+Let $\mathbf{u}(t) \in \mathbb{C}^{N_u \times 1}$ denote the input sequence. A causal sliding window of length $L_w$ is constructed as:
+\begin{equation}
+\tilde{\mathbf{u}}(t)
+=
+\begin{bmatrix}
+\mathbf{u}(t)^T & \mathbf{u}(t-1)^T & \cdots & \mathbf{u}(t-L_w+1)^T
+\end{bmatrix}^T
+,
+\end{equation}
+where $\tilde{\mathbf{u}}(t)\in \mathbb{C}^{(L_w N_u) \times 1}$. 
+
+This representation allows the network to access recent temporal history explicitly.
+
+\subsubsection{Reservoir Dynamics with Skip Connections}
+
+Let the reservoir state be $\mathbf{s}(t) \in \mathbb{C}^{N_n \times 1}$, where $N_n$ is the number of reservoir neurons. The state evolves according to:
+\begin{equation}
+\mathbf{s}(t)
+=
+\phi\!\left(
+\mathbf{W}_{\mathrm{res}} \mathbf{s}(t-1)
++
+\mathbf{W}_{\mathrm{in}} \tilde{\mathbf{u}}(t)
+\right),
+\end{equation}
+where:
+\begin{itemize}
+    \item $\mathbf{W}_{\mathrm{res}} \in \mathbb{C}^{N_n \times N_n}$ is the recurrent weight matrix,
+    \item $\mathbf{W}_{\mathrm{in}} \in \mathbb{C}^{N_n \times (L_w N_u)}$ is the input projection matrix,
+    \item $\phi(\cdot)$ is an element-wise nonlinear activation function.
+\end{itemize}
+
+To improve information flow and stabilize learning, we augment the model with a linear skip connection from the input to the output.
+
+\subsubsection{Readout and Training}
+
+The output $\hat{\mathbf{y}}(t) \in \mathbb{C}^{N_y \times 1}$ is computed as:
+\begin{equation}
+\hat{\mathbf{y}}(t)
+=
+\mathbf{W}_{\mathrm{out}}
+\begin{bmatrix}
+\mathbf{s}(t) \\
+\tilde{\mathbf{u}}(t)
+\end{bmatrix},
+\end{equation}
+where:
+\begin{itemize}
+    \item $\mathbf{W}_{\mathrm{out}} \in \mathbb{C}^{N_y \times (N_n + L_w N_u)}$ is the readout matrix.
+\end{itemize}
+
+Only the readout weights $\mathbf{W}_{\mathrm{out}}$ are trained, typically using ridge regression:
+\begin{equation}
+\mathbf{W}_{\mathrm{out}}
+=
+\mathbf{T} \mathbf{Z}^H \left( \mathbf{Z} \mathbf{Z}^H + \lambda \mathbf{I} \right)^{-1},
+\end{equation}
+where:
+\begin{itemize}
+    \item $\mathbf{Z}$ stacks the augmented features $[\mathbf{s}(t)^T, \tilde{\mathbf{u}}(t)^T]^T$ over time,
+    \item $\mathbf{T}$ stacks the corresponding target outputs,
+    \item $\lambda > 0$ is a regularization parameter.
+\end{itemize}
+
+The reservoir and input weights are fixed after initialization, while the readout is trained using observed data. This structure enables efficient, low-complexity online adaptation.
+
+\section{Configured WESN for Channel Prediction}
+
+We introduce a strategy for configuring the recurrent and input weights of the WESN for channel prediction using statistics of Kalman filtering. 
+The motivation follows the broader configured-reservoir viewpoint: instead of randomly generating the recurrent dynamics, the WESN weights can be configured using the statistics of a target transfer-function family. 
+This idea was developed for MIMO receive processing in \cite{shashank_xai}, and we specialize it to channel prediction.
+The WESN configuration and training pipeline is shown in Fig.~\ref{fig:pipeline}.
+
+\begin{figure*}[t]
+    \centering    \includegraphics[width=\textwidth]{fig/pipeline.pdf}
+    \caption{Configured WESN channel prediction pipeline.}
+    \label{fig:pipeline}
+\end{figure*}
+
+A natural target dynamical system is the Kalman predictor. For linear Gaussian state-space models, the Kalman filter provides the MMSE predictor when the state-transition matrix and the process/observation noise covariances are known exactly. 
+However, this is also a limitation in practice, since prediction performance depends on the accuracy of the assumed model parameters. 
+In the introduced approach, we therefore use the statistics of a Kalman-based predictor only to configure the WESN reservoir, while still learning the output weights from empirical data. 
+In this way, the recurrent dynamics inherit model-based structure, whereas the trained readout compensates for model mismatch and imperfect knowledge of the underlying dynamics.
+
+For analytical tractability, we begin with a linearized view of the WESN and focus first on the recurrent component with parallel non-interconnected neurons, following the configured-reservoir perspective in \cite{shashank_xai}. 
+As argued in \cite{shashank_xai}, this linearized setting exposes the underlying signal-processing structure of the reservoir while preserving the essential role of weight configuration. 
+The nonlinear activation, skip connections, and final trained readout can then be viewed as additional mechanisms that improve robustness and approximation accuracy beyond this core linear dynamical model.
+
+Consider a bank of $N_n$ parallel recurrent neurons driven by an input $\tilde{\mathbf{u}}(t)\in\mathbb{C}^{N_{\mathrm{in}}\times 1}$. 
+We consider a linearized WESN with non-interconnected neurons, so that the recurrent weight matrix is diagonal:
+\begin{equation}
+\mathbf{W}_{\mathrm{res}} = \mathrm{diag}\left(w_{\mathrm{res},1}, \dots, w_{\mathrm{res},N_n}\right).
+\end{equation}
+
+Let $\mathbf{w}_{\mathrm{in},i}^T$ denote the $i$th row of the input weight matrix $\mathbf{W}_{\mathrm{in}} \in \mathbb{C}^{N_n \times N_{\mathrm{in}}}$. 
+Then, under linear activation, the state recursion of the $i$th neuron is
+\begin{equation}
+s_i[t]
+=
+w_{\mathrm{res},i} \, s_i[t-1]
++
+\mathbf{w}_{\mathrm{in},i}^T \tilde{\mathbf{u}}(t).
+\end{equation}
+
+Taking the $z$-transform, the input-output transfer function of the $i$th neuron is
+\begin{equation}
+H_i(z)
+=
+\frac{\mathbf{w}_{\mathrm{in},i}^T}{1 - w_{\mathrm{res},i} z^{-1}}.
+\end{equation}
+
+Thus, each neuron implements a first-order IIR mode whose pole is given by the corresponding diagonal entry of $\mathbf{W}_{\mathrm{res}}$, and whose input coupling is determined by the corresponding row of $\mathbf{W}_{\mathrm{in}}$. 
+Since the neurons are not interconnected, the reservoir spans a linear subspace generated by these first-order modes, and the final readout forms a linear combination of them.
+
+Let $\mathbf{W}_{\mathrm{out}} \in \mathbb{C}^{N_{\mathrm{out}} \times N_n}$ denote the readout matrix. Then the overall transfer function of the linearized WESN can be written as
+\begin{equation}
+\mathbf{T}_{\mathrm{WESN}}(z)
+=
+\sum_{i=1}^{N_n}
+\frac{
+\mathbf{W}_{\mathrm{out}}[:,i] \, \mathbf{w}_{\mathrm{in},i}^T
+}{
+1 - w_{\mathrm{res},i} z^{-1}
+},
+\label{eq:linear_wesn_tf}
+\end{equation}
+where $\mathbf{W}_{\mathrm{out}}[:,i]$ denotes the $i$th column of $\mathbf{W}_{\mathrm{out}}$.
+
+Equation \eqref{eq:linear_wesn_tf} shows that the WESN realizes a sum of first-order IIR components, each corresponding to a neuron. 
+Therefore, configuring the reservoir requires selecting the poles $\{w_{\mathrm{res},i}\}$ and input couplings $\{\mathbf{w}_{\mathrm{in},i}\}$ such that the WESN can approximate a desired target transfer-function family.
+
+A natural choice is the Kalman predictor. For linear Gaussian state-space models, the Kalman filter provides the MMSE predictor when the state-transition matrix and the process/observation noise covariances are known exactly. 
+However, this model-dependent MMSE property is also a limitation in practice, since prediction performance depends on the accuracy of the assumed model parameters. 
+Accordingly, our strategy is to use the transfer-function statistics of a Kalman-based predictor to determine the poles and input couplings of the WESN reservoir, while still learning the final output combination from empirical data.
+
+For a given UE-RU pair $(k,g)$, let
+\begin{align}
+\mathbf{h}_{k,g}[t]
+&\triangleq
+\mathrm{vec}\!\left(\mathbf{H}_{k,g}[t]\right)
+\in
+\mathbb{C}^{M_kN_g \times 1},\\
+\tilde{\mathbf{h}}_{k,g}[t]
+&\triangleq
+\mathrm{vec}\!\left(\tilde{\mathbf{H}}_{k,g}[t]\right)
+\in
+\mathbb{C}^{M_kN_g \times 1},
+\end{align}
+denote the true and noisy channel vectors, respectively. To capture temporal correlation, we use an autoregressive model of order $P$:
+\begin{equation}
+\mathbf{h}_{k,g}[t+1]
+=
+\sum_{\ell=1}^{P}
+\mathbf{A}_{\ell}\mathbf{h}_{k,g}[t+1-\ell]
++
+\mathbf{w}_{k,g}[t],
+\label{eq:kg_ar_model_cfg}
+\end{equation}
+where $\mathbf{A}_{\ell}\in\mathbb{C}^{M_kN_g\times M_kN_g}$ and
+\begin{equation}
+\mathbf{w}_{k,g}[t]\sim\mathcal{CN}(\mathbf{0},\mathbf{Q}).
+\end{equation}
+The corresponding observation model is
+\begin{equation}
+\tilde{\mathbf{h}}_{k,g}[t]
+=
+\mathbf{h}_{k,g}[t]
++
+\mathbf{n}_{k,g}[t],
+\qquad
+\mathbf{n}_{k,g}[t]\sim\mathcal{CN}(\mathbf{0},\mathbf{R}).
+\label{eq:kg_obs_model_cfg}
+\end{equation}
+
+The AR order $P$ determines the memory depth of the model-based predictor. It also guides the learning architecture, since a predictor of order $P$ depends on the most recent $P$ channel observations or states. 
+This motivates linking the WESN window length $L_w$ to the effective temporal memory of the AR model with $L_w = P$.
+
+To write \eqref{eq:kg_ar_model_cfg} in first-order form, define the augmented state
+\begin{equation}
+\mathbf{z}_{k,g}[t]
+\triangleq
+\begin{bmatrix}
+\mathbf{h}_{k,g}[t]^T &
+\mathbf{h}_{k,g}[t-1]^T &
+\cdots &
+\mathbf{h}_{k,g}[t-P+1]^T
+\end{bmatrix}^{T},
+\label{eq:kg_aug_state_cfg}
+\end{equation}
+where $\mathbf{z}_{k,g}[t]\in
+\mathbb{C}^{PM_kN_g \times 1}$.
+
+Then
+\begin{align}
+\mathbf{z}_{k,g}[t+1]
+&=
+\mathbf{F}_{\mathrm{aug}}\mathbf{z}_{k,g}[t]
++
+\mathbf{w}^{\mathrm{aug}}_{k,g}[t],\\
+\tilde{\mathbf{h}}_{k,g}[t]
+&=
+\mathbf{C}_{\mathrm{obs}}\mathbf{z}_{k,g}[t]
++
+\mathbf{n}_{k,g}[t],
+\label{eq:kg_obs_aug_cfg}
+\end{align}
+where $\mathbf{F}_{\mathrm{aug}}\in\mathbb{C}^{PM_kN_g\times PM_kN_g}$ is the standard companion-form augmented state-transition matrix induced by $\{\mathbf{A}_{\ell}\}_{\ell=1}^{P}$, and
+\begin{equation}
+\mathbf{C}_{\mathrm{obs}}
+=
+\begin{bmatrix}
+\mathbf{I}_{M_kN_g} & \mathbf{0} & \cdots & \mathbf{0}
+\end{bmatrix}
+\in
+\mathbb{C}^{M_kN_g \times PM_kN_g}
+\label{eq:c_obs_def}
+\end{equation}
+selects the first block of the augmented state.
+
+For this model, the full Kalman predictor is time-varying because the Kalman gain $\mathbf{K}_t$ evolves with time. 
+Hence, the induced predictor does not in general admit a single fixed transfer function. 
+Since the configured-reservoir method requires a fixed target operator, we instead use the steady-state Kalman predictor as the target system.
+
+Under the usual assumptions of a time-invariant model together with stabilizability and detectability, the Kalman gain converges to a steady-state value \cite{simon_optimal_state_estimation}:
+\begin{equation}
+\mathbf{K}_t \rightarrow \mathbf{K}_{\mathrm{ss}}.
+\end{equation}
+A convenient way to define $\mathbf{K}_{\mathrm{ss}}$ is through the steady-state Riccati fixed point. Let $\mathbf{P}^{-}_{\mathrm{ss}}$ denote the steady-state a priori error covariance. Then
+\begin{align}
+\mathbf{S}_{\mathrm{ss}}
+&=
+\mathbf{C}_{\mathrm{obs}}\mathbf{P}^{-}_{\mathrm{ss}}\mathbf{C}_{\mathrm{obs}}^H
++
+\mathbf{R},\\
+\mathbf{K}_{\mathrm{ss}}
+&=
+\mathbf{P}^{-}_{\mathrm{ss}}\mathbf{C}_{\mathrm{obs}}^H\mathbf{S}_{\mathrm{ss}}^{-1},
+\label{eq:kss_def}
+\end{align}
+with
+\begin{align}
+\mathbf{P}^{+}_{\mathrm{ss}}
+&=
+\mathbf{P}^{-}_{\mathrm{ss}}
+-
+\mathbf{K}_{\mathrm{ss}}\mathbf{C}_{\mathrm{obs}}\mathbf{P}^{-}_{\mathrm{ss}},\\
+\mathbf{P}^{-}_{\mathrm{ss}}
+&=
+\mathbf{F}_{\mathrm{aug}}\mathbf{P}^{+}_{\mathrm{ss}}\mathbf{F}_{\mathrm{aug}}^H
++
+\mathbf{Q}_{\mathrm{aug}}.
+\label{eq:ss_riccati_fp}
+\end{align}
+We obtain the steady-state solution by iterating the Riccati recursion until convergence and then evaluating \eqref{eq:kss_def}.
+
+Using the standard prediction-update form, the resulting steady-state predictor is
+\begin{equation}
+\hat{\mathbf{z}}_{k,g}[t+1|t]
+=
+\mathbf{A}_{\mathrm{p}}\hat{\mathbf{z}}_{k,g}[t|t-1]
++
+\mathbf{B}_{\mathrm{p}}\tilde{\mathbf{h}}_{k,g}[t],
+\label{eq:kg_ss_predictor_cfg}
+\end{equation}
+where
+\begin{align}
+\mathbf{A}_{\mathrm{p}}
+&\triangleq
+\mathbf{F}_{\mathrm{aug}}
+\left(
+\mathbf{I}
+-
+\mathbf{K}_{\mathrm{ss}}\mathbf{C}_{\mathrm{obs}}
+\right),\\
+\mathbf{B}_{\mathrm{p}}
+&\triangleq
+\mathbf{F}_{\mathrm{aug}}\mathbf{K}_{\mathrm{ss}}.
+\end{align}
+The one-step-ahead channel prediction is then obtained by selecting the first block of the predicted state:
+\begin{equation}
+\hat{\mathbf{h}}_{k,g}[t+1|t]
+=
+\mathbf{C}_{\mathrm{obs}}
+\hat{\mathbf{z}}_{k,g}[t+1|t].
+\end{equation}
+Therefore, the steady-state predictor defines the Linear Time Invariant (LTI) transfer function
+\begin{equation}
+\mathbf{T}_{k,g}(z)
+=
+\mathbf{C}_{\mathrm{obs}}
+\left(
+\mathbf{I}
+-
+\mathbf{A}_{\mathrm{p}}z^{-1}
+\right)^{-1}
+\mathbf{B}_{\mathrm{p}},
+\label{eq:kg_ss_tf_cfg}
+\end{equation}
+which maps the noisy channel observations $\tilde{\mathbf{h}}_{k,g}[t]$ to the one-step-ahead channel prediction $\hat{\mathbf{h}}_{k,g}[t+1|t]$.
+
+Rather than using only a single transfer function, we build a family of steady-state predictor transfer functions from multiple channel-history windows. For each window index $s$, we estimate the AR model, construct $\mathbf{F}_{\mathrm{aug}}^{(s)}$, solve for the corresponding steady-state gain $\mathbf{K}_{\mathrm{ss}}^{(s)}$, and evaluate
+\begin{equation}
+\mathbf{T}_{k,g}^{(s)}(z)
+=
+\mathbf{C}_{\mathrm{obs}}
+\left(
+\mathbf{I}
+-
+\mathbf{A}_{\mathrm{p}}^{(s)}z^{-1}
+\right)^{-1}
+\mathbf{B}_{\mathrm{p}}^{(s)}.
+\end{equation}
+Each realization is sampled over a frequency grid $\{\omega_m\}_{m=1}^{N_{\omega}}$:
+\begin{equation}
+\mathbf{T}_{k,g}^{(s)}(e^{j\omega_m}),
+\qquad
+m=1,\dots,N_{\omega}.
+\end{equation}
+Each sampled transfer matrix is vectorized as
+\begin{equation}
+\mathbf{v}^{(s)}(\omega_m)
+=
+\mathrm{vec}\!\left(
+\mathbf{T}_{k,g}^{(s)}(e^{j\omega_m})
+\right),
+\end{equation}
+and stacked across frequencies and predictor realizations. This produces a sample matrix of transfer-function vectors.
+
+From these samples, we form the empirical covariance
+\begin{equation}
+\mathbf{K}_{vv}
+=
+\mathbb{E}\!\left[\mathbf{v}\mathbf{v}^H\right].
+\end{equation}
+We then perform eigendecomposition
+\begin{equation}
+\mathbf{K}_{vv}
+=
+\mathbf{Q}\boldsymbol{\Lambda}\mathbf{Q}^H,
+\end{equation}
+where the columns of $\mathbf{Q}$ are the eigenvectors and the diagonal entries of $\boldsymbol{\Lambda}$ are the corresponding eigenvalues. Retaining the $M$ dominant eigenvectors gives
+\begin{equation}
+\mathbf{Q}_M
+=
+\begin{bmatrix}
+\mathbf{q}_1 & \mathbf{q}_2 & \cdots & \mathbf{q}_M
+\end{bmatrix},
+\end{equation}
+which spans the principal subspace of the steady-state Kalman predictor family. Thus, instead of forcing the WESN to reproduce the entire transfer-function family exactly, we configure it to represent its dominant covariance modes. In this work, the number of retained modes $M$ is selected heuristically as a hyperparameter.
+Each dominant eigenvector $\mathbf{q}_m$ is next interpreted as a sampled vectorized frequency response. 
+Specifically, after reshaping $\mathbf{q}_m$ across the frequency grid, we obtain a vector-valued function
+\begin{equation}
+\mathbf{q}_m(e^{j\omega})
+\in
+\mathbb{C}^{(M_k N_g)^2 \times 1},
+\end{equation}
+whose entries correspond to the vectorized transfer matrix at frequency $\omega$.
+
+We then approximate each mode using a vector rational polynomial with shared poles:
+\begin{equation}
+\mathbf{q}_m(e^{j\omega})
+\approx
+\sum_{\ell=1}^{K}
+\frac{\mathbf{c}_{m,\ell}}{1 - p_{m,\ell} e^{-j\omega}},
+\label{eq:kg_mode_partial_fraction}
+\end{equation}
+where $p_{m,\ell} \in \mathbb{C}$ are the poles and 
+$\mathbf{c}_{m,\ell} \in \mathbb{C}^{(M_k N_g)^2 \times 1}$ are the corresponding residue vectors.
+
+The approximation in \eqref{eq:kg_mode_partial_fraction} directly matches the transfer-function structure of the linearized WESN in \eqref{eq:linear_wesn_tf}. 
+Specifically, each term in \eqref{eq:kg_mode_partial_fraction} has the same first-order IIR form as the basis functions generated by individual reservoir neurons.
+
+The residue vector $\mathbf{c}_{m,\ell}$ represents a vectorized $D\times D$
+matrix, where $D=M_kN_g$.  We therefore first reshape it as
+\begin{equation}
+ \mathbf{C}_{m,\ell}=\operatorname{unvec}(\mathbf{c}_{m,\ell})
+ \in\mathbb{C}^{D\times D}
+\end{equation}
+and use a rank-$r_{m,\ell}$ truncated factorization
+\begin{equation}
+ \mathbf{C}_{m,\ell}
+ \simeq
+ \sum_{a=1}^{r_{m,\ell}}
+ \sigma_{m,\ell,a}
+ \mathbf{u}_{m,\ell,a}\mathbf{v}_{m,\ell,a}^{H}.
+ \label{eq:residue_low_rank_factorization}
+\end{equation}
+For every retained factor we associate one non-interconnected scalar neuron
+with recurrent weight and input coupling
+\begin{align}
+ w_{\mathrm{res},m,\ell,a}&=p_{m,\ell},\\
+ \mathbf{w}_{\mathrm{in},m,\ell,a}^{T}&=\mathbf{v}_{m,\ell,a}^{H}.
+\end{align}
+When the WESN input contains the full $P$-sample window, this $D$-dimensional
+coupling is embedded in its current-observation block; the remaining blocks
+may either be zero or provide additional configured window couplings.
+Its reference output direction is
+$\sigma_{m,\ell,a}\mathbf{u}_{m,\ell,a}$; in the low-rank WESN considered
+here this direction is not frozen, but is absorbed into the empirically
+trained readout.
+Consequently, each retained factor implements a rank-one first-order IIR
+component, and their sum approximates the matrix residue in
+\eqref{eq:kg_mode_partial_fraction}.
+
+Stacking all components yields a diagonal recurrent matrix whose poles are
+repeated according to the retained residue ranks.  The number of scalar
+reservoir states is
+\begin{equation}
+ N_n=\sum_{m=1}^{M}\sum_{\ell=1}^{K}r_{m,\ell}.
+\end{equation}
+Rank-one residues give $N_n=MK$, whereas retaining full-rank residues can
+require as many as $MKD$ states.  This distinction is made explicit in the
+complexity analysis below.
+In practice, the poles are further scaled to satisfy a prescribed spectral-radius constraint, and the input weights are scaled by an input-gain factor before running the reservoir recursion.
+
+The skip connection in the WESN output layer provides an additional finite impulse response (FIR) component beyond the IIR reservoir dynamics. Hence, the configured WESN combines two complementary parts: an IIR part arising from the pole-residue realization of the dominant Kalman-predictor modes, and an FIR part arising from the direct windowed input skip path. The latter adds flexibility for compensating residual mismatch and for capturing predictor components that are not well represented by the truncated all-pole recurrent part alone.
+
+Finally, once the recurrent and input weights have been configured from the steady-state predictor statistics, only the readout weights are learned from data through ridge regression. This hybrid design combines the strengths of model-based and data-driven prediction: the configured reservoir embeds the structure of a Kalman-filtering based predictor, while the learned readout reduces reliance on exact knowledge of $\mathbf{F}_{\mathrm{aug}}$, $\mathbf{Q}$, and $\mathbf{R}$ by adapting directly to the empirical data observed during operation.
+
+Although the above discussion is written for a single MIMO channel matrix, the implementation operates on the full OFDM channel tensor. Specifically, for each UE-RU link, the channel at time $t$ consists of matrices
+$\mathbf{H}_{k,g}[t,f,o]$ for subcarrier $f$ and OFDM symbol $o$. The configured reservoir weights are shared across these time-frequency resource elements, and the readout is trained using samples from all subcarriers and OFDM symbols jointly.
+
+To see this, define
+\begin{equation}
+\mathcal{B} \triangleq \{(f,o): f=1,\dots,N_f,\; o=1,\dots,N_{\mathrm{sym}}\},
+\end{equation}
+and let
+\begin{equation}
+\mathbf{u}_{k,g}^{(f,o)}[t]
+\end{equation}
+denote the windowed input constructed from the past observations of
+$\mathbf{H}_{k,g}[t,f,o]$. During online prediction, the reservoir is rolled out independently for each $(f,o)\in\mathcal{B}$ using the same configured
+$\mathbf{W}_{\mathrm{res}}$ and $\mathbf{W}_{\mathrm{in}}$. The readout is then obtained from a single ridge-regression problem whose feature and target matrices stack all training pairs over resource elements:
+\begin{equation}
+\mathbf{W}_{\mathrm{out}}
+=
+\mathbf{T}_{\mathrm{OFDM}}\mathbf{Z}_{\mathrm{OFDM}}^H
+\left(
+\mathbf{Z}_{\mathrm{OFDM}}\mathbf{Z}_{\mathrm{OFDM}}^H
++
+\lambda\mathbf{I}
+\right)^{-1}.
+\end{equation}
+Here, $\mathbf{Z}_{\mathrm{OFDM}}$ stacks the augmented WESN features generated from
+$\{\mathbf{u}_{k,g}^{(f,o)}[t]\}$ over all available $t$ and all $(f,o)\in\mathcal{B}$, while
+$\mathbf{T}_{\mathrm{OFDM}}$ stacks the corresponding one-step-ahead channel targets. Thus, although the model derivation is presented on a per-subcarrier basis for notational clarity, the online readout exploits the full OFDM grid by solving one least-squares problem over all subcarriers and OFDM symbols.
+
+Each UE applies the introduced predictor to estimate the future channel $\mathbf{H}_k(t + P_{\mathrm{fb}})$ based on past observations. The predicted channel is then used to generate CSI feedback using the codebook-based framework described in Section \ref{sec:practical_op}.
+
+The DU constructs the CJT precoder using the received predicted CSI. In this work, we employ a zero-forcing (ZF) precoder based on the quantized predicted channel \cite{codebook_tut}.
+By compensating for CSI aging, the introduced prediction framework enables more accurate precoder design and improved coherent combining across distributed RUs.
+
+\section{Complexity Analysis}
+
+We compare the configured WESN against a steady-state Kalman predictor under
+the same model-refresh assumptions.  This is a stricter comparison than one
+against a full time-varying Kalman filter because the steady-state covariance
+and gain are computed only during configuration, rather than at every channel
+update.  The costs below are separated into configuration, readout training or
+adaptation, inference, and memory.  Let
+\begin{equation}
+ D\triangleq M_kN_g,\qquad n\triangleq PD,\qquad
+ B\triangleq N_fN_{\mathrm{sym}},
+\end{equation}
+where $n$ is the augmented AR state dimension and $B$ is the number of OFDM
+resource elements per slot.  Let $L$ denote the number of simultaneously
+served UE--RU links, $S$ the number of channel-history windows used to
+configure the WESN, $N_{\omega}$ the number of transfer-function frequency
+samples, $I_{\mathrm{R}}$ the number of Riccati iterations, and $N_{\mathrm{tr}}$
+the number of resource-element/time training pairs used for the readout.  To
+compare the same configuration data, the steady-state Kalman model uses the
+pooled sample count $N_{\mathrm{cfg}}=\sum_{s=1}^{S}N_s$.
+
+\subsection{Low-rank realization of the configured reservoir}
+
+A general residue in \eqref{eq:kg_mode_partial_fraction} is a $D\times D$
+matrix.  To state the reservoir dimension unambiguously, we use its truncated
+factorization
+\begin{equation}
+ \mathbf{C}_{m,\ell}
+ \simeq
+ \mathbf{U}_{m,\ell}\mathbf{V}_{m,\ell}^{H},
+ \qquad
+ \operatorname{rank}(\mathbf{C}_{m,\ell})=r_{m,\ell}.
+\end{equation}
+Each rank-one factor is implemented by one scalar first-order IIR state with
+pole $p_{m,\ell}$.  The total number of scalar reservoir states is therefore
+\begin{equation}
+ R\triangleq\sum_{m=1}^{M}\sum_{\ell=1}^{K}r_{m,\ell}
+ \leq MKr,
+ \label{eq:wesn_state_count}
+\end{equation}
+where $r$ is the maximum retained residue rank.  The commonly used rank-one
+case gives $R=MK$.  This low-rank realization is relevant to spatially
+correlated MD-MIMO channels, but its retained energy and prediction loss must
+be verified experimentally.  Without this factorization, a general
+full-rank realization requires as many as $MKD$ states and does not, in
+general, have lower inference complexity than a structure-aware steady-state
+Kalman predictor.
+
+The WESN window has dimension $PD$, and its readout feature dimension is
+\begin{equation}
+ Z\triangleq R+PD.
+\end{equation}
+The diagonal reservoir must be stored and evaluated as a vector of poles; a
+dense $R\times R$ implementation would unnecessarily change its recurrence
+cost from $\mathcal{O}(R)$ to $\mathcal{O}(R^2)$.
+
+\subsection{Configuration complexity}
+
+For $N$ regression samples, joint AR($P$) estimation has complexity
+\begin{equation}
+ C_{\mathrm{AR}}(N)
+ =\mathcal{O}\!\left(N(PD)^2+(PD)^3\right).
+ \label{eq:ar_configuration_cost}
+\end{equation}
+The steady-state Kalman predictor estimates the AR and noise statistics and
+solves one Riccati fixed point.  Its per-link configuration cost is
+\begin{equation}
+ C_{\mathrm{cfg}}^{\mathrm{KF}}
+ = C_{\mathrm{AR}}(N_{\mathrm{cfg}})
+ +\mathcal{O}\!\left(I_{\mathrm{R}}(PD)^3\right).
+ \label{eq:sskf_configuration_cost}
+\end{equation}
+
+The configured WESN performs these operations for all $S$ windows and also
+samples the corresponding transfer functions, extracts their principal
+subspace, fits the retained modes, stabilizes the poles, and factorizes the
+residues.  For an economy SVD of a
+$(N_{\omega}D^2)\times S$ transfer-sample matrix, its configuration cost is
+\begin{equation}
+\begin{aligned}
+ C_{\mathrm{cfg}}^{\mathrm{WESN}}
+ ={}& \sum_{s=1}^{S} C_{\mathrm{AR}}(N_s)
+ +\mathcal{O}\!\left(SI_{\mathrm{R}}(PD)^3\right) \\
+ &+\mathcal{O}\!\left(SN_{\omega}(PD)^3\right)
+ +\mathcal{O}\!\left(N_{\omega}D^2S^2+S^3\right) \\
+ &+C_{\mathrm{VF}}
+ +\mathcal{O}\!\left(MKD^2r+MK\right),
+ \label{eq:wesn_configuration_cost}
+\end{aligned}
+\end{equation}
+where $C_{\mathrm{VF}}$ is the cost of vector rational fitting.  For the sparse
+least-squares formulation used here, $I_{\mathrm{V}}$ iterations give
+\begin{equation}
+ C_{\mathrm{VF}}
+ =\mathcal{O}\!\left(
+ MI_{\mathrm{V}}N_{\omega}KD^2
+ +MN_{\omega}K^2D^2
+ +MK^3
+ \right).
+\end{equation}
+The $SN_{\omega}(PD)^3$ term in
+\eqref{eq:wesn_configuration_cost} conservatively counts a dense transfer
+solve at every sampled frequency.  Reusing factorizations or an eigensystem
+can reduce this cost, but we retain it here to avoid understating WESN
+configuration.  For the same configuration data, the WESN configuration is
+therefore more expensive than the steady-state Kalman configuration; no
+configuration-phase advantage is claimed.
+
+\subsection{Readout training and online adaptation}
+
+Let $N_{\mathrm{tr}}=(T-1)B$ denote the labeled history pairs available at one
+prediction event.  Beyond the last reservoir update already counted as
+inference, replaying the preceding history and solving one batch
+ridge-regression problem requires
+\begin{equation}
+\begin{aligned}
+ C_{\mathrm{upd,batch}}^{\mathrm{WESN}}
+ =\mathcal{O}\!\big(&N_{\mathrm{tr}}R(PD+1)
+ +N_{\mathrm{tr}}Z^2 \\
+ &+N_{\mathrm{tr}}DZ+Z^3\big).
+ \label{eq:wesn_online_batch_cost}
+\end{aligned}
+\end{equation}
+There is no corresponding readout-training cost for the Kalman predictor.
+In the online-learning implementation considered here, this readout update is
+performed at every prediction event.  It is therefore an online cost and is
+not amortized over the reservoir-configuration horizon.  A recursive
+least-squares update instead costs $\mathcal{O}(Z^2+DZ)$ per labeled sample,
+whereas a stochastic-gradient update using $B_u$ resource-element samples
+costs $\mathcal{O}(B_uDZ)$ per event.  Both alternatives still count as online
+learning because the readout is updated after every time step; they merely
+change the update rule.  A steady-state Kalman predictor can likewise adapt to
+nonstationarity by periodically re-estimating its AR/noise statistics and
+recomputing its gain; this incurs
+\eqref{eq:sskf_configuration_cost} at each such refresh.
+
+\subsection{Inference complexity}
+
+For a fair comparison, we exploit the known structure of both predictors.
+For the steady-state Kalman predictor, the observation matrix selects the
+first $D$ states and the AR companion matrix contains only one dense block
+row.  Multiplication of the innovation by the fixed $PD\times D$ gain costs
+$PD^2$ complex multiplications, and the subsequent companion-form prediction
+costs another $PD^2$.  Thus, the per-resource-element cost is
+\begin{equation}
+ c_{\mathrm{KF}}=2PD^2.
+ \label{eq:sskf_inference_cost}
+\end{equation}
+This count is no larger than the usual dense
+$\mathcal{O}((PD)^2)$ bound and deliberately gives the Kalman baseline the
+benefit of a structure-aware implementation.
+
+For the WESN, the input projection, diagonal recurrence, and readout require,
+respectively, $RPD$, $R$, and $DZ$ complex multiplications.  Therefore,
+\begin{equation}
+ c_{\mathrm{WESN}}
+ =R(PD+1)+D(R+PD).
+ \label{eq:wesn_inference_cost}
+\end{equation}
+In addition, a nonlinear reservoir requires $R$ element-wise activation
+evaluations per resource element.  Because an activation and a complex
+multiplication have different hardware costs, Table~\ref{tab:complexity_comparison}
+reports complex multiplications and the latency evaluation reports the
+activation cost implicitly in wall-clock time.
+The configured WESN has lower inference complexity if and only if
+\begin{equation}
+ R < \frac{PD^2}{D(P+1)+1}.
+ \label{eq:wesn_break_even}
+\end{equation}
+Consequently, the advantage is not universal: it occurs when a sufficiently
+low-rank reservoir represents a moderate- or large-dimensional MIMO link.
+
+Across $L$ concurrent links and $B$ resource elements, total inference work
+per slot is
+\begin{equation}
+C_{\mathrm{slot}}^{(a)}=LBc_a,
+ \qquad a\in\{\mathrm{KF},\mathrm{WESN}\}.
+ \label{eq:system_inference_cost}
+\end{equation}
+For heterogeneous link dimensions this becomes
+\begin{equation}
+ C_{\mathrm{slot}}^{(a)}
+ =\sum_{j=1}^{L}B_jc_a(D_j).
+\end{equation}
+The $LB$ recursions are independent and can be batched or parallelized.  With
+$Q$ identical workers, the ideal compute component of latency decreases
+approximately as $\lceil LB/Q\rceil$, while synchronization, memory traffic,
+and configuration/training remain overheads.  We therefore report both total
+work and measured end-to-end latency, rather than interpreting scenario-level
+parallel simulation as intra-slot predictor acceleration.  In particular,
+for measured latency $\tau(Q)$, parallel speedup and efficiency are
+\begin{equation}
+ S(Q)=\frac{\tau(1)}{\tau(Q)},\qquad
+ E(Q)=\frac{S(Q)}{Q}.
+\end{equation}
+The relevant URLLC measurements are the median, 95th-percentile, and
+99th-percentile end-to-end inference latencies, together with peak memory,
+for the complete set of concurrent links.
+
+\subsection{Memory and amortized complexity}
+
+Using the same structured implementation, a steady-state Kalman predictor
+stores the $P$ AR blocks, the fixed gain, and one $PD$ state per resource
+element.  The online per-link storage in complex scalars is
+\begin{equation}
+ m_{\mathrm{KF}}=2PD^2+BPD.
+ \label{eq:sskf_memory}
+\end{equation}
+The WESN stores its poles, input and output weights, reservoir states, and the
+$P$-sample input window:
+\begin{equation}
+ m_{\mathrm{WESN}}
+ =RPD+R+DZ+B(R+PD).
+ \label{eq:wesn_memory}
+\end{equation}
+Batch readout training additionally stores $\mathcal{O}(N_{\mathrm{tr}}Z)$
+features; streaming accumulation reduces this workspace to
+$\mathcal{O}(Z^2+DZ)$.  Configuration additionally stores the transfer-sample
+matrix, requiring $\mathcal{O}(SN_{\omega}D^2)$ complex scalars.  System-wide
+online storage is $L m_a$ when models are link-specific.
+
+Let $H_{\mathrm{cfg}}$ be the number of predicted slots between complete
+configuration refreshes, and let $C_{\mathrm{upd}}^{\mathrm{WESN}}$ denote the
+readout-update cost incurred at every time step.  The per-link amortized costs
+per slot are
+\begin{align}
+ \bar C_{\mathrm{KF}}
+ &=Bc_{\mathrm{KF}}
+ +\frac{C_{\mathrm{cfg}}^{\mathrm{KF}}}{H_{\mathrm{cfg}}},\\
+ \bar C_{\mathrm{WESN}}
+ &=Bc_{\mathrm{WESN}}
+ +C_{\mathrm{upd}}^{\mathrm{WESN}}
+ +\frac{C_{\mathrm{cfg}}^{\mathrm{WESN}}}{H_{\mathrm{cfg}}}
+ \label{eq:amortized_predictor_cost}
+\end{align}
+An amortized WESN advantage is possible only if its repeated inference saving
+is larger than its repeated online-update cost:
+\begin{equation}
+ B(c_{\mathrm{KF}}-c_{\mathrm{WESN}})
+ > C_{\mathrm{upd}}^{\mathrm{WESN}}.
+ \label{eq:online_update_break_even}
+\end{equation}
+When \eqref{eq:online_update_break_even} holds, WESN has lower total
+amortized cost after
+\begin{equation}
+ H_{\mathrm{cfg}}
+ >
+ \frac{
+ C_{\mathrm{cfg}}^{\mathrm{WESN}}
+ -C_{\mathrm{cfg}}^{\mathrm{KF}}
+ }{
+ B(c_{\mathrm{KF}}-c_{\mathrm{WESN}})
+ -C_{\mathrm{upd}}^{\mathrm{WESN}}
+ }.
+ \label{eq:amortization_break_even}
+\end{equation}
+If \eqref{eq:online_update_break_even} does not hold, no configuration horizon
+can make WESN cheaper in total online arithmetic, although its inference-only
+cost may still be lower.
+Equation \eqref{eq:amortization_break_even}, evaluated using measured
+configuration times on the target platform, makes the assumed amortization
+horizon explicit.
+
+Table~\ref{tab:phase_complexity_summary} summarizes the comparison by phase.
+The inference row contains only deadline-critical operations; configuration
+and readout adaptation enter the amortized total at their stated refresh
+rates.
+
+\begin{table*}[t]
+\centering
+\caption{Complexity Accounting by Predictor Phase (Per UE--RU Link)}
+\label{tab:phase_complexity_summary}
+\begin{tabularx}{\textwidth}{l X X}
+\toprule
+Phase & Steady-state Kalman predictor & Configured WESN\\
+\midrule
+Configuration
+& $C_{\mathrm{AR}}(N_{\mathrm{cfg}})+\mathcal{O}(I_{\mathrm{R}}(PD)^3)$
+& $C_{\mathrm{cfg}}^{\mathrm{WESN}}$ in \eqref{eq:wesn_configuration_cost}, including all windowed AR/Riccati solves, transfer sampling, SVD, rational fitting, pole stabilization, and residue factorization\\
+Training
+& None
+& Included in the repeated online-update row for an online learner\\
+Online adaptation
+& State innovations at inference; model adaptation requires a configuration refresh
+& Batch ridge: \eqref{eq:wesn_online_batch_cost} every event; RLS: $\mathcal{O}(Z^2+DZ)$ per labeled sample; stochastic update: $\mathcal{O}(B_uDZ)$ per event\\
+Inference per OFDM slot
+& $2BPD^2$
+& $B\{R(PD+1)+D(R+PD)\}$\\
+Online memory
+& $2PD^2+BPD$ complex scalars
+& $RPD+R+DZ+B(R+PD)$ complex scalars\\
+Amortized total
+& $Bc_{\mathrm{KF}}+C_{\mathrm{cfg}}^{\mathrm{KF}}/H_{\mathrm{cfg}}$
+& $Bc_{\mathrm{WESN}}+C_{\mathrm{upd}}^{\mathrm{WESN}}+C_{\mathrm{cfg}}^{\mathrm{WESN}}/H_{\mathrm{cfg}}$\\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
+Table~\ref{tab:complexity_comparison} gives a numerical structure-aware
+comparison for a compact setting with $P=2$, one retained mode, two poles,
+rank-one residues ($M=1$, $K=2$, and $R=2$), and
+$B=512\times14=7168$.  The numerical multiplication count uses the identity
+activation associated with the configured linear realization; a nonlinear
+activation is assessed separately through measured latency.  Such a two-pole correction is plausible when the
+windowed skip connection captures the dominant finite-memory component and
+the residual transfer family has one dominant spatial mode.  It is not an
+assumption to be made without evidence: the retained residue energy and the
+NMSE/throughput as a function of $R$ must be reported.  The table counts a
+fixed-gain Kalman update and a fixed WESN readout; configuration and training
+enter separately through \eqref{eq:amortized_predictor_cost}.  Under this
+compact realization, WESN uses between $9.4\%$ and $47.6\%$ fewer inference
+multiplications over the listed link dimensions.  Hence, under an amortizable
+configuration phase, a low-rank configured WESN can have lower complexity
+than even a steady-state Kalman predictor, but only in the regime specified
+by \eqref{eq:wesn_break_even}.
+
+\begin{table*}[t]
+\centering
+\caption{Structure-Aware Per-Link Inference and Online Memory Comparison}
+\label{tab:complexity_comparison}
+\begin{tabular}{c c r r r r r r}
+\toprule
+Antenna pair
+& $D$
+& \multicolumn{2}{c}{Complex mult./resource element}
+& \multicolumn{2}{c}{Complex mult./OFDM slot}
+& \multicolumn{2}{c}{Online memory (MiB)}\\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}
+ 
+&
+& SS-KF & WESN
+& SS-KF & WESN
+& SS-KF & WESN\\
+\midrule
+$2\times2$ & 4  & 64    & \textbf{58}   & $4.59\times10^{5}$ & $\mathbf{4.16\times10^{5}}$ & 0.44 & 0.55\\
+$4\times2$ & 8  & 256   & \textbf{178}  & $1.84\times10^{6}$ & $\mathbf{1.28\times10^{6}}$ & 0.88 & 0.99\\
+$4\times4$ & 16 & 1024  & \textbf{610}  & $7.34\times10^{6}$ & $\mathbf{4.37\times10^{6}}$ & 1.76 & 1.86\\
+$8\times8$ & 64 & 16384 & \textbf{8578} & $1.17\times10^{8}$ & $\mathbf{6.15\times10^{7}}$ & 7.13 & 7.17\\
+\midrule
+\multicolumn{8}{l}{\footnotesize Parameters: $B=7168$, $P=2$, $M=1$, $K=2$, $r=1$, $R=2$, and $\phi(x)=x$.}\\
+\multicolumn{8}{l}{\footnotesize Online memory uses complex64 and includes all $B$ states and input windows.}\\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+To illustrate rather than hide the configuration penalty, consider the
+$4\times4$ case with $S=16$ model windows, $N_s=3B$ samples per window,
+$T=4$, $N_{\mathrm{tr}}=3B$, $N_{\omega}=64$, and
+$I_{\mathrm{R}}=I_{\mathrm{V}}=50$.  Evaluating the leading terms in
+\eqref{eq:sskf_configuration_cost}--\eqref{eq:wesn_online_batch_cost}, including
+the sparse LSQR nonzero count, gives the operation-count proxy in
+Table~\ref{tab:amortized_complexity_example}.  These are reproducible
+arithmetic proxies, not substitutes for measured execution time, because the
+actual Riccati and iterative least-squares costs depend on convergence and the
+numerical library.
+
+\begin{table}[t]
+\centering
+\caption{Illustrative $4\times4$ Configuration and Amortization Example}
+\label{tab:amortized_complexity_example}
+\begin{tabular}{l r}
+\toprule
+Component & Complex-multiplication proxy\\
+\midrule
+SS-KF configuration & $3.540\times10^{8}$\\
+WESN reservoir configuration & $4.402\times10^{8}$\\
+SS-KF inference per prediction slot & $7.340\times10^{6}$\\
+WESN inference-only per prediction slot & $4.372\times10^{6}$\\
+WESN online batch readout update & $3.802\times10^{7}$\\
+WESN update plus inference per slot & $4.239\times10^{7}$\\
+SS-KF amortized, $H=1000$ & $7.694\times10^{6}$\\
+WESN amortized, $H=1000$ & $4.283\times10^{7}$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+For this example, the WESN saves $2.968\times10^6$ multiplications in
+inference but spends $3.802\times10^7$ on the batch readout update at every
+event.  Condition \eqref{eq:online_update_break_even} therefore fails, and no
+configuration-amortization horizon makes the batch-updated WESN cheaper than
+the steady-state Kalman predictor in total online arithmetic.  Rank reduction
+still lowers both WESN inference and readout-update costs, but a lower-cost
+per-step update rule or a smaller training minibatch is required to obtain an
+overall complexity advantage while retaining online learning.
+
+Finally, the top-level throughput sweep uses five receive UEs and between two
+and ten transmit UEs.  Its predictor processes one $D=16$ node pair,
+$5+N_{\mathrm{TX}}$ pairs with $D=8$, and $5N_{\mathrm{TX}}$ pairs with
+$D=4$, for a total of $L=6(N_{\mathrm{TX}}+1)$ concurrent link predictors.
+Table~\ref{tab:system_complexity_comparison} applies
+\eqref{eq:system_inference_cost} to this heterogeneous mix.  This system-level
+count is distinct from the shell script's parallel execution of independent
+simulation scenarios.
+
+\begin{table}[t]
+\centering
+\caption{Inference Work for the Multi-Link Throughput Sweep}
+\label{tab:system_complexity_comparison}
+\begin{tabular}{c r r r r}
+\toprule
+TX UEs & Links & SS-KF & WESN & Reduction\\
+\midrule
+2  & 18 & $2.48\times10^{7}$ & $1.75\times10^{7}$ & $29.5\%$\\
+4  & 30 & $3.30\times10^{7}$ & $2.42\times10^{7}$ & $26.8\%$\\
+6  & 42 & $4.13\times10^{7}$ & $3.09\times10^{7}$ & $25.2\%$\\
+8  & 54 & $4.95\times10^{7}$ & $3.76\times10^{7}$ & $24.1\%$\\
+10 & 66 & $5.78\times10^{7}$ & $4.43\times10^{7}$ & $23.4\%$\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results and Discussion}
+\subsection{Experiment Design}
+\label{sec:sim_design}
+
+To evaluate the performance of the MD-MIMO CJT architecture with the introduced channel prediction strategy, we conducted comprehensive simulation evaluation. 
+The simulation framework we adopt combines the ns-3 network simulator with the Sionna link-level simulator to emulate the radio propagation environment and the PHY layer operations.
+
+To be specific, we use the ns-3 simulator to model the network environment, incorporating the 3GPP Vehicle-to-Vehicle (V2V) Urban channel model as specified in 3GPP TR 37.885 \cite{ns3_v2v}. 
+We randomly placed a number of distributed RUs within a $100$ meter circle centered around the DU.
+The UEs were placed in another circle of radius $100$ meters located $1000$ meters away from the DU.
+We assume RU $0$ is equipped with $4$ antennas and the rest of the RUs have $2$ antennas each.
+We also assume that each UE has $2$ antennas.
+In our evaluation, all RUs, the DU, and all UEs are assumed to be mobile. 
+The mobility of each device was divided into a common component and an individual component. 
+Specifically, the RUs were modeled to have a common speed in one direction, with an additional smaller individual speed in a random direction. 
+The same modeling approach was applied to the UEs.
+To evaluate channel prediction strategies across a range of radio propagation conditions, we place the RUs and UEs at random locations within the $100$ meter radius regions described above. 
+Each such random spatial realization of the network topology is referred to as a ``drop". 
+For each drop, we generate channel realizations over $100$ slots, where each slot duration is $1$ ms. 
+We repeat this process for $100$ independent drops, thereby evaluating the system over a diverse set of channel conditions.
+Each drop exhibits distinct large-scale and small-scale fading characteristics, including variations in path loss, shadowing, and line-of-sight (LOS) versus non-line-of-sight (NLOS) conditions.
+This approach enables robust performance evaluation by averaging over both spatial randomness and temporal channel dynamics.
+
+
+The Sionna link-level simulator \cite{sionna} is employed to obtain the link level performance metrics. 
+Sionna was configured to transmit pilot symbols over the channels modeled by ns-3, enabling the emulation of realistic channel estimation processes at the receiver. 
+The Kronecker-style scattered pilot pattern was used in the evaluation.
+Each UE was configured to perform Linear Minimum Mean Square Error (LMMSE) channel estimation. The simulation parameters for the evaluations are summarized in Table~\ref{tab:sim_params}.
+
+\begin{table}[ht]
+    \centering
+    \caption{Simulator Parameters}
+    \begin{tabularx}{0.9\linewidth}{p{0.6\linewidth}X}
+    \toprule
+    System Parameters & Values  \\
+    \midrule
+    Center Frequency & 3.5 GHz \\
+    Subcarrier Spacing & 15 kHz \\
+    Number of Subcarriers & 512 \\
+    Channel Feedback Delay & 4 ms \\
+    Buffer Size ($B_{fb}$) & 5 slots \\
+    AR Order ($P$) & 2 \\
+    RU Tx Power & 35 dBm (RU 0), 25 dBm (other) \\
+    Number of UEs & 4 \\
+    \bottomrule
+    \end{tabularx}
+    \label{tab:sim_params}
+\end{table}
+
+
+\subsection{Results}
+
+Fig.~\ref{fig:10kmph_nmse_vs_snr} evaluates the introduced WESN weight configuration strategy in a simplified point-to-point channel prediction setting. In this experiment, we isolate the impact of temporal prediction by directly operating on small-scale fading realizations extracted from the ns-3 simulations described in Section~\ref{sec:sim_design}. The mobility for this evaluation is fixed at $10$~km/h. Specifically, we take the ground-truth channel realizations $\mathbf{H}_{\mathrm{GT}}[t]$ from the ns-3 traces and construct noisy observations according to
+\begin{equation}
+\mathbf{H}_{\mathrm{obs}}[t] = \mathbf{H}_{\mathrm{GT}}[t] + \mathbf{n}[t],
+\end{equation}
+where $\mathbf{n}[t] \sim \mathcal{CN}(\mathbf{0}, \sigma^2 \mathbf{I})$ is additive Gaussian noise corresponding to a target SNR. In this controlled setup, the noise variance $\sigma^2$ is assumed to be perfectly known, allowing us to isolate the effect of imperfect knowledge of channel dynamics.
+
+Following the framework developed in Section~V, we fit a linear state-space model to the observed channel sequence. 
+The state transition matrix $\mathbf{F}$ is not assumed known and is instead estimated directly from data.
+A buffer of past noisy channel observations is used to form a least-squares problem, from which the autoregressive coefficients (and hence $\mathbf{F}$) are obtained. 
+This estimated $\mathbf{F}$ is then used to construct both the Kalman predictors and the transfer-function statistics used for configuring the WESN reservoir.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/10kmph_nmse_vs_snr.pdf}
+    \caption{Channel prediction NMSE vs SNR at 10~km/h}
+    \label{fig:10kmph_nmse_vs_snr}
+\end{figure}
+
+Fig.~\ref{fig:10kmph_nmse_vs_snr} shows the resulting channel prediction NMSE as a function of SNR.
+From the figure, it can be observed that when the channel dynamics are imperfectly known through the estimated $\mathbf{F}$, the performance of Kalman filtering degrades, particularly in the low SNR regime where the estimation of $\mathbf{F}$ becomes less reliable. 
+In contrast, the configured WESN is able to compensate for this model mismatch through its learned readout, resulting in significant performance gains over Kalman filtering at low to medium SNR.
+At high SNR, $\mathbf{F}$ can be estimated accurately, which leads to similar NMSEs for both configured WESN and Kalman filtering.
+Additionally, the configured WESN consistently outperforms a WESN with randomly initialized reservoir weights. 
+This highlights the benefit of embedding model-based structure into the reservoir.
+
+Fig.~\ref{fig:chan_pred_nmse_cdf} evaluates the introduced channel prediction strategy under a realistic link-level simulation of the MD-MIMO system described in Section~\ref{sec:sim_design}. 
+This experiment incorporates both large-scale and small-scale channel effects, as well as practical channel estimation errors.
+Specifically, pilot symbols are transmitted over the ns-3 generated channels, and the received signals are used to perform LMMSE channel estimation at the UE. 
+This introduces both thermal noise and estimation errors into the observed channel sequence. 
+As a result, both the state transition matrix $\mathbf{F}$ and the observation noise covariance are estimated from these noisy channel estimates rather than being known a priori.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/chan_pred_nmse_cdf_ellipse.pdf}
+    \caption{Empirical CDF of channel prediction NMSE at mobility speeds of 10, 40, and 80~km/h}
+    \label{fig:chan_pred_nmse_cdf}
+\end{figure}
+
+Using this setup, we evaluate one-step-ahead channel prediction performance across multiple mobility scenarios. Fig.~\ref{fig:chan_pred_nmse_cdf} shows the empirical CDF of the resulting NMSE values aggregated across UEs, RUs, and time instances.
+
+From the figure, we observe that the configured WESN provides a consistent improvement over standard Kalman filtering across all mobility regimes. The gains are particularly pronounced at higher mobilities, where the temporal dynamics become more difficult to estimate accurately and model mismatch becomes more severe.
+
+These results further validate the benefit of incorporating model-based structure into the reservoir, particularly in realistic settings where both the channel dynamics and observation statistics must be estimated.
+In addition to the observed prediction accuracy gains, the configured WESN also offers a significant advantage in terms of online computational complexity. 
+As detailed in Section VI, the configured WESN operates with substantially lower computational cost, particularly as the MIMO dimension increases. 
+Consequently, the configured WESN approach not only improves prediction accuracy under model mismatch, but also provides a more scalable and practical solution for real-time MD-MIMO deployments.
+
+Fig.~\ref{fig:tput_vs_RUs_10kmph}, Fig.~\ref{fig:tput_vs_RUs_40kmph} and Fig.~\ref{fig:tput_vs_RUs_80kmph} evaluate the end-to-end impact of channel prediction on system performance by plotting the achieved downlink throughput as a function of the number of distributed RUs at $10$, $40$, and $80$~km/h, respectively. These results quantify how improvements in channel prediction NMSE translate into meaningful system-level gains.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/tput_vs_RUs_10kmph_time_split.pdf}
+    \caption{Throughput vs number of RUs at 10~km/h under the time-based split.}
+    \label{fig:tput_vs_RUs_10kmph}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/tput_vs_RUs_40kmph_time_split.pdf}
+    \caption{Throughput vs number of RUs at 40~km/h under the time-based split.}
+    \label{fig:tput_vs_RUs_40kmph}
+\end{figure}
+
+\begin{figure}
+    \centering    \includegraphics[width=0.95\linewidth]{fig/tput_vs_RUs_80kmph_time_split.pdf}
+    \caption{Throughput vs number of RUs at 80~km/h under the time-based split.}
+    \label{fig:tput_vs_RUs_80kmph}
+\end{figure}
+
+
+The predicted channel is used to generate Type-II codebook-based CSI feedback at the UE. The DU then reconstructs the channel from the quantized feedback and computes a zero-forcing (ZF) precoder for CJT across the distributed RUs. 
+The quality of channel prediction directly impacts the accuracy of the precoder, and consequently the effectiveness of inter-user interference suppression.
+For these results, we utilize a link-adaptation algorithm to maximize throughput over a selection of Modulation and Coding Schemes (MCS).
+These figures show the coded throughput after LDPC decoding.
+
+We include an online learning-based baseline, namely the two-mode WESN channel predictor introduced in \cite{wiopt}. 
+This method relies on randomly initialized reservoir dynamics, but preserves the structure of the MIMO channel matrix during prediction through bilinear state updates.
+In contrast, the configured WESN leverages structure derived from the Kalman predictor, resulting in a more efficient representation of the underlying channel dynamics. 
+As a result, the configured WESN is observed to outperform both Kalman filtering and the two-mode WESN baseline.
+
+In addition to the Kalman filtering and reservoir computing baselines, we also include ChannelMamba \cite{channelmamba} as a learning-based benchmark in Fig.~\ref{fig:tput_vs_RUs_10kmph}-Fig.~\ref{fig:tput_vs_RUs_80kmph}. 
+ChannelMamba is a recent state-of-the-art deep learning approach for channel prediction that leverages a Mamba-based selective state-space model to capture long-range temporal dependencies in high-mobility MIMO channels. 
+It is trained in an end-to-end fashion using large offline datasets and has demonstrated strong performance in prior work.
+Since ChannelMamba is an offline training-based method, its evaluation requires an explicit separation between training and testing data. 
+For Fig.~\ref{fig:tput_vs_RUs_10kmph}-Fig.~\ref{fig:tput_vs_RUs_80kmph}, we train the model using the first $50\%$ of the time slots from all drops and evaluate it on the remaining $50\%$ of time slots within the same drops. 
+The $50/50$ split is chosen for a fair comparison with the configured WESN, where the configuration phase and the subsequent online training/testing phase also operate over a   $50$-$50$ split.
+From Fig.~\ref{fig:tput_vs_RUs_10kmph}-Fig.~\ref{fig:tput_vs_RUs_80kmph}, we observe that all online approaches consistently outperform ChannelMamba. 
+This highlights the advantage of methods that adapt directly to the observed channel during operation, rather than relying solely on offline training. 
+
+From Fig.~\ref{fig:tput_vs_RUs_10kmph}, we observe that all prediction methods benefit from an increasing number of RUs due to enhanced spatial degrees of freedom. At lower mobility ($10$~km/h), the performance gap between the online predictors is relatively modest, indicating that temporal channel dynamics can be captured reasonably well even with imperfect models.
+
+In contrast, Fig.~\ref{fig:tput_vs_RUs_40kmph} and Fig.~\ref{fig:tput_vs_RUs_80kmph} show that at higher mobility, the choice of predictor has a much more pronounced impact. 
+The configured WESN consistently achieves higher throughput compared to the baselines. 
+This improvement can be attributed to more accurate channel prediction under rapidly varying channel conditions, which enables more precise precoder construction and improved interference cancellation.
+
+Next, Fig.~\ref{fig:tput_vs_RUs_10kmph_drop_split}, Fig.~\ref{fig:tput_vs_RUs_40kmph_drop_split}, and Fig.~\ref{fig:tput_vs_RUs_80kmph_drop_split} consider a more challenging spatial generalization setting.
+Instead of splitting the dataset along the time dimension within each drop, we partition the dataset across drops. 
+Specifically, ChannelMamba is trained using the first $50\%$ of drops, while the configured WESN uses the same $50\%$ of drops for its configuration phase. 
+The remaining $50\%$ of drops are then used for evaluation.
+This drop-based partitioning evaluates the ability of each method to generalize to previously unseen network topologies. 
+Each drop corresponds to a distinct spatial realization of the MD-MIMO deployment, with different RU and UE locations and, consequently, different large-scale and small-scale channel characteristics. 
+Therefore, evaluating on unseen drops introduces a mismatch between the training/configuration environment and the testing environment. 
+This setting is representative of practical MD-MIMO systems, where it is difficult to collect an offline dataset that exhaustively covers all possible RU and UE placements, mobility patterns, blockage conditions, and propagation geometries.
+As a result, some degree of mismatch between the data used for training or configuration and the channels encountered during deployment should be expected. 
+The drop-based dataset split is used to explicitly model this practical generalization challenge.
+
+We observe that the performance gap between configured WESN and ChannelMamba is significantly larger under the spatial partitioning setting compared to the temporal partitioning setting. 
+This indicates that generalizing to unseen spatial configurations (i.e., new RU and UE placements) is substantially more challenging than generalizing to unseen time instances within the same spatial topology.
+This observation is particularly important in the MD-MIMO setting. Due to the mobility of both RUs and UEs, the system experiences a continuously evolving set of spatial topologies, making it extremely difficult to collect sufficiently rich offline datasets that cover all possible configurations. 
+As a result, offline-trained models such as ChannelMamba face inherent limitations in generalization. 
+In contrast, online learning approaches can adapt to the current environment using limited real-time observations, making them better suited for MD-MIMO channel prediction under practical conditions.
+Within the online learning approaches, the configured WESN is shown to offer the best performance, while having lower computational complexity than full Kalman filtering.
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/tput_vs_RUs_10kmph_drop_split.pdf}
+    \caption{Throughput vs number of RUs at 10~km/h under the drop-based split.}
+    \label{fig:tput_vs_RUs_10kmph_drop_split}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/tput_vs_RUs_40kmph_drop_split.pdf}
+    \caption{Throughput vs number of RUs at 40~km/h under the drop-based split.}
+    \label{fig:tput_vs_RUs_40kmph_drop_split}
+\end{figure}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=0.95\linewidth]{fig/tput_vs_RUs_80kmph_drop_split.pdf}
+    \caption{Throughput vs number of RUs at 80~km/h under the drop-based split.}
+    \label{fig:tput_vs_RUs_80kmph_drop_split}
+\end{figure}
+
+\section{Conclusions}
+
+In this paper, we investigated the impact of channel prediction on the performance of Mobile Distributed MIMO (MD-MIMO) systems under practical constraints, including codebook-based CSI feedback, feedback delay and mobility-induced channel aging. We showed that accurate channel prediction is a critical enabler for coherent joint transmission (CJT), particularly in high-mobility environments where feedback delay severely degrades precoder effectiveness.
+To address this challenge, we introduced a configured Windowed Echo State Network (WESN) framework that leverages the structure of steady-state Kalman predictors to design reservoir dynamics, while retaining the flexibility of data-driven learning through low-complexity readout training. This hybrid approach combines the strengths of model-based and learning-based methods, enabling robustness to model mismatch and efficient online adaptation.
+Through extensive simulations, we demonstrated that the configured WESN consistently outperforms classical Kalman filtering as well as state-of-the-art learning-based baselines, especially in cases where imperfect knowledge of channel dynamics limits the effectiveness of model-based predictors.
+
+\balance
+
+% Bibliography section
+% \printbibliography
+\bibliographystyle{IEEEtran}
+\bibliography{IEEEabrv,refs}
+
+\end{document}

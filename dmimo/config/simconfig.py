@@ -29,7 +29,7 @@ class SimConfig(CarrierConfig, MCSConfig):
         self._enable_rxsquad = False                                # enable simulation of TxSquad transmission
         self._cfo_sigma = [0.0]                                     # standard deviation of CFO in Hz (vector for multiple nodes)
         self._sto_sigma = [0.0]                                     # standard deviation of STO in nanoseconds (vector for multiple nodes)
-        self._gen_sync_errors = False                               # auto-generate random CFO/STO values for each phase/cycle
+        self._gen_sync_errors = False                               # generate one residual CFO/STO realization per drop
         self._random_cfo_vals = [0.0]                               # random STO values in nanoseconds (temporary values for simulation)
         self._random_sto_vals = [0.0]                               # random CFO values in Hz (temporary values for simulation)
         self._CSI_feedback_method = '5G'                            # which CSI feedback method to use. choices: '5G', 'RVQ'

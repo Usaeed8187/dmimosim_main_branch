@@ -637,24 +637,7 @@ class twomode_wesn_pred:
         return K
 
 def _predict_pair_worker(args):
-    base_history, err_var_history, rc_config, RB, tx_ant_idx, rx_ant_idx = args
-
-    curr_h_freq_csi_history = base_history[:, :, :, rx_ant_idx, :, ...]
-    curr_h_freq_csi_history = curr_h_freq_csi_history[:, :, :, :, :, tx_ant_idx, ...]
-
-    curr_err_var_history = None
-    if err_var_history is not None:
-        curr_err_var_history = err_var_history[:, :, :, rx_ant_idx, :, ...]
-        curr_err_var_history = curr_err_var_history[:, :, :, :, :, tx_ant_idx, ...]
-
-        if curr_h_freq_csi_history.shape != curr_err_var_history.shape:
-            sc_diff = curr_h_freq_csi_history.shape[-1] - curr_err_var_history.shape[-1]
-            left_pad  = np.repeat(curr_err_var_history[..., :1], sc_diff // 2, axis=-1)
-            right_pad = np.repeat(curr_err_var_history[..., -1:], sc_diff - sc_diff // 2, axis=-1)
-            curr_err_var_history = np.concatenate([left_pad, curr_err_var_history, right_pad], axis=-1)
-
-            if curr_h_freq_csi_history.shape != curr_err_var_history.shape:
-                raise ValueError("curr_h_freq_csi_history and curr_err_var_history must have the same shape")
+    curr_h_freq_csi_history, curr_err_var_history, rc_config, RB, tx_ant_idx, rx_ant_idx = args
 
     twomode_predictor = twomode_wesn_pred(
         rc_config=rc_config,
@@ -704,7 +687,59 @@ def predict_all_links(
                     num_bs_ant + rx_node_idx * num_ue_ant,
                 )
 
-            tasks.append((base_history, err_var_history, rc_config, RB, tx_ant_idx, rx_ant_idx))
+            # Slice in the parent process. Across all links these slices contain
+            # one history tensor in total, whereas sending base_history with
+            # every task serializes the full tensor once per link.
+            curr_h_freq_csi_history = base_history[:, :, :, rx_ant_idx, :, ...]
+            curr_h_freq_csi_history = curr_h_freq_csi_history[
+                :, :, :, :, :, tx_ant_idx, ...
+            ]
+
+            curr_err_var_history = None
+            if err_var_history is not None:
+                curr_err_var_history = err_var_history[
+                    :, :, :, rx_ant_idx, :, ...
+                ]
+                curr_err_var_history = curr_err_var_history[
+                    :, :, :, :, :, tx_ant_idx, ...
+                ]
+                if curr_h_freq_csi_history.shape != curr_err_var_history.shape:
+                    sc_diff = (
+                        curr_h_freq_csi_history.shape[-1]
+                        - curr_err_var_history.shape[-1]
+                    )
+                    if sc_diff < 0:
+                        raise ValueError(
+                            "err_var_csi_history has more subcarriers than "
+                            "h_freq_csi_history"
+                        )
+                    left_pad = np.repeat(
+                        curr_err_var_history[..., :1], sc_diff // 2, axis=-1
+                    )
+                    right_pad = np.repeat(
+                        curr_err_var_history[..., -1:],
+                        sc_diff - sc_diff // 2,
+                        axis=-1,
+                    )
+                    curr_err_var_history = np.concatenate(
+                        [left_pad, curr_err_var_history, right_pad], axis=-1
+                    )
+                    if curr_h_freq_csi_history.shape != curr_err_var_history.shape:
+                        raise ValueError(
+                            "curr_h_freq_csi_history and curr_err_var_history "
+                            "must have the same shape"
+                        )
+
+            tasks.append(
+                (
+                    curr_h_freq_csi_history,
+                    curr_err_var_history,
+                    rc_config,
+                    RB,
+                    tx_ant_idx,
+                    rx_ant_idx,
+                )
+            )
 
     if max_workers is None:
         max_workers = min(len(tasks), os.cpu_count() or 1)

@@ -7,6 +7,7 @@ import sys
 import os
 import datetime
 import traceback
+import json
 import numpy as np
 from fractions import Fraction
 import matplotlib.pyplot as plt
@@ -95,8 +96,8 @@ link_adapt = True
 
 perfect_csi = False
 csi_prediction = True
-channel_prediction_setting = "channelmamba" # "None", "kalman_filter", "configured_wesn", "channelmamba", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
-channel_prediction_method = "channelmamba" # None, "kalman_filter", "configured_wesn", "channelmamba", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
+channel_prediction_setting = "wesn_lite" # "None", "kalman_filter", "steady_state_kalman_filter", "configured_wesn", "configured_wesn_balanced", "configured_wesn_balanced_lite", "wesn_lite", "channelmamba", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
+channel_prediction_method = "wesn_lite" # None, "kalman_filter", "steady_state_kalman_filter", "configured_wesn", "configured_wesn_balanced", "configured_wesn_balanced_lite", "wesn_lite", "channelmamba", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
 wesn_offline_ratio = 0.5  # Fraction of simulation cycles used for offline WESN configuration
 history_len = 4
 window_length = 2
@@ -107,7 +108,7 @@ rl_checkpoint = None
 rl_evaluation_only = True
 state_dim_left = 2
 state_dim_right = 2
-esn_m = 3
+esn_m = 2
 esn_k = 4
 esn_num_freqs = 64
 esn_activation = "tanh"
@@ -116,6 +117,26 @@ esn_diagnostics = True
 enable_skip_connections = True
 input_scale = 0.15
 W_tran_radius = 0.1
+wesn_lite_residue_energy_threshold = float(
+    os.environ.get("WESN_LITE_RESIDUE_ENERGY", "0.95")
+)
+wesn_lite_esn_k = int(os.environ.get("WESN_LITE_ESN_K", "3"))
+wesn_lite_readout_mode = os.environ.get(
+    "WESN_LITE_READOUT_MODE", "centered_ridge"
+)
+wesn_lite_reservoir_readout_reg = float(
+    os.environ.get("WESN_LITE_RESERVOIR_READOUT_REG", "1e-2")
+)
+wesn_lite_skip_readout_reg = float(
+    os.environ.get("WESN_LITE_SKIP_READOUT_REG", "1e-4")
+)
+wesn_lite_subcarriers_per_rb = int(
+    os.environ.get("WESN_LITE_SUBCARRIERS_PER_RB", "12")
+)
+balanced_lite_hankel_energy_threshold = float(
+    os.environ.get("BALANCED_LITE_HANKEL_ENERGY", "0.90")
+)
+predictor_workers = int(os.environ.get("PREDICTOR_WORKERS", "1"))
 print_lmmse_effective_snr = False
 lmmse_use_rx_snr_for_nvar = False
 return_first_slot_only = True
@@ -184,6 +205,8 @@ def parse_arguments():
     global channelmamba_split_mode, channelmamba_train_time_ratio
     global start_slot_idx_override
     global configured_wesn_split_mode, configured_wesn_train_drop_indices
+    global wesn_lite_residue_energy_threshold, wesn_lite_esn_k, predictor_workers
+    global balanced_lite_hankel_energy_threshold
 
     if len(arguments) > 0:
         mobility = arguments[0]
@@ -244,6 +267,15 @@ def parse_arguments():
         if len(arguments) >= 20 and str(arguments[19]).strip() != "":
             channelmamba_train_time_ratio = float(arguments[19])
 
+        if len(arguments) >= 21 and str(arguments[20]).strip() != "":
+            wesn_lite_residue_energy_threshold = float(arguments[20])
+
+        if len(arguments) >= 22 and str(arguments[21]).strip() != "":
+            wesn_lite_esn_k = int(arguments[21])
+
+        if len(arguments) >= 23 and str(arguments[22]).strip() != "":
+            predictor_workers = int(arguments[22])
+
         if str(channel_prediction_setting).lower() == "none":
             csi_prediction = False
             channel_prediction_method = None
@@ -283,6 +315,10 @@ def run_simulation():
     if start_slot_idx_override is not None:
         cfg.start_slot_idx = int(start_slot_idx_override)
     cfg.csi_delay = 4           # feedback delay in number of subframe
+    cfg.phase_1_enabled = _parse_bool(os.environ.get("DMIMO_PHASE_1_ENABLED", "False"))
+    cfg.enable_rxsquad = _parse_bool(os.environ.get("DMIMO_PHASE_3_ENABLED", "False"))
+    cfg.num_slots_p1 = int(os.environ.get("DMIMO_NUM_SLOTS_P1", "2"))
+    cfg.num_slots_p2 = int(os.environ.get("DMIMO_NUM_SLOTS_P2", "2"))
     cfg.perfect_csi = perfect_csi
     cfg.rank_adapt = False      # enable/disable rank adaptation
     cfg.link_adapt = link_adapt      # enable/disable link adaptation,. .
@@ -297,12 +333,35 @@ def run_simulation():
     # cfg.ns3_folder = "ns3/channels/LowMobility/"
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
-    cfg.enable_rxsquad = False
     cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT", "SLNR" for quantized CSI feedback
     cfg.csi_quantization_on = csi_quantization_on
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
     cfg.lmmse_cov_est_slots = 5  # Number of slots to use for channel covariance estimation
     cfg.drop_idx = drop_idx
+    cfg.gen_sync_errors = _parse_bool(
+        os.environ.get("DMIMO_GEN_SYNC_ERRORS", "False")
+    )
+    cfg.sync_phase_error_std_deg = float(
+        os.environ.get("DMIMO_SYNC_PHASE_STD_DEG", "0")
+    )
+    cfg.sync_timing_error_std_samples = float(
+        os.environ.get("DMIMO_SYNC_TIMING_STD_SAMPLES", "0")
+    )
+    if cfg.sync_phase_error_std_deg < 0 or cfg.sync_timing_error_std_samples < 0:
+        raise ValueError("Synchronization-error standard deviations must be nonnegative.")
+    # The paper reports phase-error standard deviation. Under the residual-CFO
+    # model, choose sigma_f so one slot of phase accumulation has that std.
+    cfg.cfo_sigma = (
+        cfg.sync_phase_error_std_deg / (360.0 * cfg.slot_duration)
+        if cfg.gen_sync_errors
+        else 0.0
+    )
+    sample_duration = 1.0 / (cfg.subcarrier_spacing * cfg.fft_size)
+    cfg.sto_sigma = (
+        cfg.sync_timing_error_std_samples * sample_duration * 1e9
+        if cfg.gen_sync_errors
+        else 0.0
+    )
     cfg.print_lmmse_effective_snr = print_lmmse_effective_snr
     cfg.lmmse_use_rx_snr_for_nvar = lmmse_use_rx_snr_for_nvar
     cfg.return_first_slot_only = return_first_slot_only
@@ -314,6 +373,12 @@ def run_simulation():
         MCS_string = "link_adapt"
     else:
         MCS_string = "mod_order_{}_code_rate_{}".format(modulation_order, code_rate)
+    if cfg.phase_1_enabled or cfg.enable_rxsquad:
+        MCS_string = "p1_{}_p3_{}_{}".format(
+            cfg.phase_1_enabled,
+            cfg.enable_rxsquad,
+            MCS_string,
+        )
 
     # Select Number of TxSquad and RxSquad UEs to use.
     ns3cfg.num_txue_sel = num_txue_sel        
@@ -329,15 +394,40 @@ def run_simulation():
     rc_config.state_dim_left = state_dim_left
     rc_config.state_dim_right = state_dim_right
     rc_config.esn_m = esn_m
-    rc_config.esn_k = esn_k
+    rc_config.esn_k = wesn_lite_esn_k if channel_prediction_setting == "wesn_lite" else esn_k
     rc_config.esn_num_freqs = esn_num_freqs
+    is_balanced_wesn = channel_prediction_setting in (
+        "configured_wesn_balanced",
+        "configured_wesn_balanced_lite",
+    )
+    is_balanced_wesn_lite = (
+        channel_prediction_setting == "configured_wesn_balanced_lite"
+    )
     rc_config.esn_activation = esn_activation
     rc_config.esn_ls_reg = esn_ls_reg
     rc_config.esn_diagnostics = esn_diagnostics
     rc_config.enable_skip_connections = enable_skip_connections
     rc_config.input_scale = input_scale
-    rc_config.W_tran_radius = W_tran_radius
-    if channel_prediction_setting in ("two_mode_kalman_config", "configured_wesn"):
+    rc_config.W_tran_radius = 1.0 if is_balanced_wesn else W_tran_radius
+    rc_config.wesn_online_update = "batch_ridge"
+    rc_config.enable_residue_low_rank = channel_prediction_setting == "wesn_lite"
+    rc_config.enable_balanced_truncation = is_balanced_wesn
+    rc_config.enable_balanced_hankel_truncation = is_balanced_wesn_lite
+    rc_config.balanced_hankel_energy_threshold = (
+        balanced_lite_hankel_energy_threshold
+    )
+    rc_config.residue_energy_threshold = wesn_lite_residue_energy_threshold
+    rc_config.reservoir_readout_regularization = wesn_lite_reservoir_readout_reg
+    rc_config.skip_readout_regularization = wesn_lite_skip_readout_reg
+    rc_config.wesn_lite_readout_mode = wesn_lite_readout_mode
+    rc_config.wesn_lite_subcarriers_per_rb = wesn_lite_subcarriers_per_rb
+    if channel_prediction_setting in (
+        "two_mode_kalman_config",
+        "configured_wesn",
+        "configured_wesn_balanced",
+        "configured_wesn_balanced_lite",
+        "wesn_lite",
+    ):
         rc_config.enable_kalman_weight_config = True
     else:
         rc_config.enable_kalman_weight_config = False
@@ -349,6 +439,7 @@ def run_simulation():
     cfg.channelmamba_train_time_ratio = channelmamba_train_time_ratio
     cfg.configured_wesn_split_mode = configured_wesn_split_mode
     cfg.configured_wesn_train_drop_indices = configured_wesn_train_drop_indices
+    cfg.predictor_workers = max(1, int(predictor_workers))
     cfg.channelmamba_allow_mismatch_reset = False
     cfg.channelmamba_checkpoint_metadata = {
         "mobility": mobility,
@@ -495,18 +586,50 @@ def run_simulation():
         folder_path = "results/channels_multiple_mu_mimo/{}".format(folder_name)
         os.makedirs(folder_path, exist_ok=True)
         result_suffix = ""
-        if str(cfg.channel_prediction_method) == "configured_wesn":
+        if str(cfg.channel_prediction_method) in (
+            "configured_wesn",
+            "configured_wesn_balanced",
+            "configured_wesn_balanced_lite",
+            "wesn_lite",
+        ):
             split_mode = str(getattr(cfg, "configured_wesn_split_mode", "within_drop")).lower()
             if split_mode == "across_drops":
                 result_suffix = "_drop_split"
             else:
                 result_suffix = "_time_split"
+            if str(cfg.channel_prediction_method) == "wesn_lite":
+                result_suffix += (
+                    f"_readout_{str(rc_config.wesn_lite_readout_mode)}"
+                )
         elif str(cfg.channel_prediction_method) == "channelmamba":
             cm_split_mode = str(getattr(cfg, "channelmamba_split_mode", "drop_split")).lower()
             if cm_split_mode == "time_split":
                 result_suffix = "_time_split"
             else:
                 result_suffix = "_drop_split"
+        if int(getattr(cfg, "predictor_workers", 1)) != 1:
+            result_suffix += f"_workers_{int(cfg.predictor_workers)}"
+
+        def filename_token(value):
+            return format(float(value), "g").replace("-", "m").replace(".", "p")
+
+        result_suffix += (
+            f"_sync_errors_{cfg.gen_sync_errors}"
+            f"_phase_std_deg_{filename_token(cfg.sync_phase_error_std_deg)}"
+            f"_timing_std_samples_{filename_token(cfg.sync_timing_error_std_samples)}"
+        )
+        sync_metadata = {
+            "sync_errors_enabled": np.asarray(cfg.gen_sync_errors),
+            "sync_phase_error_std_deg": np.asarray(cfg.sync_phase_error_std_deg),
+            "sync_timing_error_std_samples": np.asarray(
+                cfg.sync_timing_error_std_samples
+            ),
+            "residual_cfo_hz": np.asarray(cfg.random_cfo_vals),
+            "residual_timing_offset_samples": np.asarray(
+                cfg.random_sto_vals_samples
+            ),
+            "residual_timing_offset_ns": np.asarray(cfg.random_sto_vals),
+        }
 
         if cfg.csi_prediction:
             
@@ -514,10 +637,36 @@ def run_simulation():
                 file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_prediction_{}_pmi_quantization_{}{}.npz".format(MCS_string, num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, result_suffix))
             else:
                 file_path = os.path.join(folder_path, "mu_mimo_results_{}_rx_UE_{}_tx_UE_{}_prediction_{}_pmi_quantization_{}{}.npz".format(MCS_string, rx_ues_arr[ue_arr_idx], num_txue_sel, cfg.channel_prediction_method, cfg.csi_quantization_on, result_suffix))
+            complexity_metrics_json = json.dumps(
+                getattr(cfg, "predictor_complexity_summary", {}), sort_keys=True
+            )
+            complexity_metrics_raw_json = json.dumps(
+                getattr(cfg, "predictor_complexity_metrics", {}), sort_keys=True
+            )
+            residue_rank_summary_json = json.dumps(
+                getattr(cfg, "predictor_complexity_metrics", {}).get(
+                    "wesn_residue_rank_summary", {}
+                ),
+                sort_keys=True,
+            )
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, nodewise_goodput=rst_zf[5],
                     nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], ranks=rst_zf[8], uncoded_ber_list=rst_zf[9],
-                    ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13], chan_pred_nmse=chan_pred_nmse)
+                    ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13], chan_pred_nmse=chan_pred_nmse,
+                    predictor_complexity_json=np.asarray(complexity_metrics_json),
+                    predictor_complexity_raw_json=np.asarray(complexity_metrics_raw_json),
+                    wesn_residue_rank_summary_json=np.asarray(residue_rank_summary_json),
+                    predictor_workers=np.asarray(cfg.predictor_workers),
+                    wesn_lite_readout_mode=np.asarray(
+                        str(rc_config.wesn_lite_readout_mode)
+                    ),
+                    wesn_lite_subcarriers_per_rb=np.asarray(
+                        int(rc_config.wesn_lite_subcarriers_per_rb)
+                    ),
+                    balanced_hankel_energy_threshold=np.asarray(
+                        float(rc_config.balanced_hankel_energy_threshold)
+                    ),
+                    **sync_metadata)
         else:
             if cfg.scheduling:
                 file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, result_suffix))
@@ -527,7 +676,8 @@ def run_simulation():
             np.savez(file_path,
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
                     nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], 
-                    ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13])
+                    ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13],
+                    **sync_metadata)
 
 
 if __name__ == "__main__":

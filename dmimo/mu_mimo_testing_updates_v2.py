@@ -1,4 +1,5 @@
 import numpy as np
+import copy
 import tensorflow as tf
 from tensorflow.python.keras import Model
 import matplotlib.pyplot as plt
@@ -32,7 +33,16 @@ from dmimo.channel import twomode_wesn_pred, twomode_wesn_pred_tf, weiner_filter
 from dmimo.channel.twomode_wesn_pred import predict_all_links, predict_all_links_simple
 from dmimo.channel.configured_wesn_pred import (
     build_configured_predictors_simple,
-    predict_all_links_with_configured_simple,
+    predict_all_links_with_configured,
+)
+from dmimo.channel.steady_state_kalman_filter_pred import (
+    build_steady_state_kalman_predictors_simple,
+    predict_all_links_with_steady_state_kalman_simple,
+)
+from dmimo.channel.complexity_instrumentation import (
+    measure_phase,
+    numpy_storage_bytes,
+    phase_summary,
 )
 from dmimo.channel.wesn_rx_sig_pred import rx_sig_predict_all_links_simple
 from dmimo.channel.rl_beam_selector_v2 import RLBeamSelector
@@ -40,12 +50,85 @@ from dmimo.channel.twomode_wesn_pred_tf import predict_all_links_tf
 from dmimo.channel import RBwiseLinearInterp
 from dmimo.mimo import BDPrecoder, BDEqualizer, ZFPrecoder, SLNRPrecoder, QuantizedSLNRPrecoder, SLNREqualizer, QuantizedZFPrecoder, QuantizedDirectPrecoder
 from dmimo.mimo import rankAdaptation, linkAdaptation
+from dmimo.mimo.link_adaptation import (
+    get_link_adaptation_table,
+    project_mcs_indices_to_sionna_supported,
+)
 from dmimo.mimo import MUMIMOScheduler
 from dmimo.mimo import update_node_selection, quantized_CSI_feedback, RandomVectorQuantizer, RandomVectorQuantizerNumpy
 from dmimo.utils import add_frequency_offset, add_timing_offset, compute_UE_wise_BER, compute_UE_wise_SER, complex_pinv
 
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
+from .phase_1 import Phase1v
+
+
+def _rank_statistics(values):
+    values = np.asarray(values, dtype=np.int64)
+    if values.size == 0:
+        return None
+    unique, counts = np.unique(values, return_counts=True)
+    return {
+        "count": int(values.size),
+        "mean": float(np.mean(values)),
+        "median": float(np.median(values)),
+        "mode": int(unique[np.argmax(counts)]),
+        "min": int(np.min(values)),
+        "max": int(np.max(values)),
+        "histogram": {
+            str(int(rank)): int(count)
+            for rank, count in zip(unique, counts)
+        },
+    }
+
+
+def _summarize_wesn_residue_ranks(predictor_map):
+    """Aggregate adaptive residue ranks overall and by MIMO dimension D."""
+    all_ranks = []
+    ranks_by_dimension = {}
+    state_dimensions = []
+    state_dimensions_by_output = {}
+    retained_energy = []
+    for predictor in predictor_map.values():
+        ranks = list(getattr(predictor, "residue_ranks", []))
+        if not ranks:
+            continue
+        all_ranks.extend(ranks)
+        dimension = str(int(getattr(predictor, "output_dim", 0)))
+        ranks_by_dimension.setdefault(dimension, []).extend(ranks)
+        state_dimension = int(getattr(predictor, "state_dim", sum(ranks)))
+        state_dimensions.append(state_dimension)
+        state_dimensions_by_output.setdefault(dimension, []).append(
+            state_dimension
+        )
+        retained_energy.extend(
+            getattr(predictor, "residue_retained_energy", [])
+        )
+
+    overall = _rank_statistics(all_ranks)
+    if overall is None:
+        return None
+    overall["energy_threshold"] = float(
+        next(
+            predictor.residue_energy_threshold
+            for predictor in predictor_map.values()
+            if getattr(predictor, "residue_ranks", [])
+        )
+    )
+    if retained_energy:
+        overall["retained_energy_mean"] = float(np.mean(retained_energy))
+        overall["retained_energy_min"] = float(np.min(retained_energy))
+    overall["reservoir_dimension"] = _rank_statistics(state_dimensions)
+    overall["by_output_dimension"] = {}
+    for dimension, ranks in sorted(
+        ranks_by_dimension.items(), key=lambda item: int(item[0])
+    ):
+        dimension_summary = _rank_statistics(ranks)
+        dimension_summary["reservoir_dimension"] = _rank_statistics(
+            state_dimensions_by_output[dimension]
+        )
+        overall["by_output_dimension"][dimension] = dimension_summary
+    return overall
 
 def _compute_effective_snr_db(h_freq_csi, err_var_csi, eps=1e-12):
     """Compute effective post-estimation SNR in dB from channel and error variance."""
@@ -188,45 +271,83 @@ class MU_MIMO(Model):
         :return: decoded bits, uncoded BER, demodulated QAM symbols (for debugging purpose)
         """
 
-        # LDPC encoder processing
-        info_bits = tf.reshape(info_bits, [self.batch_size, 1, self.rg.num_streams_per_tx,
-                                           self.num_codewords, self.encoder.k])
-        c = self.encoder(info_bits)
-        c = tf.reshape(c, [self.batch_size, 1, self.rg.num_streams_per_tx, self.num_codewords * self.encoder.n])
+        def encode_and_precode(bits):
+            bits = tf.reshape(bits, [self.batch_size, 1, self.rg.num_streams_per_tx,
+                                     self.num_codewords, self.encoder.k])
+            coded = self.encoder(bits)
+            coded = tf.reshape(coded, [self.batch_size, 1, self.rg.num_streams_per_tx,
+                                       self.num_codewords * self.encoder.n])
+            interleaved = self.intlvr(coded)
+            symbols = self.mapper(interleaved)
+            symbols_rg = self.rg_mapper(symbols)
 
-        # Interleaving for coded bits
-        d = self.intlvr(c)
-
-        # QAM mapping for the OFDM grid
-        x = self.mapper(d)
-        x_rg = self.rg_mapper(x)
-
-        # apply precoding to OFDM grids. We currently assume either perfect CSI or quantized CSI feedback.
-        if self.cfg.precoding_method == "ZF":
-            if "RVQ" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
-                x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
-            elif "type_II" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
-                x_precoded, g = self.zf_quantized_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks, new=True)
+            if self.cfg.precoding_method == "ZF":
+                if "RVQ" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
+                    precoded, effective_channel = self.zf_quantized_precoder(
+                        symbols_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks
+                    )
+                elif "type_II" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
+                    precoded, effective_channel = self.zf_quantized_precoder(
+                        symbols_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices,
+                        self.cfg.ue_ranks, new=True
+                    )
+                else:
+                    precoded, effective_channel = self.zf_precoder(
+                        [symbols_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks]
+                    )
+            elif self.cfg.precoding_method == "BD":
+                precoded, effective_channel = self.bd_precoder(
+                    [symbols_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks]
+                )
+            elif self.cfg.precoding_method == "SLNR":
+                nvar = 5e-2
+                if "type_II" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
+                    precoded, effective_channel = self.slnr_quantized_precoder(
+                        symbols_rg, h_freq_csi, snr_dB_arr,
+                        self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks
+                    )
+                else:
+                    precoded, effective_channel = self.slnr_precoder(
+                        [symbols_rg, h_freq_csi, nvar,
+                         self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks]
+                    )
+            elif self.cfg.precoding_method == "DIRECT":
+                precoded, effective_channel = self.quantized_direct_precoder(
+                    symbols_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks
+                )
             else:
-                x_precoded, g = self.zf_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
-        elif self.cfg.precoding_method == "BD":
-            x_precoded, g = self.bd_precoder([x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
-        elif self.cfg.precoding_method == "SLNR":
-            nvar = 5e-2  # TODO optimize value
-            if "type_II" in self.cfg.PMI_feedback_architecture and self.cfg.csi_quantization_on:
-                x_precoded, g = self.slnr_quantized_precoder(x_rg, h_freq_csi, snr_dB_arr, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
-            else:
-                x_precoded, g = self.slnr_precoder([x_rg, h_freq_csi, nvar, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks])
-        elif self.cfg.precoding_method == "DIRECT":
-            x_precoded, g = self.quantized_direct_precoder(x_rg, h_freq_csi, self.cfg.scheduled_rx_ue_indices, self.cfg.ue_ranks)
+                raise ValueError("unsupported precoding method")
+
+            if np.any(np.not_equal(self.cfg.random_sto_vals, 0)):
+                precoded = add_timing_offset(
+                    precoded,
+                    self.cfg.random_sto_vals,
+                    subcarrier_spacing=self.cfg.subcarrier_spacing,
+                    cp_len=self.cfg.cyclic_prefix_len,
+                )
+            if np.any(np.not_equal(self.cfg.random_cfo_vals, 0)):
+                precoded = add_frequency_offset(
+                    precoded,
+                    self.cfg.random_cfo_vals,
+                    subcarrier_spacing=self.cfg.subcarrier_spacing,
+                    cp_len=self.cfg.cyclic_prefix_len,
+                    slot_idx=self.cfg.first_slot_idx,
+                    slot_duration=self.cfg.slot_duration,
+                )
+            return interleaved, symbols, precoded, effective_channel
+
+        if isinstance(info_bits, (list, tuple)):
+            x_precoded_parts = []
+            for transmitter_idx, transmitter_bits in enumerate(info_bits):
+                d_this, x_this, x_precoded_this, g = encode_and_precode(transmitter_bits)
+                if transmitter_idx == 0:
+                    d, x = d_this, x_this
+                start_ant_idx = 0 if transmitter_idx == 0 else 4 + 2 * (transmitter_idx - 1)
+                end_ant_idx = 4 if transmitter_idx == 0 else start_ant_idx + 2
+                x_precoded_parts.append(x_precoded_this[:, :, start_ant_idx:end_ant_idx, :, :])
+            x_precoded = tf.concat(x_precoded_parts, axis=2)
         else:
-            ValueError("unsupported precoding method")
-
-        # add CFO/STO to simulate synchronization errors
-        if np.any(np.not_equal(self.cfg.random_sto_vals, 0)):
-            x_precoded = add_timing_offset(x_precoded, self.cfg.random_sto_vals)
-        if np.any(np.not_equal(self.cfg.random_cfo_vals, 0)):
-            x_precoded = add_frequency_offset(x_precoded, self.cfg.random_cfo_vals)
+            d, x, x_precoded, g = encode_and_precode(info_bits)
 
         # apply dMIMO channels to the resource grid in the frequency domain.
         y, h_freq_true = dmimo_chans([x_precoded, self.cfg.first_slot_idx])
@@ -353,7 +474,7 @@ def do_rank_link_adaptation(cfg, dmimo_chans, h_est, rx_sinr_db, return_mcs_inde
         data_sym_position = np.arange(0, 14)
         link_adaptation = linkAdaptation(dmimo_chans.ns3_config.num_bs_ant, dmimo_chans.ns3_config.num_ue_ant,
                                         architecture='MU-MIMO', sinrdb=rx_sinr_db, nfft=cfg.fft_size,
-                                        N_s=rank, data_sym_position=data_sym_position, lookup_table_size='long')
+                                        N_s=rank, data_sym_position=data_sym_position, lookup_table_size='38.214')
 
         mcs_feedback_report = link_adaptation(h_est, channel_type='dMIMO', return_mcs_index=return_mcs_index)
     else:
@@ -370,11 +491,6 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     :param ns3cfg: ns-3 channel settings
     :return: [uncoded_ber, coded_ber], [goodbits, userbits]
     """
-
-    # CFO and STO settings
-    if cfg.gen_sync_errors:
-        cfg.random_sto_vals = cfg.sto_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
-        cfg.random_cfo_vals = cfg.cfo_sigma * np.random.normal(size=(ns3cfg.num_txue_sel, 1))
 
     # Reset UE selection. Start with all TX and RX UEs selected.
     tmp_num_rxue_sel = ns3cfg.num_rxue_sel
@@ -474,7 +590,11 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     estimated_channels_dir=cfg.estimated_channels_dir,
                 )
                 err_var_csi_history = None
-            elif "kalman" in cfg.channel_prediction_method or "configured_wesn" in cfg.channel_prediction_method:
+            elif (
+                "kalman" in cfg.channel_prediction_method
+                or "configured_wesn" in cfg.channel_prediction_method
+                or cfg.channel_prediction_method == "wesn_lite"
+            ):
                 h_freq_csi_history, err_var_csi_history = rc_predictor.get_csi_history_with_err_var(
                     cfg.first_slot_idx,
                     cfg.csi_delay,
@@ -486,6 +606,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     freq_cov_mat=freq_cov_mat,
                     lmmse_interpolator=lmmse_interpolator,
                     use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+                    sync_drop_id=cfg.drop_idx,
+                    sync_phase_std_deg=getattr(cfg, "sync_phase_error_std_deg", None),
+                    sync_timing_std_samples=getattr(cfg, "sync_timing_error_std_samples", None),
                 )
                 if getattr(cfg, "print_lmmse_effective_snr", True):
                     _print_lmmse_effective_snr(
@@ -505,6 +628,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     freq_cov_mat=freq_cov_mat,
                     lmmse_interpolator=lmmse_interpolator,
                     use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+                    sync_drop_id=cfg.drop_idx,
+                    sync_phase_std_deg=getattr(cfg, "sync_phase_error_std_deg", None),
+                    sync_timing_std_samples=getattr(cfg, "sync_timing_error_std_samples", None),
                 )
                 err_var_csi_history = None
                 
@@ -541,24 +667,52 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
             else:
                 start_time_all_loops = time.time()
 
-                # h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg, max_workers=8, err_var_csi_history=err_var_csi_history)
+                # h_freq_csi = predict_all_links(h_freq_csi_history, rc_config, ns3cfg, max_workers=4, err_var_csi_history=err_var_csi_history)
                 h_freq_csi = predict_all_links_simple(h_freq_csi_history, rc_config, ns3cfg, err_var_csi_history=err_var_csi_history)
 
                 end_time_all_loops = time.time()
-                # print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
-        elif "configured_wesn" in cfg.channel_prediction_method:
+                print("total time for prediction: ", end_time_all_loops-start_time_all_loops)
+        elif "configured_wesn" in cfg.channel_prediction_method or cfg.channel_prediction_method == "wesn_lite":
             configured_predictors = getattr(cfg, "configured_wesn_predictors", None)
             if configured_predictors is None:
                 raise ValueError(
                     "Configured WESN predictors not found. "
                     "Please configure offline predictors before running online slots."
                 )
-            h_freq_csi = predict_all_links_with_configured_simple(
-                h_freq_csi_history,
-                configured_predictors,
-                ns3cfg,
-                err_var_csi_history=err_var_csi_history,
+            with measure_phase(
+                cfg,
+                "inference_system",
+                method=str(cfg.channel_prediction_method),
+                workers=int(getattr(cfg, "predictor_workers", 4)),
+            ):
+                h_freq_csi = predict_all_links_with_configured(
+                    h_freq_csi_history,
+                    configured_predictors,
+                    ns3cfg,
+                    err_var_csi_history=err_var_csi_history,
+                    max_workers=int(getattr(cfg, "predictor_workers", 4)),
+                )
+        elif "steady_state_kalman_filter" in cfg.channel_prediction_method:
+            steady_state_predictors = getattr(
+                cfg, "steady_state_kalman_predictors", None
             )
+            if steady_state_predictors is None:
+                raise ValueError(
+                    "Steady-state KF predictors not found. Configure them from "
+                    "the drop-local offline segment before running online slots."
+                )
+            with measure_phase(
+                cfg,
+                "inference_system",
+                method=str(cfg.channel_prediction_method),
+                workers=int(getattr(cfg, "predictor_workers", 1)),
+            ):
+                h_freq_csi = predict_all_links_with_steady_state_kalman_simple(
+                    h_freq_csi_history,
+                    steady_state_predictors,
+                    ns3cfg,
+                    max_workers=int(getattr(cfg, "predictor_workers", 1)),
+                )
         elif "channelmamba" in cfg.channel_prediction_method:
             from dmimo.channel.channelmamba_pred import predict_all_links_with_channelmamba_per_pair
 
@@ -586,7 +740,14 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
 
             h_freq_csi_history_perfect = rc_predictor.get_ideal_csi_history(cfg.first_slot_idx+cfg.csi_delay, cfg.csi_delay,
                                                           dmimo_chans)
-            kalman_predictor = kalman_filter_pred(ar_order=rc_config.window_length, debug=False)
+            kalman_predictor = getattr(cfg, "kalman_filter_predictor", None)
+            if kalman_predictor is None:
+                kalman_predictor = kalman_filter_pred(
+                    ar_order=rc_config.window_length,
+                    debug=False,
+                    reconfiguration_interval=1,
+                )
+                cfg.kalman_filter_predictor = kalman_predictor
             h_freq_csi = kalman_predictor.predict(
                 h_freq_csi_history,
                 err_var_csi_history,
@@ -674,6 +835,142 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     binary_source = BinarySource()
     info_bits = binary_source([cfg.num_slots_p2, mu_mimo.num_bits_per_frame])
 
+    if bool(getattr(cfg, "phase_1_enabled", False)):
+        p1_chans_dl = dMIMOChannels(ns3cfg, "TxSquad", forward=True, add_noise=True)
+        cfg_p1 = copy.deepcopy(cfg)
+        cfg_p1.num_tx_streams = 2
+        cfg_p1.dc_null = False
+        cfg_p1.num_scheduled_tx_ue = len(cfg.scheduled_tx_ue_indices) - 2
+
+        num_txs_ant_p1 = ns3cfg.num_bs_ant
+        csi_effective_subcarriers_p1 = (
+            cfg_p1.fft_size // num_txs_ant_p1
+        ) * num_txs_ant_p1
+        csi_guard_carriers_1_p1 = (
+            cfg_p1.fft_size - csi_effective_subcarriers_p1
+        ) // 2
+        csi_guard_carriers_2_p1 = (
+            cfg_p1.fft_size - csi_effective_subcarriers_p1
+        ) - csi_guard_carriers_1_p1
+        rg_csi_p1 = ResourceGrid(
+            num_ofdm_symbols=14,
+            fft_size=cfg_p1.fft_size,
+            subcarrier_spacing=cfg_p1.subcarrier_spacing,
+            num_tx=1,
+            num_streams_per_tx=num_txs_ant_p1,
+            cyclic_prefix_length=cfg_p1.cyclic_prefix_len,
+            num_guard_carriers=[csi_guard_carriers_1_p1, csi_guard_carriers_2_p1],
+            dc_null=cfg_p1.dc_null,
+            pilot_pattern="kronecker",
+            pilot_ofdm_symbol_indices=[2, 11],
+        )
+        cfg_p1.num_guard_carriers = rg_csi_p1.num_guard_carriers
+
+        if cfg_p1.perfect_csi:
+            h_freq_csi_dl, _, _ = p1_chans_dl.load_channel(
+                slot_idx=cfg_p1.first_slot_idx - cfg_p1.csi_delay,
+                forward=True,
+                batch_size=cfg_p1.num_slots_p1,
+            )
+        else:
+            h_freq_csi_dl, _ = lmmse_channel_estimation(
+                p1_chans_dl,
+                rg_csi_p1,
+                slot_idx=cfg_p1.first_slot_idx - cfg_p1.csi_delay,
+                cfo_vals=cfg_p1.random_cfo_vals,
+                sto_vals=cfg_p1.random_sto_vals,
+            )
+
+        if cfg_p1.CSI_feedback_method == "5G":
+            generate_csi_feedback = quantized_CSI_feedback(
+                method="5G",
+                codebook_selection_method="rate",
+                num_tx_streams=cfg_p1.num_tx_streams,
+                architecture="dMIMO_phase1",
+                snrdb=rx_snr_db,
+                wideband=True,
+            )
+            _, _, quantized_channels_p1 = generate_csi_feedback(h_freq_csi_dl)
+        else:
+            quantized_channels_p1 = None
+        quantized_channels_p1 = quantized_channels_p1[:cfg_p1.num_scheduled_tx_ue, ...]
+
+        phase_1_mcs_list = [
+            [2, 0.5], [2, 0.75], [4, 0.5], [4, 0.75],
+            [6, 0.6667], [6, 0.75], [6, 0.8333], [8, 0.75],
+            [8, 0.8333], [10, 0.75], [10, 0.8333],
+            [12, 0.75], [12, 0.8333],
+        ]
+        num_info_bits_p2 = (
+            mu_mimo.batch_size
+            * mu_mimo.rg.num_streams_per_tx
+            * mu_mimo.num_codewords
+            * mu_mimo.ldpc_k
+        )
+        phase_1_model = None
+        chosen_mcs_phase_1 = None
+        for modulation_order_p1, code_rate_p1 in phase_1_mcs_list:
+            cfg_p1.modulation_order = modulation_order_p1
+            cfg_p1.code_rate = code_rate_p1
+            candidate = Phase1v(cfg_p1, rg_csi_p1)
+            num_info_bits_p1 = (
+                candidate.batch_size
+                * candidate.rg.num_streams_per_tx
+                * candidate.num_codewords
+                * candidate.ldpc_k
+            )
+            if num_info_bits_p1 >= num_info_bits_p2:
+                phase_1_model = candidate
+                chosen_mcs_phase_1 = (modulation_order_p1, code_rate_p1)
+                break
+        if phase_1_model is None:
+            raise ValueError(
+                "No phase-1 MCS can accommodate the phase-2 payload. "
+                "Increase phase-1 duration or decrease phase-2 duration."
+            )
+
+        info_bits_p1 = tf.reshape(info_bits, [-1])
+        info_bits_p1 = tf.pad(
+            info_bits_p1, [[0, num_info_bits_p1 - num_info_bits_p2]]
+        )
+        info_bits_p1 = tf.reshape(
+            info_bits_p1,
+            [
+                phase_1_model.batch_size,
+                phase_1_model.rg.num_streams_per_tx
+                * phase_1_model.num_codewords
+                * phase_1_model.ldpc_k,
+            ],
+        )
+        detected_bits_list = phase_1_model(
+            p1_chans_dl,
+            info_bits_p1,
+            quantized_channels_p1,
+            precoding_method="grad_ascent",
+        )
+        available_info_bits_list = [info_bits]
+        for detected_bits in detected_bits_list:
+            detected_bits = tf.reshape(detected_bits, [-1])[:num_info_bits_p2]
+            available_info_bits_list.append(
+                tf.reshape(
+                    detected_bits,
+                    [cfg.num_slots_p2, mu_mimo.num_bits_per_frame],
+                )
+            )
+        p1_coded_bers = [
+            compute_ber(info_bits, transmitter_bits).numpy()
+            for transmitter_bits in available_info_bits_list[1:]
+        ]
+        print(
+            "Phase 1 coded BER with "
+            f"{phase_1_model.rg.num_streams_per_tx} streams, "
+            f"modulation order {chosen_mcs_phase_1[0]}, "
+            f"code rate {chosen_mcs_phase_1[1]}: {p1_coded_bers}"
+        )
+        phase_2_info_bits = available_info_bits_list
+    else:
+        phase_2_info_bits = info_bits
+
     # Saving Rx SNRs
     rx_snr_lin = 10.0 **( rx_snr_db / 10.0)
     rx_snr_lin = np.mean(rx_snr_lin, axis=(0,1, 3))
@@ -682,7 +979,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
     snr_dB_arr = 10*np.log10(rx_snr_lin)
 
     # MU-MIMO transmission (P2)
-    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_db_arr = mu_mimo(dmimo_chans, h_freq_csi, info_bits, snr_dB_arr)
+    dec_bits, uncoded_ber_phase_2, uncoded_ser, x_hat, node_wise_uncoded_ser, sinr_db_arr = mu_mimo(
+        dmimo_chans, h_freq_csi, phase_2_info_bits, snr_dB_arr
+    )
     
     if cfg.rank_adapt or cfg.link_adapt:
         # Rank and link adaptation
@@ -704,14 +1003,21 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         qam_order_arr = mcs_feedback_report[0]
         code_rate_arr = mcs_feedback_report[1]
         cqi_sinrs = mcs_feedback_report[2]
-        mcs_indices = mcs_feedback_report[3]
-        values, counts = np.unique(qam_order_arr, return_counts=True)
-        most_frequent_value = values[np.argmax(counts)]
-        cfg.modulation_order = int(most_frequent_value)
+        mcs_indices = np.asarray(mcs_feedback_report[3], dtype=np.int64)
 
-        values, counts = np.unique(code_rate_arr, return_counts=True)
-        most_frequent_value = values[np.argmax(counts)]
-        cfg.code_rate = most_frequent_value
+        # The current PHY still uses one global MCS.  Select that MCS jointly
+        # (rather than taking independent Qm/rate modes) and exclude 38.214
+        # entries that Sionna's unsegmented LDPC block cannot construct.
+        _, _, mcs_candidates = get_link_adaptation_table("38.214")
+        mcs_indices = project_mcs_indices_to_sionna_supported(
+            mcs_indices,
+            mcs_candidates,
+            mu_mimo.ldpc_n,
+        )
+        values, counts = np.unique(mcs_indices, return_counts=True)
+        selected_mcs_index = int(values[np.argmax(counts)])
+        cfg.modulation_order = int(mcs_candidates[selected_mcs_index, 0])
+        cfg.code_rate = float(mcs_candidates[selected_mcs_index, 1])
 
         # print("\n", "Bits per stream per user (MU-MIMO) = ", cfg.modulation_order)
         # print("Code-rate per stream per user (MU-MIMO) = ", cfg.code_rate, "\n")
@@ -763,6 +1069,43 @@ def sim_mu_mimo_all(
     :param ns3cfg: ns-3 channel settings
     """
 
+    # Synchronization is performed once before each drop. RU 0 is the fixed
+    # reference and is inserted by add_*_offset; these arrays describe only
+    # the mobile RUs. Both residuals remain fixed throughout the drop.
+    rng = np.random.default_rng(int(cfg.drop_idx))
+    num_mobile_rus = int(ns3cfg.num_txue_sel)
+    if cfg.gen_sync_errors:
+        cfo_std_hz = float(np.asarray(cfg.cfo_sigma).reshape(-1)[0])
+        cfg.random_cfo_vals = rng.normal(
+            0.0, cfo_std_hz, size=(num_mobile_rus, 1)
+        )
+        if hasattr(cfg, "sync_timing_error_std_samples"):
+            timing_std_samples = float(cfg.sync_timing_error_std_samples)
+        else:
+            sto_std_ns = float(np.asarray(cfg.sto_sigma).reshape(-1)[0])
+            timing_std_samples = (
+                sto_std_ns
+                * 1e-9
+                * cfg.subcarrier_spacing
+                * cfg.fft_size
+            )
+        timing_samples = np.empty((num_mobile_rus, 1), dtype=np.float64)
+        for ru_idx in range(num_mobile_rus):
+            while True:
+                candidate = rng.normal(0.0, timing_std_samples)
+                if abs(candidate) < cfg.cyclic_prefix_len:
+                    timing_samples[ru_idx, 0] = candidate
+                    break
+        sample_duration = 1.0 / (cfg.subcarrier_spacing * cfg.fft_size)
+        cfg.random_sto_vals_samples = timing_samples
+        cfg.random_sto_vals = timing_samples * sample_duration * 1e9
+    else:
+        cfg.random_cfo_vals = np.zeros((num_mobile_rus, 1), dtype=np.float64)
+        cfg.random_sto_vals_samples = np.zeros(
+            (num_mobile_rus, 1), dtype=np.float64
+        )
+        cfg.random_sto_vals = np.zeros((num_mobile_rus, 1), dtype=np.float64)
+
     slot_time = cfg.slot_duration  # default 1ms subframe/slot duration
     overhead = cfg.num_slots_p2/(cfg.num_slots_p1 + cfg.num_slots_p2)
 
@@ -781,17 +1124,25 @@ def sim_mu_mimo_all(
     per_step_throughput = []
     chan_pred_nmse = []
 
-    cfg.curr_no_rl_throughput = None
-    cfg.rl_selector = rl_selector
+    # cfg.curr_no_rl_throughput = None
+    # cfg.rl_selector = rl_selector
 
     slot_indices_all = np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2)
     slot_indices = slot_indices_all.copy()
 
-    eval_on_online_segment_only = bool(getattr(cfg, "eval_on_online_segment_only", True))
+    eval_on_online_segment_only = bool(getattr(cfg, "eval_on_online_segment_only", True)) #TODO: evaluation should always be on online segment only, there is no need for this setting
     cfg.eval_on_online_segment_only = eval_on_online_segment_only
 
-    is_configured_wesn = cfg.csi_prediction and "configured_wesn" in str(cfg.channel_prediction_method)
+    is_configured_wesn = cfg.csi_prediction and (
+        "configured_wesn" in str(cfg.channel_prediction_method)
+        or str(cfg.channel_prediction_method) == "wesn_lite"
+    )
+    is_steady_state_kalman_filter = (
+        cfg.csi_prediction
+        and "steady_state_kalman_filter" in str(cfg.channel_prediction_method)
+    )
     is_kalman_filter = cfg.csi_prediction and "kalman_filter" in str(cfg.channel_prediction_method)
+    is_full_kalman_filter = is_kalman_filter and not is_steady_state_kalman_filter
     is_channelmamba = cfg.csi_prediction and "channelmamba" in str(cfg.channel_prediction_method)
 
     offline_ratio = float(getattr(cfg, "wesn_offline_ratio", 0.5))
@@ -806,7 +1157,7 @@ def sim_mu_mimo_all(
         offline_cycles = int(np.floor(slot_indices_all.size * offline_ratio))
         offline_cycles = max(1, min(offline_cycles, slot_indices_all.size - 1))
     offline_slot_indices = slot_indices_all[:offline_cycles]
-    num_offline_cycles = int(offline_cycles)
+    num_offline_cycles = int(offline_cycles) # TODO: offline_cycles and num_offline_cycles is really the same variable. should get rid of one of them
     num_online_cycles = int(slot_indices_all.size - offline_cycles)
 
     if eval_on_online_segment_only and is_kalman_filter:
@@ -814,17 +1165,24 @@ def sim_mu_mimo_all(
             raise ValueError("Kalman filter evaluation requires at least two cycles (offline + online).")
         slot_indices = slot_indices_all[offline_cycles:]
 
-    if is_configured_wesn:
-        configured_wesn_split_mode = str(getattr(cfg, "configured_wesn_split_mode", "within_drop")).lower()
+    if is_configured_wesn or is_steady_state_kalman_filter or is_full_kalman_filter:
+        configured_wesn_split_mode = (
+            str(getattr(cfg, "configured_wesn_split_mode", "within_drop")).lower()
+            if is_configured_wesn
+            else "within_drop"
+        )
         if configured_wesn_split_mode not in ("within_drop", "across_drops"):
             raise ValueError(
                 f"Unsupported configured_wesn_split_mode='{configured_wesn_split_mode}'. "
                 "Expected 'within_drop' or 'across_drops'."
             )
         if slot_indices_all.size <= 1:
-            raise ValueError("Configured WESN requires at least two cycles (offline + online).")
+            raise ValueError(
+                "Configured channel prediction requires at least two cycles "
+                "(offline + online)."
+            )
         if eval_on_online_segment_only and configured_wesn_split_mode == "within_drop":
-            slot_indices = slot_indices_all[offline_cycles:]
+            slot_indices = slot_indices_all[offline_cycles:] # TODO: isn't this already done above?
 
         # Reset UE selection. Start with all TX and RX UEs selected.
         tmp_num_rxue_sel = ns3cfg.num_rxue_sel
@@ -902,6 +1260,9 @@ def sim_mu_mimo_all(
                 freq_cov_mat=freq_cov_mat,
                 lmmse_interpolator=lmmse_interpolator,
                 use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+                sync_drop_id=cfg.drop_idx,
+                sync_phase_std_deg=getattr(cfg, "sync_phase_error_std_deg", None),
+                sync_timing_std_samples=getattr(cfg, "sync_timing_error_std_samples", None),
             )
             offline_history = np.asarray(h_hist)
             offline_err_history = np.asarray(err_hist)
@@ -939,6 +1300,9 @@ def sim_mu_mimo_all(
                             freq_cov_mat=freq_cov_mat,
                             lmmse_interpolator=lmmse_interpolator,
                             use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+                            sync_drop_id=cfg.drop_idx,
+                            sync_phase_std_deg=getattr(cfg, "sync_phase_error_std_deg", None),
+                            sync_timing_std_samples=getattr(cfg, "sync_timing_error_std_samples", None),
                         )
                         per_drop_h_hist.append(np.asarray(h_hist_one))
                         per_drop_err_hist.append(np.asarray(err_hist_one))
@@ -958,12 +1322,71 @@ def sim_mu_mimo_all(
             offline_history = np.concatenate(pooled_h_hist_per_drop, axis=0)
             offline_err_history = np.concatenate(pooled_err_hist_per_drop, axis=0)
             slot_indices = slot_indices_all
-        cfg.configured_wesn_predictors = build_configured_predictors_simple(
-            offline_history,
-            rc_config,
-            ns3cfg,
-            err_var_csi_history=offline_err_history,
-        )
+        if is_configured_wesn:
+            with measure_phase(
+                cfg,
+                "configuration_system",
+                method=str(cfg.channel_prediction_method),
+                links=int((ns3cfg.num_txue_sel + 1) * (ns3cfg.num_rxue_sel + 1)),
+            ):
+                cfg.configured_wesn_predictors = build_configured_predictors_simple(
+                    offline_history,
+                    rc_config,
+                    ns3cfg,
+                    err_var_csi_history=offline_err_history,
+                )
+        elif is_steady_state_kalman_filter:
+            with measure_phase(
+                cfg,
+                "configuration_system",
+                method=str(cfg.channel_prediction_method),
+                links=int((ns3cfg.num_txue_sel + 1) * (ns3cfg.num_rxue_sel + 1)),
+            ):
+                cfg.steady_state_kalman_predictors = (
+                    build_steady_state_kalman_predictors_simple(
+                        offline_history,
+                        offline_err_history,
+                        rc_config,
+                        ns3cfg,
+                    )
+                )
+            riccati_counts = [
+                predictor.riccati_iterations
+                for predictor in cfg.steady_state_kalman_predictors.values()
+            ]
+            print(
+                f"[steady_state_kf] drop={cfg.drop_idx}: configured "
+                f"{len(riccati_counts)} link predictors from "
+                f"{offline_history.shape[0]} offline samples; "
+                f"Riccati iterations min/mean/max="
+                f"{min(riccati_counts)}/{np.mean(riccati_counts):.1f}/"
+                f"{max(riccati_counts)}"
+            )
+        else:
+            with measure_phase(
+                cfg,
+                "configuration_system",
+                method=str(cfg.channel_prediction_method),
+                links=int((ns3cfg.num_txue_sel + 1) * (ns3cfg.num_rxue_sel + 1)),
+            ):
+                cfg.kalman_filter_predictor = kalman_filter_pred(
+                    ar_order=rc_config.window_length,
+                    debug=False,
+                    reconfiguration_interval=1,
+                )
+                # Initialize from the drop-local offline segment. During the
+                # online phase, reconfiguration_interval=1 refits F and Q and
+                # refreshes R from every current causal history window, then
+                # replays that window to form the one-step prediction.
+                cfg.kalman_filter_predictor.predict(
+                    offline_history,
+                    offline_err_history,
+                )
+            print(
+                f"[full_kf] drop={cfg.drop_idx}: initialized from "
+                f"{offline_history.shape[0]} offline samples; "
+                "F/Q/R refresh every prediction"
+            )
 
     if is_channelmamba:
         from dmimo.channel.channelmamba_pred import build_channelmamba_predictors_simple
@@ -1122,6 +1545,9 @@ def sim_mu_mimo_all(
                             freq_cov_mat=freq_cov_mat,
                             lmmse_interpolator=lmmse_interpolator,
                             use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+                            sync_drop_id=cfg.drop_idx,
+                            sync_phase_std_deg=getattr(cfg, "sync_phase_error_std_deg", None),
+                            sync_timing_std_samples=getattr(cfg, "sync_timing_error_std_samples", None),
                         )
                         per_drop_blocks.append(np.asarray(h_hist_one))
                     if len(per_drop_blocks) == 0:
@@ -1246,6 +1672,33 @@ def sim_mu_mimo_all(
     chan_pred_nmse = np.array(chan_pred_nmse)
 
     print("Drop {}, {} Average Prediction NMSE: {}".format(cfg.drop_idx, cfg.channel_prediction_method, np.mean(chan_pred_nmse)))
+    predictor_map = (
+        getattr(cfg, "configured_wesn_predictors", None)
+        or getattr(cfg, "steady_state_kalman_predictors", None)
+    )
+    if predictor_map:
+        cfg.predictor_complexity_metrics["persistent_predictor_bytes"] = int(
+            sum(numpy_storage_bytes(predictor) for predictor in predictor_map.values())
+        )
+        cfg.predictor_complexity_metrics["num_link_predictors"] = int(len(predictor_map))
+        cfg.predictor_complexity_metrics["predictor_workers"] = int(
+            getattr(cfg, "predictor_workers", 1)
+        )
+        cfg.predictor_complexity_metrics["per_link_predictor_phases"] = {
+            f"{tx_idx}:{rx_idx}": phase_summary(predictor.predictor_complexity_metrics)
+            for (tx_idx, rx_idx), predictor in predictor_map.items()
+            if hasattr(predictor, "predictor_complexity_metrics")
+        }
+        residue_rank_summary = _summarize_wesn_residue_ranks(predictor_map)
+        if residue_rank_summary is not None:
+            cfg.predictor_complexity_metrics[
+                "wesn_residue_rank_summary"
+            ] = residue_rank_summary
+            print(f"WESN residue rank summary: {residue_rank_summary}")
+    cfg.predictor_complexity_summary = phase_summary(
+        getattr(cfg, "predictor_complexity_metrics", {"schema_version": 1, "phases": {}})
+    )
+    print(f"Predictor complexity summary: {cfg.predictor_complexity_summary}")
     print("Drop {}, Average throughput: {:.2f} Mbps".format(cfg.drop_idx, throughput))
     print("Drop {}, Average uncoded BER: {:.2f}\n".format(cfg.drop_idx, uncoded_ber / num_cycles_used_for_avg))
 

@@ -2,7 +2,7 @@
 
 # Array of arguments
 # declare -a mobilities=("low_mobility" "medium_mobility" "high_mobility")
-declare -a mobilities=("highest_mobility")
+declare -a mobilities=("higher_mobility" "highest_mobility" "high_mobility")
 # declare -a drop_idx=("26" "27" "28" "29" "30" "31" "32" "33" "34" "35" "36" "37" "38" "39" "43" "44" "45")
 # declare -a drop_idx=("1")
 declare -a drop_idx=($(seq 1 20))
@@ -16,9 +16,9 @@ declare -a csi_quantization_arr=("True")
 
 # Residual synchronization sweep. The values are standard deviations from the
 # paper: phase in degrees and timing in normalized baseband samples.
-declare -a sync_errors_arr=("False")
-declare -a sync_phase_std_deg_arr=("0")
-declare -a sync_timing_std_samples_arr=("0")
+declare -a sync_errors_arr=("False" "True")
+declare -a sync_phase_std_deg_arr=("0" "3.6" "18" "36" "45" "90")
+declare -a sync_timing_std_samples_arr=("0" "0.05" "0.1" "0.2" "0.5")
 
 link_adapt="True"
 
@@ -35,12 +35,12 @@ export WESN_LITE_ESN_K=${WESN_LITE_ESN_K:-4}
 export WESN_LITE_RESIDUE_ENERGY=${WESN_LITE_RESIDUE_ENERGY:-0.9}
 export WESN_LITE_READOUT_MODE=${WESN_LITE_READOUT_MODE:-centered_ridge}
 export WESN_LITE_SUBCARRIERS_PER_RB=${WESN_LITE_SUBCARRIERS_PER_RB:-12}
-export BALANCED_LITE_HANKEL_ENERGY=${BALANCED_LITE_HANKEL_ENERGY:-0.80}
+export BALANCED_LITE_HANKEL_ENERGY=${BALANCED_LITE_HANKEL_ENERGY:-0.90}
 export PREDICTOR_WORKERS=${PREDICTOR_WORKERS:-8}
 # Link-level parallelism supplies the concurrency. Prevent every worker from
 # independently starting a full OpenBLAS thread team.
 export OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
-export DMIMO_PHASE_1_ENABLED=False
+export DMIMO_PHASE_1_ENABLED=True
 export DMIMO_PHASE_3_ENABLED=False
 export DMIMO_NUM_SLOTS_P1=2
 export DMIMO_NUM_SLOTS_P2=2
@@ -116,7 +116,7 @@ run_scenario() {
         DMIMO_GEN_SYNC_ERRORS="${sync_errors}" \
         DMIMO_SYNC_PHASE_STD_DEG="${phase_std_deg}" \
         DMIMO_SYNC_TIMING_STD_SAMPLES="${timing_std_samples}" \
-        python sims/sim_mu_mimo_testing_updates.py "${args[@]:0:10}"
+        python sims/sim_mu_mimo_testing_updates_w_p1.py "${args[@]:0:10}"
 }
 
 for scenario in "${scenario_args[@]}"; do

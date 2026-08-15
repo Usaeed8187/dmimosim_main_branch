@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import sys
 import os
+import types
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.sparse.linalg import eigsh
@@ -12,6 +13,16 @@ from scipy.sparse.linalg import lsqr
 dmimo_root = os.path.abspath(os.path.dirname(__file__) + "/..")
 sys.path.append(dmimo_root)
 
+# Avoid importing the full TensorFlow/PyTorch simulation stack; this standalone
+# experiment needs only the NumPy/SciPy Kalman predictor module.
+if "dmimo" not in sys.modules:
+    dmimo_package = types.ModuleType("dmimo")
+    dmimo_package.__path__ = [os.path.join(dmimo_root, "dmimo")]
+    sys.modules["dmimo"] = dmimo_package
+if "dmimo.channel" not in sys.modules:
+    channel_package = types.ModuleType("dmimo.channel")
+    channel_package.__path__ = [os.path.join(dmimo_root, "dmimo", "channel")]
+    sys.modules["dmimo.channel"] = channel_package
 
 from dmimo.channel.kalman_filter_pred import kalman_filter_pred
 
@@ -71,7 +82,23 @@ def load_clean_p2p_channels(
     h_list = []
     for s in selected_slots:
         with np.load(by_slot[s]) as data:
-            hdm = data["Hdm"]  # [all_rx_ant, all_tx_ant, num_syms, num_sc]
+            if "Hdm" in data:
+                # [all_rx_ant, all_tx_ant, num_syms, num_sc]
+                hdm = data["Hdm"]
+            elif "h_freq_csi" in data:
+                # Saved estimator format:
+                # [batch, rx_node, rx_ant, tx_node, tx_ant, sym, sc]
+                saved_csi = np.asarray(data["h_freq_csi"])
+                if saved_csi.ndim != 7:
+                    raise ValueError(
+                        f"Unexpected h_freq_csi shape {saved_csi.shape} in {by_slot[s]}"
+                    )
+                hdm = saved_csi[0, 0, :, 0, :, :, :]
+            else:
+                raise KeyError(
+                    f"Expected 'Hdm' or 'h_freq_csi' in {by_slot[s]}; "
+                    f"found {data.files}."
+                )
         h_p2p = hdm[:rx_ant, :tx_ant, :, :].astype(np.complex128)
         h_list.append(h_p2p)
 
@@ -262,7 +289,8 @@ class ConfiguredWeightsESN:
         input_scale: float = 0.15,
     ):
         # poles: [M, K], residues: [M, d_out*d_in, K]
-        self.poles = poles.astype(np.complex128)
+        self.raw_poles = poles.astype(np.complex128)
+        self.poles = self.raw_poles.copy()
         self.residues = residues.astype(np.complex128)
         self.num_basis = residues.shape[0]
         self.num_terms = residues.shape[2]
@@ -295,6 +323,99 @@ class ConfiguredWeightsESN:
         pre_act = self.W_res[..., None] * self.state + driven
         self.state = apply_complex_activation(pre_act, self.activation)
         return self.state
+
+
+class LowRankConfiguredWeightsESN:
+    """Low-rank configured reservoir built from the pole residues.
+
+    For each residue C = U Sigma V^H, retain the smallest rank containing the
+    requested Frobenius energy and realize
+
+        x[t] = p*x[t-1] + Sigma_r*V_r^H*u[t],
+        y[t] = U_r*x[t].
+
+    With identity activation this is the direct truncated linear realization.
+    With tanh it uses the same configured factors as nonlinear reservoir
+    features, followed by the selected trained readout.
+    """
+
+    def __init__(
+        self,
+        poles: np.ndarray,
+        residues: np.ndarray,
+        d_out: int,
+        d_in: int,
+        energy_threshold: float = 0.95,
+        activation: str = "tanh",
+    ):
+        if d_out != d_in:
+            raise ValueError("WESN-Lite currently expects square D-by-D residues.")
+        if not (0.0 < float(energy_threshold) <= 1.0):
+            raise ValueError("energy_threshold must be in (0, 1].")
+
+        recurrent_weights = []
+        input_rows = []
+        output_columns = []
+        ranks = []
+        retained_energies = []
+
+        for mode_idx in range(poles.shape[0]):
+            for pole_idx in range(poles.shape[1]):
+                # vectorize_transfer_samples() stores vec(C) as C.T.reshape(-1).
+                residue = residues[mode_idx, :, pole_idx].reshape(d_in, d_out).T
+                u, singular_values, vh = np.linalg.svd(
+                    residue, full_matrices=False
+                )
+                energy = singular_values**2
+                total_energy = float(np.sum(energy))
+                if total_energy <= np.finfo(np.float64).eps:
+                    rank = 1
+                    retained = 1.0
+                else:
+                    cumulative = np.cumsum(energy) / total_energy
+                    rank = int(
+                        np.searchsorted(cumulative, energy_threshold, side="left")
+                    ) + 1
+                    rank = min(max(rank, 1), singular_values.size)
+                    retained = float(cumulative[rank - 1])
+
+                ranks.append(rank)
+                retained_energies.append(retained)
+                for factor_idx in range(rank):
+                    recurrent_weights.append(poles[mode_idx, pole_idx])
+                    input_rows.append(
+                        singular_values[factor_idx] * vh[factor_idx]
+                    )
+                    output_columns.append(u[:, factor_idx])
+
+        self.W_res = np.asarray(recurrent_weights, dtype=np.complex128)
+        self.W_in = np.asarray(input_rows, dtype=np.complex128)
+        self.W_out_reference = np.stack(output_columns, axis=1).astype(
+            np.complex128
+        )
+        self.state_dim = int(self.W_res.size)
+        self.d_out = int(d_out)
+        self.d_in = int(d_in)
+        self.ranks = np.asarray(ranks, dtype=np.int64)
+        self.retained_energies = np.asarray(
+            retained_energies, dtype=np.float64
+        )
+        self.energy_threshold = float(energy_threshold)
+        self.activation = str(activation)
+
+    def rank_summary(self) -> dict:
+        unique, counts = np.unique(self.ranks, return_counts=True)
+        return {
+            "threshold": self.energy_threshold,
+            "retained_energy_min": float(np.min(self.retained_energies)),
+            "retained_energy_mean": float(np.mean(self.retained_energies)),
+            "mean": float(np.mean(self.ranks)),
+            "median": float(np.median(self.ranks)),
+            "mode": int(unique[np.argmax(counts)]),
+            "min": int(np.min(self.ranks)),
+            "max": int(np.max(self.ranks)),
+            "state_dimension": self.state_dim,
+        }
 
 def apply_complex_activation(x: np.ndarray, activation: str) -> np.ndarray:
     if activation == "identity":
@@ -364,6 +485,24 @@ def collect_esn_states_per_tile(esn, y_hist_chunk: np.ndarray) -> np.ndarray:
     return feats
 
 
+def collect_low_rank_esn_states_per_tile(
+    esn: LowRankConfiguredWeightsESN,
+    y_hist_chunk: np.ndarray,
+) -> np.ndarray:
+    """Roll out the low-rank configured reservoir for every channel tile."""
+    t_len, ntiles, _ = y_hist_chunk.shape
+    features = np.zeros(
+        (t_len, ntiles, esn.state_dim), dtype=np.complex128
+    )
+    state = np.zeros((ntiles, esn.state_dim), dtype=np.complex128)
+    for t in range(t_len):
+        driven = y_hist_chunk[t].astype(np.complex128) @ esn.W_in.T
+        preactivation = state * esn.W_res[None, :] + driven
+        state = apply_complex_activation(preactivation, esn.activation)
+        features[t] = state
+    return features
+
+
 def ls_readout_train_predict_next(
     feat_hist: np.ndarray,
     target_hist: np.ndarray,
@@ -383,6 +522,38 @@ def ls_readout_train_predict_next(
     W_out = gain @ y_train
     _ = target_next
     return z_test @ W_out
+
+
+def centered_ridge_readout_train_predict_next(
+    feat_hist: np.ndarray,
+    target_hist: np.ndarray,
+    reference_readout: np.ndarray,
+    reg: float = 1e-2,
+) -> np.ndarray:
+    """Fit a full readout while penalizing departure from its configured value."""
+    z_train = feat_hist[:-1].reshape(-1, feat_hist.shape[-1])
+    y_train = target_hist[1:].reshape(-1, target_hist.shape[-1])
+    z_test = feat_hist[-1]
+    if reference_readout.shape != (y_train.shape[1], z_train.shape[1]):
+        raise ValueError(
+            "reference_readout must have shape [output_dim, feature_dim]."
+        )
+
+    # min_B ||Y-ZB||_F^2/N + reg*||B-B_ref||_F^2
+    num_samples = z_train.shape[0]
+    reg_normal_eq = num_samples * float(reg)
+    gram = z_train.conj().T @ z_train + reg_normal_eq * np.eye(
+        z_train.shape[1], dtype=np.complex128
+    )
+    rhs = (
+        z_train.conj().T @ y_train
+        + reg_normal_eq * reference_readout.T
+    )
+    try:
+        fitted_readout_t = np.linalg.solve(gram, rhs)
+    except np.linalg.LinAlgError:
+        fitted_readout_t = np.linalg.pinv(gram) @ rhs
+    return z_test @ fitted_readout_t
 
 
 def steady_state_predictor_transfer_samples_from_kalman(
@@ -622,7 +793,10 @@ def evaluate_nmse_over_chunks(
     seed: int,
     offline_ratio: float = 0.5,
     run_diagnostics: bool = False,
-) -> tuple[float, float, float, float]:
+    wesn_lite_energy: float = 0.95,
+    wesn_lite_readout_reg: float = 1e-4,
+    wesn_lite_readout_mode: str = "centered-ridge",
+) -> tuple[float, float, float, float, float, dict]:
     rng = np.random.default_rng(seed)
 
     h_noisy_dec, noise_var = add_complex_awgn(h_clean_dec, snr_db, rng)
@@ -679,6 +853,19 @@ def evaluate_nmse_over_chunks(
         activation=activation,
         diagnostics=diag_info,
     )
+    wesn_lite = LowRankConfiguredWeightsESN(
+        # Use the exact same configured poles as the full WESN so this test
+        # isolates residue-rank truncation rather than changing the dynamics.
+        poles=configured_esn.poles,
+        residues=configured_esn.residues,
+        d_out=d,
+        d_in=d,
+        energy_threshold=wesn_lite_energy,
+        activation=activation,
+    )
+    wesn_lite_rank_summary = wesn_lite.rank_summary()
+    if diag_info is not None:
+        diag_info["wesn_lite_rank_summary"] = wesn_lite_rank_summary
     random_esn = build_random_esn(
         d=d,
         num_basis=num_basis,
@@ -693,10 +880,13 @@ def evaluate_nmse_over_chunks(
     den_ss = 0.0
     num_cfg = 0.0
     den_cfg = 0.0
+    num_lite = 0.0
+    den_lite = 0.0
     num_rand = 0.0
     den_rand = 0.0
 
     cond_cfg_vals = []
+    cond_lite_vals = []
     cond_rand_vals = []
 
     for s in range(0, online_len - history_len):
@@ -715,20 +905,51 @@ def evaluate_nmse_over_chunks(
         x_pred_full = full_kalman_predict_next_batch(y_hist_chunk, f_aug, q_aug, r_diag)
         x_pred_ss = steady_kalman_predict_next_batch(y_hist_chunk, f_aug, k_ss)
         esn_states_cfg = collect_esn_states_per_tile(configured_esn, y_hist_chunk)
+        esn_states_lite = collect_low_rank_esn_states_per_tile(
+            wesn_lite, y_hist_chunk
+        )
         esn_states_rand = collect_esn_states_per_tile(random_esn, y_hist_chunk)
         x_pred_cfg = ls_readout_train_predict_next(
             esn_states_cfg, y_hist_chunk, x_true_next, reg=ls_reg
         )
+        if wesn_lite_readout_mode == "matched-ridge":
+            x_pred_lite = ls_readout_train_predict_next(
+                esn_states_lite, y_hist_chunk, x_true_next, reg=ls_reg
+            )
+        elif wesn_lite_readout_mode == "centered-ridge":
+            x_pred_lite = centered_ridge_readout_train_predict_next(
+                esn_states_lite,
+                y_hist_chunk,
+                reference_readout=wesn_lite.W_out_reference,
+                reg=wesn_lite_readout_reg,
+            )
+        else:
+            raise ValueError(
+                "wesn_lite_readout_mode must be 'matched-ridge' or "
+                f"'centered-ridge', got {wesn_lite_readout_mode!r}."
+            )
         x_pred_rand = ls_readout_train_predict_next(
             esn_states_rand, y_hist_chunk, x_true_next, reg=ls_reg
         )
 
         if run_diagnostics:
             z_cfg = esn_states_cfg[:-1].reshape(-1, esn_states_cfg.shape[-1])
+            z_lite = esn_states_lite[:-1].reshape(
+                -1, esn_states_lite.shape[-1]
+            )
             z_rand = esn_states_rand[:-1].reshape(-1, esn_states_rand.shape[-1])
             gram_cfg = z_cfg.conj().T @ z_cfg + ls_reg * np.eye(z_cfg.shape[1], dtype=np.complex128)
+            lite_normal_reg = (
+                ls_reg
+                if wesn_lite_readout_mode == "matched-ridge"
+                else z_lite.shape[0] * wesn_lite_readout_reg
+            )
+            gram_lite = z_lite.conj().T @ z_lite + lite_normal_reg * np.eye(
+                z_lite.shape[1], dtype=np.complex128
+            )
             gram_rand = z_rand.conj().T @ z_rand + ls_reg * np.eye(z_rand.shape[1], dtype=np.complex128)
             cond_cfg_vals.append(float(np.linalg.cond(gram_cfg)))
+            cond_lite_vals.append(float(np.linalg.cond(gram_lite)))
             cond_rand_vals.append(float(np.linalg.cond(gram_rand)))
 
         num_full += float(np.sum(np.abs(x_pred_full - x_true_next) ** 2))
@@ -739,6 +960,9 @@ def evaluate_nmse_over_chunks(
 
         num_cfg += float(np.sum(np.abs(x_pred_cfg - x_true_next) ** 2))
         den_cfg += float(np.sum(np.abs(x_true_next) ** 2))
+
+        num_lite += float(np.sum(np.abs(x_pred_lite - x_true_next) ** 2))
+        den_lite += float(np.sum(np.abs(x_true_next) ** 2))
         
         num_rand += float(np.sum(np.abs(x_pred_rand - x_true_next) ** 2))
         den_rand += float(np.sum(np.abs(x_true_next) ** 2))
@@ -746,6 +970,7 @@ def evaluate_nmse_over_chunks(
     nmse_full = num_full / max(den_full, 1e-15)
     nmse_ss = num_ss / max(den_ss, 1e-15)
     nmse_cfg = num_cfg / max(den_cfg, 1e-15)
+    nmse_lite = num_lite / max(den_lite, 1e-15)
     nmse_rand = num_rand / max(den_rand, 1e-15)
 
     if run_diagnostics and diag_info is not None:
@@ -778,12 +1003,25 @@ def evaluate_nmse_over_chunks(
             f"p90={diag_info['configured_residue_mag_p90']:.3e}, "
             f"max={diag_info['configured_residue_mag_max']:.3e}"
         )
+        lite_rank = diag_info["wesn_lite_rank_summary"]
+        print(
+            "WESN-Lite residue ranks: "
+            f"mean={lite_rank['mean']:.2f}, median={lite_rank['median']:.1f}, "
+            f"mode={lite_rank['mode']}, range=[{lite_rank['min']}, {lite_rank['max']}], "
+            f"R={lite_rank['state_dimension']}, "
+            f"retained energy mean={lite_rank['retained_energy_mean']:.3f}"
+        )
         if len(cond_cfg_vals) > 0 and len(cond_rand_vals) > 0:
             cfg_cond = np.asarray(cond_cfg_vals)
+            lite_cond = np.asarray(cond_lite_vals)
             rand_cond = np.asarray(cond_rand_vals)
             print(
                 f"LS Gram cond (configured): median={np.median(cfg_cond):.3e}, "
                 f"p90={np.quantile(cfg_cond, 0.90):.3e}, max={np.max(cfg_cond):.3e}"
+            )
+            print(
+                f"LS Gram cond (WESN-Lite): median={np.median(lite_cond):.3e}, "
+                f"p90={np.quantile(lite_cond, 0.90):.3e}, max={np.max(lite_cond):.3e}"
             )
             print(
                 f"LS Gram cond (random): median={np.median(rand_cond):.3e}, "
@@ -795,7 +1033,14 @@ def evaluate_nmse_over_chunks(
         )
         print("[/ESN diagnostics]\n")
 
-    return nmse_ss, nmse_full, nmse_cfg, nmse_rand
+    return (
+        nmse_ss,
+        nmse_full,
+        nmse_cfg,
+        nmse_lite,
+        nmse_rand,
+        wesn_lite_rank_summary,
+    )
 
 
 def main():
@@ -806,10 +1051,10 @@ def main():
     parser.add_argument("--start-slot", type=int, default=1)
     parser.add_argument("--end-slot", type=int, default=100)
     parser.add_argument("--feedback-delay", type=int, default=4)
-    parser.add_argument("--history-len", type=int, default=8)
+    parser.add_argument("--history-len", type=int, default=4)
     parser.add_argument("--ar-order", type=int, default=2)
-    parser.add_argument("--esn-m", "--fb-m", dest="esn_m", type=int, default=4, help="Number of configured/random ESN basis vectors")
-    parser.add_argument("--esn-k", "--fb-k", dest="esn_k", type=int, default=4, help="Rational polynomial degree and ESN modal terms")
+    parser.add_argument("--esn-m", "--fb-m", dest="esn_m", type=int, default=3, help="Number of configured/random ESN basis vectors")
+    parser.add_argument("--esn-k", "--fb-k", dest="esn_k", type=int, default=3, help="Rational polynomial degree and ESN modal terms")
     parser.add_argument("--esn-num-freqs", "--fb-num-freqs", dest="esn_num_freqs", type=int, default=64, help="Frequency samples for transfer statistics")
     parser.add_argument(
         "--esn-activation", "--fb-activation",
@@ -826,10 +1071,31 @@ def main():
         default=1e-4,
         help="Ridge regularization used by ESN readout solve",
     )
+    parser.add_argument(
+        "--wesn-lite-energy",
+        type=float,
+        default=0.90,
+        help="Per-residue singular-value energy retained by WESN-Lite.",
+    )
+    parser.add_argument(
+        "--wesn-lite-readout-reg",
+        type=float,
+        default=1e-4,
+        help="Reference-centered ridge regularization for WESN-Lite.",
+    )
+    parser.add_argument(
+        "--wesn-lite-readout-mode",
+        choices=["matched-ridge", "centered-ridge"],
+        default="centered-ridge",
+        help=(
+            "Use the configured WESN's ridge objective to isolate rank "
+            "truncation, or use the experimental U_r-centered objective."
+        ),
+    )
     parser.add_argument("--rx-ant", type=int, default=4)
     parser.add_argument("--tx-ant", type=int, default=4)
-    parser.add_argument("--snr-start", type=int, default=0)
-    parser.add_argument("--snr-stop", type=int, default=31)
+    parser.add_argument("--snr-start", type=int, default=5)
+    parser.add_argument("--snr-stop", type=int, default=16)
     parser.add_argument("--snr-step", type=int, default=5)
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument(
@@ -846,6 +1112,13 @@ def main():
         help="Print diagnostics for configured-ESN hyperparameter selection (K_vv spectrum, pole/residue stats, LS conditioning).",
     )
     args = parser.parse_args()
+
+    if args.esn_activation != "identity":
+        print(
+            "WARNING: WESN-Lite preserves the configured transfer only for "
+            "--esn-activation identity. With a nonlinear activation, the SVD "
+            "factorization defines a different reservoir."
+        )
 
     save_path = f"results/kalman_p2p_nmse_vs_snr_data_activation_{args.esn_activation}_{args.mobility}.npz"
 
@@ -867,10 +1140,21 @@ def main():
     nmse_ss_vals = []
     nmse_full_vals = []
     nmse_cfg_vals = []
+    nmse_lite_vals = []
     nmse_rand_vals = []
+    wesn_lite_rank_mean_vals = []
+    wesn_lite_rank_mode_vals = []
+    wesn_lite_state_dim_vals = []
 
     for snr_db in snr_vals:
-        nmse_ss, nmse_full, nmse_cfg, nmse_rand = evaluate_nmse_over_chunks(
+        (
+            nmse_ss,
+            nmse_full,
+            nmse_cfg,
+            nmse_lite,
+            nmse_rand,
+            lite_rank,
+        ) = evaluate_nmse_over_chunks(
             h_clean_dec=h_clean_dec,
             snr_db=float(snr_db),
             history_len=args.history_len,
@@ -883,14 +1167,24 @@ def main():
             seed=args.seed,
             offline_ratio=float(args.offline_ratio),
             run_diagnostics=bool(args.esn_diagnostics),
+            wesn_lite_energy=float(args.wesn_lite_energy),
+            wesn_lite_readout_reg=float(args.wesn_lite_readout_reg),
+            wesn_lite_readout_mode=str(args.wesn_lite_readout_mode),
         )
         nmse_ss_vals.append(nmse_ss)
         nmse_full_vals.append(nmse_full)
         nmse_cfg_vals.append(nmse_cfg)
+        nmse_lite_vals.append(nmse_lite)
         nmse_rand_vals.append(nmse_rand)
+        wesn_lite_rank_mean_vals.append(lite_rank["mean"])
+        wesn_lite_rank_mode_vals.append(lite_rank["mode"])
+        wesn_lite_state_dim_vals.append(lite_rank["state_dimension"])
         print(
             f"SNR={snr_db:>2d} dB | NMSE steady={nmse_ss:.4e}, full={nmse_full:.4e}, "
-            f"configured_esn={nmse_cfg:.4e}, random_esn={nmse_rand:.4e}"
+            f"configured_esn={nmse_cfg:.4e}, wesn_lite={nmse_lite:.4e}, "
+            f"random_esn={nmse_rand:.4e} | WESN-Lite "
+            f"rank mean={lite_rank['mean']:.2f}, mode={lite_rank['mode']}, "
+            f"R={lite_rank['state_dimension']}"
         )
 
         hold = 1
@@ -898,6 +1192,7 @@ def main():
     nmse_ss_vals = np.asarray(nmse_ss_vals)
     nmse_full_vals = np.asarray(nmse_full_vals)
     nmse_cfg_vals = np.asarray(nmse_cfg_vals)
+    nmse_lite_vals = np.asarray(nmse_lite_vals)
     nmse_rand_vals = np.asarray(nmse_rand_vals)
 
     out_path = Path(args.plot_path)
@@ -932,6 +1227,18 @@ def main():
     )
     ax.plot(
         snr_vals,
+        nmse_lite_vals,
+        marker="v",
+        color="tab:brown",
+        linestyle="--",
+        linewidth=2.0,
+        markersize=6.0,
+        markerfacecolor="white",
+        markeredgewidth=1.2,
+        label="WESN-Lite",
+    )
+    ax.plot(
+        snr_vals,
         nmse_rand_vals,
         marker="d",
         color="0.45",
@@ -943,7 +1250,7 @@ def main():
     )
 
     ax.set_xlabel("SNR (dB)")
-    ax.set_ylabel("NMSE")
+    ax.set_ylabel("Channel prediction NMSE")
 
     ax.grid(True, which="major", linestyle="-", linewidth=0.35, alpha=0.25)
     ax.minorticks_on()
@@ -964,7 +1271,14 @@ def main():
         nmse_ss_vals=nmse_ss_vals,
         nmse_full_vals=nmse_full_vals,
         nmse_cfg_vals=nmse_cfg_vals,
+        nmse_lite_vals=nmse_lite_vals,
         nmse_rand_vals=nmse_rand_vals,
+        wesn_lite_energy=np.asarray(args.wesn_lite_energy),
+        wesn_lite_readout_reg=np.asarray(args.wesn_lite_readout_reg),
+        wesn_lite_readout_mode=np.asarray(args.wesn_lite_readout_mode),
+        wesn_lite_rank_mean_vals=np.asarray(wesn_lite_rank_mean_vals),
+        wesn_lite_rank_mode_vals=np.asarray(wesn_lite_rank_mode_vals),
+        wesn_lite_state_dim_vals=np.asarray(wesn_lite_state_dim_vals),
     )
     print(f"Saved raw NMSE data to: {save_path}")
 

@@ -375,12 +375,19 @@ class LMMSEInterpolator1D:
         # The other dimension of the resource grid is referred to
         # as the outer dimension.
 
+        # Pilot-pattern dimensions are static during construction. Keep them
+        # as Python integers: scalar EagerTensors in the NumPy/Python loops
+        # below cause repeated Tensor-to-int conversions and can surface as a
+        # misleading "setting an array element with a sequence" failure when
+        # a process is interrupted or heavily contended.
+        pilot_mask = np.asarray(pilot_mask)
+
         # Size of the inner dimension.
-        inner_dim_size = tf.shape(pilot_mask)[-1]
+        inner_dim_size = int(pilot_mask.shape[-1])
         self._inner_dim_size = inner_dim_size
 
         # Size of the outer dimension.
-        outer_dim_size = tf.shape(pilot_mask)[-2]
+        outer_dim_size = int(pilot_mask.shape[-2])
         self._outer_dim_size = outer_dim_size
 
         self._cov_mat = cov_mat
@@ -397,8 +404,8 @@ class LMMSEInterpolator1D:
         # according to the pilot pattern along the inner axis.
 
         # Extracting the locations of pilots from the pilot mask
-        num_tx = tf.shape(pilot_mask)[0]
-        num_streams_per_tx = tf.shape(pilot_mask)[1]
+        num_tx = int(pilot_mask.shape[0])
+        num_streams_per_tx = int(pilot_mask.shape[1])
 
         # List of indices of pilots in the inner dimension for every
         # transmit antenna, stream, and outer dimension element.
@@ -869,4 +876,3 @@ class LMMSELinearInterp(BaseChannelInterpolator):
         err_var = err_var*err_var_mask
 
         return h_hat, err_var
-

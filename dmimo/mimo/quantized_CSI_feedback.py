@@ -1419,42 +1419,30 @@ class quantized_CSI_feedback(Layer):
 
             elif self.num_tx_streams == 2:
 
-                raise ValueError("This branch needs to be updated")
-
                 i_11 = np.arange(0, self.N_1 * self.O_1)
                 i_12 = np.arange(0, self.N_2 * self.O_2)
-                i_13 = np.arange(0,2)
-                k_1 = np.array((0, self.O_1))
-                k_2 = np.array((0, 0))
-                i_2 = np.arange(0,2)
+                k_1_all = np.arange(0,4) * self.O_1
+                k_2_all = np.arange(0, 1)
 
                 l_all = i_11
                 m_all = i_12
-                n_all = i_2
 
-                W = np.zeros((len(l_all), len(m_all), len(i_13), len(n_all), N_t, self.num_tx_streams), dtype=complex)
+                W = np.zeros((len(i_11), len(k_1_all), len(i_12), len(k_2_all), N_t, self.num_tx_streams), dtype=complex)
 
-                for l in l_all:
-                    for m in m_all:
-                        for i_13_idx in i_13:
-                            
+                for l in i_11:
+                    for k_1_idx, k_1 in enumerate(k_1_all):
+                        l_ = l + k_1
+                        for m in i_12:
+                            for k_2_idx, k_2 in enumerate(k_2_all):
+                                m_ = m + k_2
 
-                            l_ = l + k_1[i_13_idx]
-                            m_ = m + k_2[i_13_idx]
-
-                            v_lm = self.compute_v_lm(l, m)
-                            v_l_m_ = self.compute_v_lm(l_, m_)
-                            
-                            for n in n_all:
-
-                                phi_n = np.exp(1j * np.pi * n / 2)
-                                
-                                col_1 = np.vstack((v_lm, phi_n * v_lm))
-                                col_2 = np.vstack((v_l_m_, -phi_n * v_l_m_))
-                                W[l,m,i_13_idx,n,...] = np.hstack((col_1, col_2))
+                                v_lm = self.compute_v_lm(l, m)
+                                v_l_m_ = self.compute_v_lm(l_, m_)
+                                                                    
+                                W[l,k_1_idx,m,k_2_idx,...] = np.hstack((v_lm, v_l_m_))
                 
                 W = 1/np.sqrt(2 * P_CSI_RS) * W
-            
+
             elif self.num_tx_streams == 3:
 
                 raise ValueError("This branch needs to be updated")

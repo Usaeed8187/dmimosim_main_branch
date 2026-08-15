@@ -131,9 +131,22 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
 
     # add CFO/STO to simulate synchronization errors
     if np.any(np.not_equal(sto_vals, 0)):
-        dx_rg = add_timing_offset(dx_rg, sto_vals, channel_type=dmimo_chans.channel_type)
+        dx_rg = add_timing_offset(
+            dx_rg,
+            sto_vals,
+            subcarrier_spacing=rg.subcarrier_spacing,
+            cp_len=rg.cyclic_prefix_length,
+            channel_type=dmimo_chans.channel_type,
+        )
     if np.any(np.not_equal(cfo_vals, 0)):
-        dx_rg = add_frequency_offset(dx_rg, cfo_vals, channel_type=dmimo_chans.channel_type)
+        dx_rg = add_frequency_offset(
+            dx_rg,
+            cfo_vals,
+            subcarrier_spacing=rg.subcarrier_spacing,
+            cp_len=rg.cyclic_prefix_length,
+            channel_type=dmimo_chans.channel_type,
+            slot_idx=slot_idx,
+        )
 
     # Pass through ns3 channels
     # output has shape: [1, num_rx, num_rx_ant, num_ofdm_sym, fft_size]
@@ -193,9 +206,22 @@ def get_received_pilot_symbols(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slo
     dx_rg = rg_mapper(dx)
 
     if np.any(np.not_equal(sto_vals, 0)):
-        dx_rg = add_timing_offset(dx_rg, sto_vals, channel_type=dmimo_chans.channel_type)
+        dx_rg = add_timing_offset(
+            dx_rg,
+            sto_vals,
+            subcarrier_spacing=rg.subcarrier_spacing,
+            cp_len=rg.cyclic_prefix_length,
+            channel_type=dmimo_chans.channel_type,
+        )
     if np.any(np.not_equal(cfo_vals, 0)):
-        dx_rg = add_frequency_offset(dx_rg, cfo_vals, channel_type=dmimo_chans.channel_type)
+        dx_rg = add_frequency_offset(
+            dx_rg,
+            cfo_vals,
+            subcarrier_spacing=rg.subcarrier_spacing,
+            cp_len=rg.cyclic_prefix_length,
+            channel_type=dmimo_chans.channel_type,
+            slot_idx=slot_idx,
+        )
 
     ry, _ = dmimo_chans([dx_rg, slot_idx])
     ry_eff = _trim_to_effective_subcarriers(ry, rg)

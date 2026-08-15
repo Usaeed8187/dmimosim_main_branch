@@ -3,20 +3,23 @@
 The plotting logic is tailored for the artifacts produced by
 ``sims/run_sim_mu_mimo_kpi_multiple_drops.sh``.  The script loads the
 per-drop ``npz`` files, averages metrics across drops, and produces four
-figures:
+figures, plus two residual-synchronization sweeps at fixed RX/TX counts:
 
 * Uncoded BER vs. number of RUs (fixed UEs, fixed MCS)
 * Uncoded BER vs. number of UEs (fixed RUs, fixed MCS)
 * Throughput vs. number of RUs (fixed UEs, best MCS per point)
 * Throughput vs. number of UEs (fixed RUs, best MCS per point)
+* Throughput vs. timing-error standard deviation (zero phase error)
+* Throughput vs. phase-error standard deviation (zero timing error)
 
 For BER plots, the modulation order and code rate are fixed by the
 command-line arguments.  For throughput plots, the script selects, for
 each data point, the MCS that maximizes the *average* throughput across
 all requested drops and prints the maximizing MCS choices.
 
-The script also plots multiple channel prediction baselines (e.g., DEQN
-variants and ChannelMamba). By default, outputs are expected directly under::
+The script also plots multiple channel prediction baselines, including the
+full Kalman filter, drop-configured steady-state Kalman filter, configured
+WESN, and ChannelMamba. By default, outputs are expected directly under::
 
     results/channels_multiple_mu_mimo/channels_<mobility>_<drop>
 
@@ -26,11 +29,12 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 
 import os
 
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -78,6 +82,24 @@ class PlotConfig:
     scenarios: Sequence["Scenario"]
     channelmamba_seen_drops: Sequence[int]
     channelmamba_all_drops: Sequence[int]
+    wesn_lite_readout_mode: str = "centered_ridge"
+    sync_errors: bool = False
+    sync_phase_std_deg: float = 0.0
+    sync_timing_std_samples: float = 0.0
+
+
+def _filename_token(value: float) -> str:
+    return format(float(value), "g").replace("-", "m").replace(".", "p")
+
+
+def sync_result_suffix(
+    enabled: bool, phase_std_deg: float, timing_std_samples: float
+) -> str:
+    return (
+        f"_sync_errors_{bool(enabled)}"
+        f"_phase_std_deg_{_filename_token(phase_std_deg)}"
+        f"_timing_std_samples_{_filename_token(timing_std_samples)}"
+    )
 
 def _resolve_path(path: str, relative_to: Path) -> Path:
     """Resolve ``path`` against ``relative_to`` when not absolute."""
@@ -115,6 +137,23 @@ class ResultLoader:
     def _drop_folder(self, drop_id: int, scenario: Scenario) -> str:
         folder_name = f"channels_{self.cfg.mobility}_{drop_id}"
         return os.path.join(self.cfg.base_dir, folder_name)
+
+    @staticmethod
+    def _result_prefix(
+        rx_ues: int,
+        tx_ues: int,
+        mod_order: int,
+        code_rate: object,
+        scenario: Scenario,
+    ) -> str:
+        if scenario.link_adapt:
+            experiment = f"link_adapt_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
+        else:
+            experiment = (
+                f"mod_order_{mod_order}_code_rate_{code_rate}_"
+                f"rx_UE_{rx_ues}_tx_UE_{tx_ues}"
+            )
+        return f"mu_mimo_results_{experiment}"
     
     @staticmethod
     def _parse_code_rate_from_path(path: str) -> Optional[float]:
@@ -135,11 +174,26 @@ class ResultLoader:
         return f"{path}{suffix}"
 
     def _suffixes_for_scenario(self, scenario: Scenario) -> List[str]:
-        if scenario.prediction_method == "configured_wesn":
+        if scenario.prediction_method in (
+            "configured_wesn",
+            "configured_wesn_balanced",
+            "configured_wesn_balanced_lite",
+            "wesn_lite",
+        ):
             # Backward compatibility: early time-split runs had no suffix.
-            return ["_time_split", ""]
+            return [
+                "_time_split_readout_*_workers_*",
+                "_time_split_readout_*",
+                "_time_split_workers_*",
+                "_time_split",
+                "",
+            ]
         if scenario.prediction_method == "channelmamba":
-            return ["_time_split"]
+            return ["_time_split_workers_*", "_time_split"]
+        if scenario.prediction:
+            # Predictor parallelism is encoded in current result filenames for
+            # every prediction method, including the full and steady-state KFs.
+            return ["_workers_*", ""]
         return [""]
     
     def _prediction_patterns(
@@ -191,9 +245,16 @@ class ResultLoader:
 
         candidates: List[str] = []
         suffixes = self._suffixes_for_scenario(scenario)
+        sync_suffix = sync_result_suffix(
+            self.cfg.sync_errors,
+            self.cfg.sync_phase_std_deg,
+            self.cfg.sync_timing_std_samples,
+        )
         for pattern in patterns:
             for suffix in suffixes:
-                suffixed_pattern = self._append_suffix(pattern, suffix)
+                suffixed_pattern = self._append_suffix(
+                    pattern, suffix + sync_suffix
+                )
                 full_pattern = os.path.join(folder, suffixed_pattern)
                 if "*" in suffixed_pattern:
                     matches = glob.glob(full_pattern)
@@ -201,6 +262,22 @@ class ResultLoader:
                     candidates.extend(matches)
                 else:
                     candidates.append(full_pattern)
+        # Keep old zero-error artifacts readable while preferring the new,
+        # explicitly parameterized filenames above.
+        if (
+            not self.cfg.sync_errors
+            and self.cfg.sync_phase_std_deg == 0
+            and self.cfg.sync_timing_std_samples == 0
+            and not any(os.path.exists(candidate) for candidate in candidates)
+        ):
+            for pattern in patterns:
+                for suffix in suffixes:
+                    legacy_pattern = self._append_suffix(pattern, suffix)
+                    full_pattern = os.path.join(folder, legacy_pattern)
+                    if "*" in legacy_pattern:
+                        candidates.extend(sorted(glob.glob(full_pattern)))
+                    else:
+                        candidates.append(full_pattern)
         return candidates
 
     def _find_file(
@@ -213,18 +290,32 @@ class ResultLoader:
         scenario: Scenario,
     ) -> Optional[str]:
         folder = self._drop_folder(drop_id, scenario)
-        code_rate_str = str(code_rate)
-        if rx_ues == 5:
-            hold = 1
-        if scenario.link_adapt:
-            prefix = f"mu_mimo_results_link_adapt_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
-        else:
-            prefix = (
-                f"mu_mimo_results_mod_order_{mod_order}_code_rate_{code_rate_str}_rx_UE_{rx_ues}_tx_UE_{tx_ues}"
-            )
-        for candidate in self._candidate_paths(folder, prefix, scenario):
-            if os.path.exists(candidate):
-                return candidate
+        prefix = self._result_prefix(
+            rx_ues, tx_ues, mod_order, str(code_rate), scenario
+        )
+        existing_candidates = [
+            candidate
+            for candidate in self._candidate_paths(folder, prefix, scenario)
+            if os.path.exists(candidate)
+        ]
+        if scenario.prediction_method == "wesn_lite":
+            matching_candidates = [
+                candidate
+                for candidate in existing_candidates
+                if self._wesn_lite_readout_mode(candidate)
+                == self.cfg.wesn_lite_readout_mode
+            ]
+            if matching_candidates:
+                # Prefer the latest artifact when several worker-count variants
+                # implement the same requested algorithm.
+                return max(matching_candidates, key=os.path.getmtime)
+            return None
+        if existing_candidates:
+            # Non-WESN predictors can have both a legacy unsuffixed artifact
+            # and a current worker-suffixed artifact. Select the latest run.
+            if scenario.prediction_method not in ("configured_wesn",):
+                return max(existing_candidates, key=os.path.getmtime)
+            return existing_candidates[0]
             
         if scenario.link_adapt:
             return None
@@ -232,9 +323,16 @@ class ResultLoader:
         # As a fallback, try to match slightly different code-rate strings.
         pattern = os.path.join(
             folder,
-            f"mu_mimo_results_mod_order_{mod_order}_code_rate_*_rx_UE_{rx_ues}_tx_UE_{tx_ues}*.npz",
+            self._result_prefix(rx_ues, tx_ues, mod_order, "*", scenario)
+            + "*.npz",
         )
         matches = glob.glob(pattern)
+        required_sync_suffix = sync_result_suffix(
+            self.cfg.sync_errors,
+            self.cfg.sync_phase_std_deg,
+            self.cfg.sync_timing_std_samples,
+        )
+        matches = [path for path in matches if required_sync_suffix in path]
         if not matches:
             return None
 
@@ -245,11 +343,41 @@ class ResultLoader:
             )
         )
         for match in matches:
-            if scenario.prediction and "prediction" in os.path.basename(match):
-                return match
+            basename = os.path.basename(match)
+            if scenario.prediction:
+                method = scenario.prediction_method
+                if method and f"_prediction_{method}_" in basename:
+                    return match
+                if method is None and "prediction" in basename:
+                    return match
             if not scenario.prediction and "perfect_CSI" in os.path.basename(match):
                 return match
-        return matches[0]
+        return None
+
+    @staticmethod
+    def _wesn_lite_readout_mode(path: str) -> Optional[str]:
+        """Read the algorithm mode from explicit or legacy result metadata."""
+        try:
+            with np.load(path, allow_pickle=True) as data:
+                explicit = data.get("wesn_lite_readout_mode")
+                if explicit is not None:
+                    return str(np.asarray(explicit).reshape(-1)[0]).replace(
+                        "-", "_"
+                    )
+                raw = data.get("predictor_complexity_raw_json")
+                if raw is None:
+                    return None
+                metrics = json.loads(str(np.asarray(raw).item()))
+                modes = {
+                    str(value.get("readout_objective", "")).replace("-", "_")
+                    for value in metrics.get(
+                        "per_link_predictor_phases", {}
+                    ).values()
+                    if value.get("readout_objective")
+                }
+                return next(iter(modes)) if len(modes) == 1 else None
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
 
     @staticmethod
     def _scalar_from_array(arr: np.ndarray) -> float:
@@ -369,29 +497,29 @@ def _default_scenarios(
     include_prediction: bool = True, link_adapt: bool = False
 ) -> List[Scenario]:
     scenarios = [
-        Scenario(
-            perfect_csi=False,
-            prediction=True,
-            quantization=True,
-            label="ChannelMamba",
-            link_adapt=link_adapt,
-            prediction_method="channelmamba",
-        ),
-        Scenario(
-            perfect_csi=False,
-            prediction=False,
-            quantization=True,
-            label="Outdated CSI",
-            link_adapt=link_adapt,
-        ),
-        Scenario(
-            perfect_csi=False,
-            prediction=True,
-            quantization=True,
-            label="Two-Mode WESN",
-            prediction_method="two_mode",
-            link_adapt=link_adapt,
-        ),
+        # Scenario(
+        #     perfect_csi=False,
+        #     prediction=True,
+        #     quantization=True,
+        #     label="ChannelMamba",
+        #     link_adapt=link_adapt,
+        #     prediction_method="channelmamba",
+        # ),
+        # Scenario(
+        #     perfect_csi=False,
+        #     prediction=False,
+        #     quantization=True,
+        #     label="Outdated CSI",
+        #     link_adapt=link_adapt,
+        # ),
+        # Scenario(
+        #     perfect_csi=False,
+        #     prediction=True,
+        #     quantization=True,
+        #     label="Two-Mode WESN",
+        #     prediction_method="two_mode",
+        #     link_adapt=link_adapt,
+        # ),
         Scenario(
             perfect_csi=False,
             prediction=True,
@@ -404,10 +532,42 @@ def _default_scenarios(
             perfect_csi=False,
             prediction=True,
             quantization=True,
-            label="Configured WESN",
+            label="Steady-State KF",
             link_adapt=link_adapt,
-            prediction_method="configured_wesn",
+            prediction_method="steady_state_kalman_filter",
         ),
+        # Scenario(
+        #     perfect_csi=False,
+        #     prediction=True,
+        #     quantization=True,
+        #     label="Configured WESN",
+        #     link_adapt=link_adapt,
+        #     prediction_method="configured_wesn",
+        # ),
+        Scenario(
+            perfect_csi=False,
+            prediction=True,
+            quantization=True,
+            label="Balanced Configured WESN",
+            link_adapt=link_adapt,
+            prediction_method="configured_wesn_balanced",
+        ),
+        Scenario(
+            perfect_csi=False,
+            prediction=True,
+            quantization=True,
+            label="Balanced Configured WESN-Lite",
+            link_adapt=link_adapt,
+            prediction_method="configured_wesn_balanced_lite",
+        ),
+        # Scenario(
+        #     perfect_csi=False,
+        #     prediction=True,
+        #     quantization=True,
+        #     label="Low-Rank Configured WESN",
+        #     link_adapt=link_adapt,
+        #     prediction_method="wesn_lite",
+        # ),
         # Scenario(
         #     perfect_csi=True,
         #     prediction=False,
@@ -455,10 +615,32 @@ STYLE = {
         "marker": "s",
         "label": "Kalman Filter",
     },
+    "Steady-State KF": {
+        "color": "tab:purple",
+        "marker": "P",
+        "linestyle": "--",
+        "label": "Steady-State KF",
+    },
     "Configured WESN": {
         "color": "tab:green",
         "marker": "^",
         "label": "Configured WESN",
+    },
+    "Balanced Configured WESN": {
+        "color": "tab:cyan",
+        "marker": "X",
+        "label": "Balanced Configured WESN",
+    },
+    "Balanced Configured WESN-Lite": {
+        "color": "tab:pink",
+        "marker": "*",
+        "label": "Balanced Configured WESN-Lite",
+    },
+    "Low-Rank Configured WESN": {
+        "color": "tab:brown",
+        "marker": "v",
+        "linestyle": "-.",
+        "label": "Low-Rank Configured WESN",
     },
     "ChannelMamba": {
         "color": "tab:red",
@@ -491,7 +673,7 @@ def _save_figure_multi_format(output_path: str) -> None:
     plt.savefig(base + ".svg", bbox_inches="tight")
 
 def plot_metric(
-    x_values: Sequence[int],
+    x_values: Sequence[float],
     series: Sequence[Tuple[str, Sequence[float]]],
     xlabel: str,
     ylabel: str,
@@ -537,7 +719,7 @@ def plot_metric(
     print(f"Saved: {output_path}")
 
 def semilogy_metric(
-    x_values: Sequence[int],
+    x_values: Sequence[float],
     series: Sequence[Tuple[str, Sequence[float]]],
     xlabel: str,
     ylabel: str,
@@ -609,6 +791,64 @@ def select_best_mcs(
     return best_throughput, best_mcs
 
 
+def sync_throughput_series(
+    loader_type: type[ResultLoader],
+    cfg: PlotConfig,
+    scenarios: Sequence[Scenario],
+    sweep_values: Sequence[float],
+    sweep: str,
+) -> List[Tuple[Scenario, Sequence[float]]]:
+    """Build throughput curves for one residual-synchronization dimension.
+
+    Both UE dimensions are fixed. A timing sweep forces phase error to zero;
+    a phase sweep forces timing error to zero. Each point is averaged over the
+    requested drops and uses the same best-MCS selection as the ordinary
+    throughput plots.
+    """
+
+    if sweep not in {"phase", "timing"}:
+        raise ValueError("sweep must be 'phase' or 'timing'")
+
+    values_by_scenario = {scenario: [] for scenario in scenarios}
+    for sweep_value in sweep_values:
+        sweep_value = float(sweep_value)
+        point_cfg = replace(
+            cfg,
+            # The zero-error point is produced by twc_tput_across_tx.sh;
+            # twc_tput_across_sync.sh contains only nonzero error settings.
+            sync_errors=sweep_value != 0.0,
+            sync_phase_std_deg=sweep_value if sweep == "phase" else 0.0,
+            sync_timing_std_samples=(
+                sweep_value if sweep == "timing" else 0.0
+            ),
+        )
+        point_loader = loader_type(point_cfg)
+        aggregated = aggregate_metrics(
+            point_loader,
+            scenarios,
+            [cfg.fixed_rx_for_tx_sweep],
+            [cfg.fixed_tx_for_rx_sweep],
+            cfg.modulation_orders,
+            cfg.code_rates,
+        )
+        for scenario in scenarios:
+            throughput, _ = select_best_mcs(
+                aggregated,
+                scenario,
+                cfg.fixed_rx_for_tx_sweep,
+                cfg.fixed_tx_for_rx_sweep,
+                cfg.modulation_orders,
+                cfg.code_rates,
+            )
+            values_by_scenario[scenario].append(
+                throughput if throughput is not None else np.nan
+            )
+
+    return [
+        (scenario, values_by_scenario[scenario]) for scenario in scenarios
+    ]
+
+
 ################################################################################
 # Main plotting routine
 ################################################################################
@@ -623,7 +863,7 @@ def main() -> None:
             "Root directory containing per-drop results."
         ),
     )
-    parser.add_argument("--mobility", default="highest_mobility", help="Mobility string used in the folder names.")
+    parser.add_argument("--mobility", default="higher_mobility", help="Mobility string used in the folder names.")
     parser.add_argument(
         "--drops",
         type=int,
@@ -651,7 +891,7 @@ def main() -> None:
         "--rx-ues",
         type=int,
         nargs="+",
-        default=[5],
+        default=[4],
         help="UE counts that were simulated.",
     )
     parser.add_argument(
@@ -690,7 +930,7 @@ def main() -> None:
     parser.add_argument(
         "--fixed-rx",
         type=int,
-        default=5,
+        default=4,
         help="UE count to hold fixed when sweeping RUs.",
     )
     parser.add_argument(
@@ -698,6 +938,34 @@ def main() -> None:
         type=int,
         default=8,
         help="RU count to hold fixed when sweeping UEs.",
+    )
+    parser.add_argument(
+        "--wesn-lite-readout-mode",
+        choices=["matched_ridge", "centered_ridge"],
+        default="centered_ridge",
+        help="Select only WESN-Lite artifacts generated with this readout mode.",
+    )
+    parser.add_argument(
+        "--sync-errors",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Load artifacts generated with residual synchronization errors.",
+    )
+    parser.add_argument("--sync-phase-std-deg", type=float, default=0.0)
+    parser.add_argument("--sync-timing-std-samples", type=float, default=0.0)
+    parser.add_argument(
+        "--sync-phase-std-deg-values",
+        type=float,
+        nargs="+",
+        default=[0.0, 3.6, 18.0, 36.0, 45.0, 90.0],
+        help="Phase/frequency synchronization errors for the phase sweep.",
+    )
+    parser.add_argument(
+        "--sync-timing-std-samples-values",
+        type=float,
+        nargs="+",
+        default=[0.0, 0.05, 0.1, 0.2, 0.5],
+        help="Normalized timing-error standard deviations for the timing sweep.",
     )
     parser.add_argument(
         "--output-dir",
@@ -742,6 +1010,10 @@ def main() -> None:
         scenarios=scenarios,
         channelmamba_seen_drops=args.channelmamba_seen_drops,
         channelmamba_all_drops=args.channelmamba_all_drops,
+        wesn_lite_readout_mode=args.wesn_lite_readout_mode,
+        sync_errors=args.sync_errors,
+        sync_phase_std_deg=args.sync_phase_std_deg,
+        sync_timing_std_samples=args.sync_timing_std_samples,
     )
     
     os.makedirs(cfg.output_dir, exist_ok=True)
@@ -986,6 +1258,58 @@ def main() -> None:
         ylabel="Throughput (Mbps)",
         title=f"Throughput vs UEs (RUs={cfg.fixed_tx_for_rx_sweep+2}, {throughput_title_descriptor})", # treating tx BS as 2 UEs
         output_path=os.path.join(cfg.output_dir, "throughput_vs_rx_ues.png"),
+    )
+
+    sync_scenarios = [
+        scenario
+        for scenario in cfg.scenarios
+        if scenario.prediction_method != "channelmamba"
+    ]
+    plot_metric(
+        args.sync_timing_std_samples_values,
+        [
+            (scenario.label, values)
+            for scenario, values in sync_throughput_series(
+                ResultLoader,
+                cfg,
+                sync_scenarios,
+                args.sync_timing_std_samples_values,
+                sweep="timing",
+            )
+        ],
+        xlabel="Timing-error standard deviation (samples)",
+        ylabel="Throughput (Mbps)",
+        title=(
+            "Throughput vs timing synchronization error "
+            f"(phase error=0, UEs={cfg.fixed_rx_for_tx_sweep + 2}, "
+            f"RUs={cfg.fixed_tx_for_rx_sweep + 1})"
+        ),
+        output_path=os.path.join(
+            cfg.output_dir, "throughput_vs_sync_timing_std_samples.png"
+        ),
+    )
+    plot_metric(
+        args.sync_phase_std_deg_values,
+        [
+            (scenario.label, values)
+            for scenario, values in sync_throughput_series(
+                ResultLoader,
+                cfg,
+                sync_scenarios,
+                args.sync_phase_std_deg_values,
+                sweep="phase",
+            )
+        ],
+        xlabel="Phase-error standard deviation (degrees)",
+        ylabel="Throughput (Mbps)",
+        title=(
+            "Throughput vs frequency synchronization error "
+            f"(timing error=0, UEs={cfg.fixed_rx_for_tx_sweep + 2}, "
+            f"RUs={cfg.fixed_tx_for_rx_sweep + 1})"
+        ),
+        output_path=os.path.join(
+            cfg.output_dir, "throughput_vs_sync_phase_std_deg.png"
+        ),
     )
 
     # Print the maximizing MCS selections for throughput plots

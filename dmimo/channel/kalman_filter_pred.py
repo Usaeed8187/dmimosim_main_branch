@@ -3,13 +3,203 @@ import numpy as np
 
 class kalman_filter_pred:
 
-    def __init__(self, lam=1e-3, eps=1e-8, ar_order=4, debug=False):
+    def __init__(
+        self,
+        lam=1e-3,
+        eps=1e-8,
+        ar_order=4,
+        debug=False,
+        reconfiguration_interval=None,
+        tile_batch_size=256,
+    ):
         self.lam = lam
         self.eps = eps
         self.ar_order = ar_order
         self.debug = debug
         self.num_bs_ant = 4
         self.num_ue_ant = 2
+        self.reconfiguration_interval = (
+            None
+            if reconfiguration_interval is None
+            else max(1, int(reconfiguration_interval))
+        )
+        self.tile_batch_size = max(1, int(tile_batch_size))
+        self._prediction_calls = 0
+        self._model_cache = {}
+        self._state_cache = {}
+        self.num_filter_updates_last_predict = 0
+        self.num_model_reconfigurations = 0
+
+    def reset_state(self, clear_models=False):
+        """Reset recursive filter states, optionally discarding F/Q/R models."""
+        self._state_cache = {}
+        self.num_filter_updates_last_predict = 0
+        if clear_models:
+            self._model_cache = {}
+            self._prediction_calls = 0
+
+    def _measurement_update(self, z_prior, p_prior, y_obs, r_diag):
+        """Apply one Kalman measurement update to a predicted prior."""
+        d = y_obs.shape[0]
+        pd = z_prior.shape[0]
+        h_mat = np.zeros((d, pd), dtype=np.complex128)
+        h_mat[:, :d] = np.eye(d, dtype=np.complex128)
+        eye_pd = np.eye(pd, dtype=np.complex128)
+        r_mat = np.diag(
+            np.maximum(np.asarray(r_diag, dtype=np.float64), self.eps).astype(
+                np.complex128
+            )
+        )
+
+        innovation = y_obs.astype(np.complex128) - h_mat @ z_prior
+        s_mat = h_mat @ p_prior @ h_mat.conj().T + r_mat
+        k_gain = p_prior @ h_mat.conj().T @ np.linalg.pinv(s_mat)
+        z_post = z_prior + k_gain @ innovation
+        p_post = (eye_pd - k_gain @ h_mat) @ p_prior
+        return z_post, p_post
+
+    def _update_and_predict_prior(
+        self,
+        z_prior,
+        p_prior,
+        y_obs,
+        r_diag,
+        f_aug,
+        q_aug,
+    ):
+        """Consume one observation and return the following predicted prior."""
+        z_post, p_post = self._measurement_update(
+            z_prior,
+            p_prior,
+            y_obs,
+            r_diag,
+        )
+        z_next = f_aug @ z_post
+        p_next = f_aug @ p_post @ f_aug.conj().T + q_aug
+        return z_next, p_next
+
+    def _measurement_update_batched(
+        self, z_prior, p_prior, y_obs, r_diag
+    ):
+        """Apply the same measurement update to a batch of independent tiles."""
+        _, d = y_obs.shape
+        pd = z_prior.shape[1]
+        h_mat = np.zeros((d, pd), dtype=np.complex128)
+        h_mat[:, :d] = np.eye(d, dtype=np.complex128)
+        h_hermitian = h_mat.conj().T
+        eye_pd = np.eye(pd, dtype=np.complex128)
+
+        r_diag = np.maximum(
+            np.asarray(r_diag, dtype=np.float64), self.eps
+        )
+        r_mat = (
+            np.eye(d, dtype=np.complex128)[None, :, :]
+            * r_diag[:, None, :]
+        )
+
+        innovation = y_obs.astype(np.complex128) - np.matmul(
+            h_mat, z_prior[..., None]
+        )[..., 0]
+        s_mat = (
+            np.matmul(np.matmul(h_mat, p_prior), h_hermitian) + r_mat
+        )
+        k_gain = np.matmul(
+            np.matmul(p_prior, h_hermitian), np.linalg.pinv(s_mat)
+        )
+        z_post = z_prior + np.matmul(k_gain, innovation[..., None])[..., 0]
+        p_post = np.matmul(
+            eye_pd[None, :, :] - np.matmul(k_gain, h_mat), p_prior
+        )
+        return z_post, p_post
+
+    @staticmethod
+    def _predict_prior_batched(z_post, p_post, f_aug, q_aug):
+        """Advance a batch of independent posterior states by one step."""
+        z_next = np.matmul(f_aug, z_post[..., None])[..., 0]
+        p_next = (
+            np.matmul(np.matmul(f_aug, p_post), f_aug.conj().T)
+            + q_aug[None, :, :]
+        )
+        return z_next, p_next
+
+    def _update_and_predict_prior_batched(
+        self,
+        z_prior,
+        p_prior,
+        y_obs,
+        r_diag,
+        f_aug,
+        q_aug,
+    ):
+        """Consume one observation for every tile and predict their priors."""
+        z_post, p_post = self._measurement_update_batched(
+            z_prior, p_prior, y_obs, r_diag
+        )
+        return self._predict_prior_batched(
+            z_post, p_post, f_aug, q_aug
+        )
+
+    def _initialize_recursive_prior(self, y_hist, r_diag, f_aug, q_aug):
+        """Replay available history and return the next predicted prior."""
+        t_len, d = y_hist.shape
+        p = f_aug.shape[0] // d
+        state_stack = [
+            y_hist[p - 1 - lag].astype(np.complex128) for lag in range(p)
+        ]
+        z_post = np.concatenate(state_stack, axis=0)
+        p_post = np.diag(
+            np.tile(np.maximum(r_diag, self.eps), p) + self.eps
+        ).astype(np.complex128)
+
+        for t_idx in range(p, t_len):
+            z_prior = f_aug @ z_post
+            p_prior = f_aug @ p_post @ f_aug.conj().T + q_aug
+            z_post, p_post = self._measurement_update(
+                z_prior,
+                p_prior,
+                y_hist[t_idx],
+                r_diag,
+            )
+
+        z_next = f_aug @ z_post
+        p_next = f_aug @ p_post @ f_aug.conj().T + q_aug
+        return z_next, p_next
+
+    def _initialize_recursive_prior_batched(
+        self, y_hist_tiles, r_diag_tiles, f_aug, q_aug
+    ):
+        """Replay history for all independent tiles using batched matrices."""
+        t_len, _, d = y_hist_tiles.shape
+        p = f_aug.shape[0] // d
+        state_stack = [
+            y_hist_tiles[p - 1 - lag].astype(np.complex128)
+            for lag in range(p)
+        ]
+        z_post = np.concatenate(state_stack, axis=1)
+
+        r_diag_tiles = np.maximum(
+            np.asarray(r_diag_tiles, dtype=np.float64), self.eps
+        )
+        p0_diag = np.tile(r_diag_tiles, (1, p)) + self.eps
+        p_post = (
+            np.eye(p * d, dtype=np.complex128)[None, :, :]
+            * p0_diag[:, None, :]
+        )
+
+        for t_idx in range(p, t_len):
+            z_prior, p_prior = self._predict_prior_batched(
+                z_post, p_post, f_aug, q_aug
+            )
+            z_post, p_post = self._measurement_update_batched(
+                z_prior,
+                p_prior,
+                y_hist_tiles[t_idx],
+                r_diag_tiles,
+            )
+
+        return self._predict_prior_batched(
+            z_post, p_post, f_aug, q_aug
+        )
     
     def _debug_print(self, msg):
         if self.debug:
@@ -170,6 +360,14 @@ class kalman_filter_pred:
         num_tx_nodes = ((num_tx_ants_all - self.num_bs_ant) // self.num_ue_ant) + 1
 
         pred = np.zeros_like(h_hist[0], dtype=np.complex64)
+        refresh_models = (
+            not self._model_cache
+            if self.reconfiguration_interval is None
+            else self._prediction_calls % self.reconfiguration_interval == 0
+        )
+        self.num_filter_updates_last_predict = 0
+        if refresh_models:
+            self.num_model_reconfigurations += 1
 
         for batch_idx in range(num_batches):
             for rx_node in range(num_rx_nodes):
@@ -205,7 +403,45 @@ class kalman_filter_pred:
                     e_tiles = np.real(curr_evar).transpose(0, 3, 4, 1, 2).reshape(t_len, num_syms * num_sc, -1)
 
                     p = min(self.ar_order, t_len - 1)
-                    a_blocks, q_proc = self._estimate_ar_p_q_joint(y_hist_tiles, p)
+                    cache_key = (batch_idx, rx_node, tx_node)
+                    model_entry = self._model_cache.get(cache_key)
+                    reconfigure_link = (
+                        refresh_models
+                        or model_entry is None
+                        or model_entry["p"] != p
+                        or model_entry["tile_shape"] != y_hist_tiles.shape[1:]
+                    )
+                    if reconfigure_link:
+                        a_blocks, q_proc = self._estimate_ar_p_q_joint(
+                            y_hist_tiles, p
+                        )
+                        selected_a_blocks = [
+                            a_block.conj() for a_block in a_blocks
+                        ]
+                        selected_f_aug, selected_q_aug = (
+                            self._build_augmented_system(
+                                selected_a_blocks, q_proc
+                            )
+                        )
+                        r_diag_tiles = np.maximum(
+                            np.mean(e_tiles, axis=0), self.eps
+                        )
+                        model_entry = {
+                            "p": p,
+                            "tile_shape": y_hist_tiles.shape[1:],
+                            "a_blocks": a_blocks,
+                            "q_proc": q_proc,
+                            "f_aug": selected_f_aug,
+                            "q_aug": selected_q_aug,
+                            "r_diag_tiles": r_diag_tiles,
+                        }
+                        self._model_cache[cache_key] = model_entry
+                    else:
+                        a_blocks = model_entry["a_blocks"]
+                        q_proc = model_entry["q_proc"]
+                        selected_f_aug = model_entry["f_aug"]
+                        selected_q_aug = model_entry["q_aug"]
+                        r_diag_tiles = model_entry["r_diag_tiles"]
 
                     use_debug = self.debug and h_freq_csi_perfect_debug is not None
 
@@ -223,8 +459,6 @@ class kalman_filter_pred:
                         print("Weiner Filter NMSE: ", weiner_nmse)
                     
                     selected_model_name = "conj"
-                    selected_a_blocks = [a_block.conj() for a_block in a_blocks]
-                    selected_f_aug, selected_q_aug = self._build_augmented_system(selected_a_blocks, q_proc)
 
                     if use_debug:
                         has_perfect_history = h_freq_csi_perfect_debug.shape[0] == t_len
@@ -310,20 +544,78 @@ class kalman_filter_pred:
                     y_next_tiles = np.zeros((num_syms * num_sc, RxAnt * TxAnt), dtype=np.complex128)
 
                     kalman_debug_stats = []
-                    
-                    for tile_idx in range(num_syms * num_sc):
-                        y_hist = y_hist_tiles[:, tile_idx, :]
-                        r_diag = e_tiles[:, tile_idx, :].mean(axis=0)
-                        if use_debug:
+                    state_entry = self._state_cache.get(cache_key)
+                    histories_overlap = (
+                        state_entry is not None
+                        and state_entry["history"].shape == y_hist_tiles.shape
+                        and np.array_equal(
+                            y_hist_tiles[:-1], state_entry["history"][1:]
+                        )
+                    )
+                    rebuild_state = (
+                        reconfigure_link
+                        or state_entry is None
+                        or not histories_overlap
+                        or state_entry["z_prior"].shape[0]
+                        != num_syms * num_sc
+                    )
+                    if use_debug:
+                        for tile_idx in range(num_syms * num_sc):
+                            y_hist = y_hist_tiles[:, tile_idx, :]
+                            r_diag = r_diag_tiles[tile_idx]
                             y_next_tile, tile_stats = self._kalman_predict_one_step_ar_p(
                                 y_hist, r_diag, f_aug=selected_f_aug, q_aug=selected_q_aug, return_debug_stats=True
                             )
                             kalman_debug_stats.append(tile_stats)
                             y_next_tiles[tile_idx] = y_next_tile
-                        else:
-                            y_next_tiles[tile_idx] = self._kalman_predict_one_step_ar_p(
-                                y_hist, r_diag, f_aug=selected_f_aug, q_aug=selected_q_aug
+                    else:
+                        num_tiles = num_syms * num_sc
+                        pd = p * RxAnt * TxAnt
+                        z_prior_tiles = np.empty(
+                            (num_tiles, pd), dtype=np.complex128
+                        )
+                        p_prior_tiles = np.empty(
+                            (num_tiles, pd, pd), dtype=np.complex128
+                        )
+                        for tile_start in range(0, num_tiles, self.tile_batch_size):
+                            tile_stop = min(
+                                tile_start + self.tile_batch_size, num_tiles
                             )
+                            tile_slice = slice(tile_start, tile_stop)
+                            if rebuild_state:
+                                z_batch, p_batch = (
+                                    self._initialize_recursive_prior_batched(
+                                        y_hist_tiles[:, tile_slice, :],
+                                        r_diag_tiles[tile_slice],
+                                        selected_f_aug,
+                                        selected_q_aug,
+                                    )
+                                )
+                            else:
+                                z_batch, p_batch = (
+                                    self._update_and_predict_prior_batched(
+                                        state_entry["z_prior"][tile_slice],
+                                        state_entry["p_prior"][tile_slice],
+                                        y_hist_tiles[-1, tile_slice],
+                                        r_diag_tiles[tile_slice],
+                                        selected_f_aug,
+                                        selected_q_aug,
+                                    )
+                                )
+                            z_prior_tiles[tile_slice] = z_batch
+                            p_prior_tiles[tile_slice] = p_batch
+                        y_next_tiles = z_prior_tiles[:, : RxAnt * TxAnt]
+
+                    if not use_debug:
+                        self._state_cache[cache_key] = {
+                            "z_prior": z_prior_tiles,
+                            "p_prior": p_prior_tiles,
+                            "history": y_hist_tiles.copy(),
+                        }
+                        self.num_filter_updates_last_predict = max(
+                            self.num_filter_updates_last_predict,
+                            t_len - p if rebuild_state else 1,
+                        )
                     
                     rx_idx, tx_idx = np.ix_(rx_ant_idx, tx_ant_idx)
                     y_next_block = y_next_tiles.reshape(num_syms, num_sc, RxAnt, TxAnt).transpose(2, 3, 0, 1)
@@ -356,4 +648,5 @@ class kalman_filter_pred:
 
                     hold = 1
 
+        self._prediction_calls += 1
         return pred.astype(h_hist.dtype, copy=False)

@@ -2,10 +2,8 @@
 OFDM frequency and timing synchronization
 """
 
-import tensorflow as tf
 import numpy as np
-
-from sionna.signal import fft, ifft
+import tensorflow as tf
 
 
 def normalize_cfo(subcarrier_spacing, cfo_hz):
@@ -32,16 +30,26 @@ def normalize_sto(subcarrier_spacing, fft_size, sto_ns):
     return (sto_ns * 1e-9) / ts
 
 
-def add_frequency_offset(x, cfo_vals, subcarrier_spacing=15e3, cp_len=64, channel_type="dMIMO"):
+def add_frequency_offset(
+    x,
+    cfo_vals,
+    subcarrier_spacing=15e3,
+    cp_len=64,
+    channel_type="dMIMO",
+    slot_idx=0,
+    slot_duration=1e-3,
+):
     """
-    Add frequency offset errors to OFDM signals
+    Add the per-slot common phase caused by residual frequency offset.
     1) BS antennas has zero CFO errors
     2) all antennas on the same UE have the same CFO
 
     :param x: OFDM signal grid
     :param cfo_vals: random CFO values
     :param subcarrier_spacing: OFDM subcarrier spacing (in Hz)
-    :param cp_len: OFDM cyclic prefix length
+    :param cp_len: retained for API compatibility
+    :param slot_idx: absolute ns-3 slot index (slot zero is the phase origin)
+    :param slot_duration: slot duration in seconds
     :return: OFDM signal grid with random frequency offsets added
     """
 
@@ -49,9 +57,6 @@ def add_frequency_offset(x, cfo_vals, subcarrier_spacing=15e3, cp_len=64, channe
     # num_bs_ant, num_ue_ant = 4, 2  # TODO: param for BS/UE antennas
     num_total_ant = x.shape[2]  # multiple Tx support?
     # num_ue = int(np.ceil((num_total_ant - num_bs_ant) / num_ue_ant))
-    num_ofdm_sym, fft_size = x.shape[-2:]
-    num_slots = x.shape[0]  # number of slots in one Phase 2 dMIMO transmission cycle
-
     if channel_type == 'dMIMO':
         cfo_vals = np.repeat(cfo_vals, repeats=2, axis=0)
         cfo_vals = np.concatenate((np.zeros((1, 4, 1, 1)), np.reshape(cfo_vals, (1, -1, 1, 1))), axis=1)
@@ -62,27 +67,21 @@ def add_frequency_offset(x, cfo_vals, subcarrier_spacing=15e3, cp_len=64, channe
     else:
         raise Exception(f"Unsupported channel_type.")
     
-    cfo_vals = normalize_cfo(subcarrier_spacing, cfo_vals[:, :num_total_ant])
-
-    # normalized sampling time indices for multiple subframes
-    time_indices = np.linspace(0, num_slots * num_ofdm_sym * (fft_size + cp_len) / fft_size,
-                               num_slots * num_ofdm_sym * (fft_size + cp_len), endpoint=False)
-    cfo_phase = cfo_vals * time_indices.reshape((num_slots, 1, num_ofdm_sym, fft_size + cp_len))
-    cfo_phase = cfo_phase[..., cp_len:]  # remove cyclic prefix parts
-    cfo_phase = np.exp(2j * np.pi * cfo_phase)
-    cfo_phase = np.reshape(cfo_phase, (num_slots, 1, -1, num_ofdm_sym, fft_size))
-
-    # convert signal to time-domain
-    xt = ifft(x)
-    # apply phase rotation caused by frequency offset
-    xt = tf.cast(cfo_phase, tf.complex64) * xt
-    # convert signal back to frequency-domain
-    xf = fft(xt)
-
-    return xf
+    cfo_vals = np.asarray(cfo_vals[:, :num_total_ant], dtype=np.float64)
+    phase = np.exp(
+        2j * np.pi * float(slot_idx) * float(slot_duration)
+        * cfo_vals.reshape((1, 1, -1, 1, 1))
+    )
+    return tf.cast(phase, x.dtype) * x
 
 
-def add_timing_offset(x, sto_vals, subcarrier_spacing=15e3, channel_type="dMIMO"):
+def add_timing_offset(
+    x,
+    sto_vals,
+    subcarrier_spacing=15e3,
+    cp_len=64,
+    channel_type="dMIMO",
+):
     """
     Modeling fractional STO in frequency domain
     1) BS antennas has zero STO errors
@@ -91,6 +90,7 @@ def add_timing_offset(x, sto_vals, subcarrier_spacing=15e3, channel_type="dMIMO"
     :param x: OFDM signal grid
     :param sto_vals: random STO values
     :param subcarrier_spacing: OFDM subcarrier spacing (in Hz)
+    :param cp_len: OFDM cyclic prefix length in samples
     :return: OFDM signal grid with random timing offsets added
     """
 
@@ -98,7 +98,7 @@ def add_timing_offset(x, sto_vals, subcarrier_spacing=15e3, channel_type="dMIMO"
     # num_bs_ant, num_ue_ant = 4, 2  # TODO: param for BS/UE antennas
     num_total_ant = x.shape[2]  # multiple Tx support?
     # num_ue = int(np.ceil((num_total_ant - num_bs_ant) / num_ue_ant))
-    num_ofdm_sym, fft_size = x.shape[-2:]
+    fft_size = int(x.shape[-1])
 
     if channel_type == 'dMIMO':
         sto_vals = np.repeat(sto_vals, repeats=2, axis=0)
@@ -109,13 +109,23 @@ def add_timing_offset(x, sto_vals, subcarrier_spacing=15e3, channel_type="dMIMO"
         sto_vals = np.reshape(sto_vals, (1, -1, 1, 1))
     else:
         raise Exception(f"Unsupported channel_type.")
-    sto_vals = normalize_sto(subcarrier_spacing, fft_size, sto_vals[:num_total_ant])
-    # maximum relative STO magnitude is 0.5
-    sto_vals[sto_vals > 0.5] = 0.5
-    sto_vals[sto_vals < -0.5] = -0.5
-    # compute phase shift in frequency domain which remain constant for all OFDM symbols
-    sto_shift = sto_vals * np.linspace(-0.5, 0.5, fft_size, endpoint=False).reshape((1, 1, fft_size))
-    phase_shift = np.exp(2j * np.pi * sto_shift)
+    sto_vals = normalize_sto(
+        subcarrier_spacing, fft_size, np.asarray(sto_vals[:num_total_ant])
+    )
+    if np.any(np.abs(sto_vals) >= cp_len):
+        raise ValueError(
+            "Residual timing offsets must lie strictly within the cyclic prefix "
+            f"of {cp_len} samples."
+        )
+    # The resource grid uses FFT-shifted subcarrier order. A delay eta samples
+    # therefore contributes exp(-j 2 pi k eta/N) on subcarrier k.
+    subcarrier_indices = np.arange(-fft_size // 2, fft_size // 2)
+    sto_shift = (
+        sto_vals
+        * subcarrier_indices.reshape((1, 1, fft_size))
+        / float(fft_size)
+    )
+    phase_shift = np.exp(-2j * np.pi * sto_shift)
     phase_shift = np.reshape(phase_shift, (1, 1, -1, 1, fft_size))
 
     # apply STO to BS/UE streams

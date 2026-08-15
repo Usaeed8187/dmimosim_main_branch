@@ -35,6 +35,15 @@ class RCConfig(Config):
         self._esn_ls_reg = 1e-6
         self._esn_diagnostics = False
         self._enable_skip_connections = True
+        self._enable_residue_low_rank = False
+        self._residue_energy_threshold = 0.95
+        self._reservoir_readout_regularization = 1e-2
+        self._skip_readout_regularization = 1e-4
+        self._wesn_lite_readout_mode = 'centered_ridge'
+        self._wesn_lite_subcarriers_per_rb = 12
+        self._enable_balanced_truncation = False
+        self._enable_balanced_hankel_truncation = False
+        self._balanced_hankel_energy_threshold = 0.90
 
         super().__init__(**kwargs)
 
@@ -269,3 +278,75 @@ class RCConfig(Config):
     @enable_skip_connections.setter
     def enable_skip_connections(self, val):
         self._enable_skip_connections = val
+
+    @property
+    def enable_residue_low_rank(self):
+        return self._enable_residue_low_rank
+
+    @enable_residue_low_rank.setter
+    def enable_residue_low_rank(self, val):
+        self._enable_residue_low_rank = val
+
+    @property
+    def residue_energy_threshold(self):
+        return self._residue_energy_threshold
+
+    @residue_energy_threshold.setter
+    def residue_energy_threshold(self, val):
+        self._residue_energy_threshold = val
+
+    @property
+    def reservoir_readout_regularization(self):
+        return self._reservoir_readout_regularization
+
+    @reservoir_readout_regularization.setter
+    def reservoir_readout_regularization(self, val):
+        self._reservoir_readout_regularization = val
+
+    @property
+    def skip_readout_regularization(self):
+        return self._skip_readout_regularization
+
+    @skip_readout_regularization.setter
+    def skip_readout_regularization(self, val):
+        self._skip_readout_regularization = val
+
+    @property
+    def wesn_lite_readout_mode(self):
+        return self._wesn_lite_readout_mode
+
+    @wesn_lite_readout_mode.setter
+    def wesn_lite_readout_mode(self, val):
+        self._wesn_lite_readout_mode = val
+
+    @property
+    def wesn_lite_subcarriers_per_rb(self):
+        return self._wesn_lite_subcarriers_per_rb
+
+    @wesn_lite_subcarriers_per_rb.setter
+    def wesn_lite_subcarriers_per_rb(self, val):
+        self._wesn_lite_subcarriers_per_rb = val
+
+    @property
+    def enable_balanced_truncation(self):
+        return self._enable_balanced_truncation
+
+    @enable_balanced_truncation.setter
+    def enable_balanced_truncation(self, val):
+        self._enable_balanced_truncation = bool(val)
+
+    @property
+    def enable_balanced_hankel_truncation(self):
+        return self._enable_balanced_hankel_truncation
+
+    @enable_balanced_hankel_truncation.setter
+    def enable_balanced_hankel_truncation(self, val):
+        self._enable_balanced_hankel_truncation = bool(val)
+
+    @property
+    def balanced_hankel_energy_threshold(self):
+        return self._balanced_hankel_energy_threshold
+
+    @balanced_hankel_energy_threshold.setter
+    def balanced_hankel_energy_threshold(self, val):
+        self._balanced_hankel_energy_threshold = float(val)
