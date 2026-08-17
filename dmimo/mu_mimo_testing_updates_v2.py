@@ -56,7 +56,13 @@ from dmimo.mimo.link_adaptation import (
 )
 from dmimo.mimo import MUMIMOScheduler
 from dmimo.mimo import update_node_selection, quantized_CSI_feedback, RandomVectorQuantizer, RandomVectorQuantizerNumpy
-from dmimo.utils import add_frequency_offset, add_timing_offset, compute_UE_wise_BER, compute_UE_wise_SER, complex_pinv
+from dmimo.utils import (
+    add_synchronization_offsets,
+    compute_UE_wise_BER,
+    compute_UE_wise_SER,
+    complex_pinv,
+    generate_synchronization_trajectory,
+)
 
 from .txs_mimo import TxSquad
 from .rxs_mimo import RxSquad
@@ -318,21 +324,15 @@ class MU_MIMO(Model):
             else:
                 raise ValueError("unsupported precoding method")
 
-            if np.any(np.not_equal(self.cfg.random_sto_vals, 0)):
-                precoded = add_timing_offset(
-                    precoded,
-                    self.cfg.random_sto_vals,
-                    subcarrier_spacing=self.cfg.subcarrier_spacing,
-                    cp_len=self.cfg.cyclic_prefix_len,
+            if self.cfg.sync_trajectory.enabled:
+                phase_rad, timing_samples = self.cfg.sync_trajectory.state_at(
+                    self.cfg.first_slot_idx
                 )
-            if np.any(np.not_equal(self.cfg.random_cfo_vals, 0)):
-                precoded = add_frequency_offset(
+                precoded = add_synchronization_offsets(
                     precoded,
-                    self.cfg.random_cfo_vals,
-                    subcarrier_spacing=self.cfg.subcarrier_spacing,
+                    phase_rad,
+                    timing_samples,
                     cp_len=self.cfg.cyclic_prefix_len,
-                    slot_idx=self.cfg.first_slot_idx,
-                    slot_duration=self.cfg.slot_duration,
                 )
             return interleaved, symbols, precoded, effective_channel
 
@@ -588,6 +588,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     cfo_vals=cfg.random_cfo_vals,
                     sto_vals=cfg.random_sto_vals,
                     estimated_channels_dir=cfg.estimated_channels_dir,
+                    sync_trajectory=cfg.sync_trajectory,
                 )
                 err_var_csi_history = None
             elif (
@@ -606,9 +607,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     freq_cov_mat=freq_cov_mat,
                     lmmse_interpolator=lmmse_interpolator,
                     use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
-                    sync_drop_id=cfg.drop_idx,
-                    sync_phase_std_deg=getattr(cfg, "sync_phase_error_std_deg", None),
-                    sync_timing_std_samples=getattr(cfg, "sync_timing_error_std_samples", None),
+                    sync_trajectory=cfg.sync_trajectory,
                 )
                 if getattr(cfg, "print_lmmse_effective_snr", True):
                     _print_lmmse_effective_snr(
@@ -628,9 +627,7 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                     freq_cov_mat=freq_cov_mat,
                     lmmse_interpolator=lmmse_interpolator,
                     use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
-                    sync_drop_id=cfg.drop_idx,
-                    sync_phase_std_deg=getattr(cfg, "sync_phase_error_std_deg", None),
-                    sync_timing_std_samples=getattr(cfg, "sync_timing_error_std_samples", None),
+                    sync_trajectory=cfg.sync_trajectory,
                 )
                 err_var_csi_history = None
                 
@@ -768,12 +765,13 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
                                                            sto_vals=cfg.random_sto_vals,
                                                            freq_cov_mat=freq_cov_mat,
                                                            lmmse_interpolator=lmmse_interpolator,
-                                                           use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar)
+                                                           use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+                                                           sync_trajectory=cfg.sync_trajectory)
         if getattr(cfg, "print_lmmse_effective_snr", True):
             _print_lmmse_effective_snr("Current slot", h_freq_csi, err_var_csi)
     
     chan_pred_nmse = tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...] - h_freq_csi[0:1,...])**2) / tf.reduce_mean(tf.abs(h_freq_csi_perfect[0:1,...])**2)
-    print("{} Prediction NMSE: {}".format(cfg.channel_prediction_method, chan_pred_nmse))
+    # print("{} Prediction NMSE: {}".format(cfg.channel_prediction_method, chan_pred_nmse))
     
     # Pick the selected UE's channels
     h_freq_csi = tf.gather(h_freq_csi, tf.reshape(cfg.scheduled_rx_ue_indices, (-1,)), axis=2)
@@ -1029,9 +1027,9 @@ def sim_mu_mimo(cfg: SimConfig, ns3cfg: Ns3Config, rc_config:RCConfig):
         info_bits = tf.reshape(info_bits, dec_bits.shape) # shape: [batch_size, 1, num_streams_per_tx, num_codewords, num_effective_subcarriers*num_data_ofdm_syms_per_subframe]
     coded_ber = compute_ber(info_bits, dec_bits).numpy()
     coded_bler = compute_bler(info_bits, dec_bits).numpy()
-    print("Uncoded BER: ", uncoded_ber_phase_2)
+    # print("Uncoded BER: ", uncoded_ber_phase_2)
     # print("Coded BER: ", coded_ber)
-    print("BLER: ", coded_bler)
+    # print("BLER: ", coded_bler)
 
     node_wise_ber, node_wise_bler = compute_UE_wise_BER(info_bits, dec_bits, cfg.ue_ranks[0], cfg.num_tx_streams)
     node_wise_acks = 1 - np.ceil(node_wise_bler)
@@ -1069,42 +1067,30 @@ def sim_mu_mimo_all(
     :param ns3cfg: ns-3 channel settings
     """
 
-    # Synchronization is performed once before each drop. RU 0 is the fixed
-    # reference and is inserted by add_*_offset; these arrays describe only
-    # the mobile RUs. Both residuals remain fixed throughout the drop.
-    rng = np.random.default_rng(int(cfg.drop_idx))
     num_mobile_rus = int(ns3cfg.num_txue_sel)
-    if cfg.gen_sync_errors:
-        cfo_std_hz = float(np.asarray(cfg.cfo_sigma).reshape(-1)[0])
-        cfg.random_cfo_vals = rng.normal(
-            0.0, cfo_std_hz, size=(num_mobile_rus, 1)
+    def make_sync_trajectory(drop_id):
+        return generate_synchronization_trajectory(
+            drop_id=int(drop_id),
+            num_mobile_rus=num_mobile_rus,
+            num_slots=int(cfg.total_slots),
+            frequency_std_ppb=float(cfg.sync_frequency_std_ppb),
+            initial_timing_std_ps=float(cfg.sync_initial_timing_std_ps),
+            initial_phase_std_deg=float(cfg.sync_initial_phase_std_deg),
+            phase_noise_s100_dbchz=cfg.sync_phase_noise_s100_dbchz,
+            carrier_frequency_hz=float(cfg.carrier_frequency_hz),
+            sample_rate_hz=float(cfg.subcarrier_spacing * cfg.fft_size),
+            slot_duration_s=float(cfg.slot_duration),
+            cyclic_prefix_samples=int(cfg.cyclic_prefix_len),
+            enabled=bool(cfg.gen_sync_errors),
         )
-        if hasattr(cfg, "sync_timing_error_std_samples"):
-            timing_std_samples = float(cfg.sync_timing_error_std_samples)
-        else:
-            sto_std_ns = float(np.asarray(cfg.sto_sigma).reshape(-1)[0])
-            timing_std_samples = (
-                sto_std_ns
-                * 1e-9
-                * cfg.subcarrier_spacing
-                * cfg.fft_size
-            )
-        timing_samples = np.empty((num_mobile_rus, 1), dtype=np.float64)
-        for ru_idx in range(num_mobile_rus):
-            while True:
-                candidate = rng.normal(0.0, timing_std_samples)
-                if abs(candidate) < cfg.cyclic_prefix_len:
-                    timing_samples[ru_idx, 0] = candidate
-                    break
-        sample_duration = 1.0 / (cfg.subcarrier_spacing * cfg.fft_size)
-        cfg.random_sto_vals_samples = timing_samples
-        cfg.random_sto_vals = timing_samples * sample_duration * 1e9
-    else:
-        cfg.random_cfo_vals = np.zeros((num_mobile_rus, 1), dtype=np.float64)
-        cfg.random_sto_vals_samples = np.zeros(
-            (num_mobile_rus, 1), dtype=np.float64
-        )
-        cfg.random_sto_vals = np.zeros((num_mobile_rus, 1), dtype=np.float64)
+
+    # Synchronization occurs once at the beginning of each drop. The complete
+    # trajectory is generated up front so pilots, cached histories, and data
+    # always use the same oscillator realization.
+    cfg.sync_trajectory = make_sync_trajectory(cfg.drop_idx)
+    cfg.random_cfo_vals = np.zeros((num_mobile_rus, 1), dtype=np.float64)
+    cfg.random_sto_vals_samples = np.zeros((num_mobile_rus, 1), dtype=np.float64)
+    cfg.random_sto_vals = np.zeros((num_mobile_rus, 1), dtype=np.float64)
 
     slot_time = cfg.slot_duration  # default 1ms subframe/slot duration
     overhead = cfg.num_slots_p2/(cfg.num_slots_p1 + cfg.num_slots_p2)
@@ -1127,7 +1113,22 @@ def sim_mu_mimo_all(
     # cfg.curr_no_rl_throughput = None
     # cfg.rl_selector = rl_selector
 
-    slot_indices_all = np.arange(cfg.start_slot_idx, cfg.total_slots, cfg.num_slots_p1 + cfg.num_slots_p2)
+    slot_indices_all = np.arange(
+        cfg.start_slot_idx,
+        cfg.total_slots,
+        cfg.num_slots_p1 + cfg.num_slots_p2,
+    )
+    # A Phase-2 batch starting at t consumes [t, t+num_slots_p2). Never let
+    # the channel loader's test-only modulo behavior wrap the batch to slot 0.
+    slot_indices_all = slot_indices_all[
+        slot_indices_all + cfg.num_slots_p2 <= cfg.total_slots
+    ]
+    if slot_indices_all.size == 0:
+        raise ValueError(
+            "No complete D-MIMO cycles fit in the channel trace for "
+            f"start_slot_idx={cfg.start_slot_idx}, P1={cfg.num_slots_p1}, "
+            f"P2={cfg.num_slots_p2}, total_slots={cfg.total_slots}."
+        )
     slot_indices = slot_indices_all.copy()
 
     eval_on_online_segment_only = bool(getattr(cfg, "eval_on_online_segment_only", True)) #TODO: evaluation should always be on online segment only, there is no need for this setting
@@ -1248,22 +1249,29 @@ def sim_mu_mimo_all(
         lmmse_use_rx_snr_for_nvar = getattr(cfg, "lmmse_use_rx_snr_for_nvar", True)
         if configured_wesn_split_mode == "within_drop":
             first_slot_idx = slot_indices_all[offline_cycles]
+            # Temporarily expand the CSI buffer to the full offline segment so
+            # W_in/W_res (or KF F/Q/R) can be configured from that history.
+            # Restore rc_config.history_len before the online loop so WESN and
+            # Kalman see the intended online window, not the offline length.
+            intended_history_len = int(rc_predictor.history_len)
             rc_predictor.history_len = offline_slot_indices.size
-            h_hist, err_hist = rc_predictor.get_csi_history_with_err_var(
-                first_slot_idx,
-                cfg.csi_delay,
-                rg_csi,
-                dmimo_chans,
-                cfo_vals=cfg.random_cfo_vals,
-                sto_vals=cfg.random_sto_vals,
-                estimated_channels_dir=cfg.estimated_channels_dir,
-                freq_cov_mat=freq_cov_mat,
-                lmmse_interpolator=lmmse_interpolator,
-                use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
-                sync_drop_id=cfg.drop_idx,
-                sync_phase_std_deg=getattr(cfg, "sync_phase_error_std_deg", None),
-                sync_timing_std_samples=getattr(cfg, "sync_timing_error_std_samples", None),
-            )
+            try:
+                h_hist, err_hist = rc_predictor.get_csi_history_with_err_var(
+                    first_slot_idx,
+                    cfg.csi_delay,
+                    rg_csi,
+                    dmimo_chans,
+                    cfo_vals=cfg.random_cfo_vals,
+                    sto_vals=cfg.random_sto_vals,
+                    estimated_channels_dir=cfg.estimated_channels_dir,
+                    freq_cov_mat=freq_cov_mat,
+                    lmmse_interpolator=lmmse_interpolator,
+                    use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
+                    sync_trajectory=cfg.sync_trajectory,
+                )
+            finally:
+                rc_predictor.history_len = intended_history_len
+                rc_predictor.reset_csi_history()
             offline_history = np.asarray(h_hist)
             offline_err_history = np.asarray(err_hist)
         else:
@@ -1284,6 +1292,7 @@ def sim_mu_mimo_all(
                     cfg.ns3_folder = f"ns3/channels_{cfg.mobility}_{train_drop_idx}/"
                     cfg.estimated_channels_dir = f"ns3/channel_estimates_{cfg.mobility}_drop_{train_drop_idx}"
                     dmimo_chans_train = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+                    train_sync_trajectory = make_sync_trajectory(train_drop_idx)
                     per_drop_h_hist = []
                     per_drop_err_hist = []
                     rc_predictor.history_len = 1
@@ -1300,9 +1309,7 @@ def sim_mu_mimo_all(
                             freq_cov_mat=freq_cov_mat,
                             lmmse_interpolator=lmmse_interpolator,
                             use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
-                            sync_drop_id=cfg.drop_idx,
-                            sync_phase_std_deg=getattr(cfg, "sync_phase_error_std_deg", None),
-                            sync_timing_std_samples=getattr(cfg, "sync_timing_error_std_samples", None),
+                            sync_trajectory=train_sync_trajectory,
                         )
                         per_drop_h_hist.append(np.asarray(h_hist_one))
                         per_drop_err_hist.append(np.asarray(err_hist_one))
@@ -1528,6 +1535,7 @@ def sim_mu_mimo_all(
                     cfg.ns3_folder = f"ns3/channels_{cfg.mobility}_{train_drop_idx}/"
                     cfg.estimated_channels_dir = f"ns3/channel_estimates_{cfg.mobility}_drop_{train_drop_idx}"
                     dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
+                    train_sync_trajectory = make_sync_trajectory(train_drop_idx)
                     rc_predictor.history_len = 1
                     rc_predictor.reset_csi_history()
                     per_drop_blocks = []
@@ -1545,9 +1553,7 @@ def sim_mu_mimo_all(
                             freq_cov_mat=freq_cov_mat,
                             lmmse_interpolator=lmmse_interpolator,
                             use_rx_snr_for_nvar=lmmse_use_rx_snr_for_nvar,
-                            sync_drop_id=cfg.drop_idx,
-                            sync_phase_std_deg=getattr(cfg, "sync_phase_error_std_deg", None),
-                            sync_timing_std_samples=getattr(cfg, "sync_timing_error_std_samples", None),
+                            sync_trajectory=train_sync_trajectory,
                         )
                         per_drop_blocks.append(np.asarray(h_hist_one))
                     if len(per_drop_blocks) == 0:
@@ -1586,10 +1592,10 @@ def sim_mu_mimo_all(
         online_loop_slot_indices = slot_indices_all[offline_cycles + 1:]
     else:
         online_loop_slot_indices = slot_indices[1:]
-    print(
-        f"Drop {cfg.drop_idx}, {cfg.channel_prediction_method} online loop slot indices: "
-        f"{online_loop_slot_indices.tolist()}"
-    )
+    # print(
+    #     f"Drop {cfg.drop_idx}, {cfg.channel_prediction_method} online loop slot indices: "
+    #     f"{online_loop_slot_indices.tolist()}"
+    # )
 
     cfg.start_slot_idx = slot_indices[0]
     
@@ -1671,7 +1677,7 @@ def sim_mu_mimo_all(
     per_step_throughput = np.array(per_step_throughput)
     chan_pred_nmse = np.array(chan_pred_nmse)
 
-    print("Drop {}, {} Average Prediction NMSE: {}".format(cfg.drop_idx, cfg.channel_prediction_method, np.mean(chan_pred_nmse)))
+    # print("Drop {}, {} Average Prediction NMSE: {}".format(cfg.drop_idx, cfg.channel_prediction_method, np.mean(chan_pred_nmse)))
     predictor_map = (
         getattr(cfg, "configured_wesn_predictors", None)
         or getattr(cfg, "steady_state_kalman_predictors", None)
@@ -1694,13 +1700,13 @@ def sim_mu_mimo_all(
             cfg.predictor_complexity_metrics[
                 "wesn_residue_rank_summary"
             ] = residue_rank_summary
-            print(f"WESN residue rank summary: {residue_rank_summary}")
+            # print(f"WESN residue rank summary: {residue_rank_summary}")
     cfg.predictor_complexity_summary = phase_summary(
         getattr(cfg, "predictor_complexity_metrics", {"schema_version": 1, "phases": {}})
     )
-    print(f"Predictor complexity summary: {cfg.predictor_complexity_summary}")
-    print("Drop {}, Average throughput: {:.2f} Mbps".format(cfg.drop_idx, throughput))
-    print("Drop {}, Average uncoded BER: {:.2f}\n".format(cfg.drop_idx, uncoded_ber / num_cycles_used_for_avg))
+    # print(f"Predictor complexity summary: {cfg.predictor_complexity_summary}")
+    # print("Drop {}, Average throughput: {:.2f} Mbps".format(cfg.drop_idx, throughput))
+    # print("Drop {}, Average uncoded BER: {:.2f}\n".format(cfg.drop_idx, uncoded_ber / num_cycles_used_for_avg))
 
     return [
         uncoded_ber / num_cycles_used_for_avg,

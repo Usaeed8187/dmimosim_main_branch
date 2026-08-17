@@ -132,3 +132,53 @@ def add_timing_offset(
     x = tf.cast(phase_shift, tf.complex64) * x
 
     return x
+
+
+def add_synchronization_offsets(
+    x,
+    phase_rad,
+    timing_samples,
+    cp_len=64,
+    channel_type="dMIMO",
+):
+    """Apply direct per-RU phase and within-CP timing offsets to an OFDM grid."""
+
+    num_total_ant = int(x.shape[2])
+    fft_size = int(x.shape[-1])
+    phase_rad = np.asarray(phase_rad, dtype=np.float64).reshape(-1, 1)
+    timing_samples = np.asarray(timing_samples, dtype=np.float64).reshape(-1, 1)
+
+    if channel_type == "dMIMO":
+        phase_ant = np.concatenate(
+            (np.zeros((4, 1)), np.repeat(phase_rad, repeats=2, axis=0)), axis=0
+        )
+        timing_ant = np.concatenate(
+            (np.zeros((4, 1)), np.repeat(timing_samples, repeats=2, axis=0)),
+            axis=0,
+        )
+    elif channel_type == "RxSquad":
+        phase_ant = np.repeat(phase_rad, repeats=2, axis=0)
+        timing_ant = np.repeat(timing_samples, repeats=2, axis=0)
+        phase_ant[:2] = 0.0
+        timing_ant[:2] = 0.0
+    else:
+        raise ValueError(f"Unsupported channel_type {channel_type!r}.")
+
+    phase_ant = phase_ant[:num_total_ant]
+    timing_ant = timing_ant[:num_total_ant]
+    if np.any(np.abs(timing_ant) >= int(cp_len)):
+        raise ValueError(
+            "Residual timing offsets must lie strictly within the cyclic prefix "
+            f"of {cp_len} samples."
+        )
+
+    common_phase = np.exp(1j * phase_ant).reshape((1, 1, -1, 1, 1))
+    subcarrier_indices = np.arange(-fft_size // 2, fft_size // 2)
+    timing_phase = np.exp(
+        -2j
+        * np.pi
+        * timing_ant
+        * subcarrier_indices.reshape((1, fft_size))
+        / float(fft_size)
+    ).reshape((1, 1, -1, 1, fft_size))
+    return tf.cast(common_phase * timing_phase, x.dtype) * x

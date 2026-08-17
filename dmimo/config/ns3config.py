@@ -18,6 +18,10 @@ class Ns3Config(NetworkConfig):
         self._noise_figure = 4      # RF front-end LNA noise figure
         self._thermal_noise = -105  # thermal noise power (dBm) for specified RF bandwidth (default 7.68MHz)
         self._ue_txpwr_ctrl = True  # enable RxSquad UE transmit power control
+        self._pa_enabled = False
+        self._pa_ibo_db = 6.5
+        self._pa_rho = 3.0
+        self._pa_model_version = "rapp_v1"
         super().__init__(**kwargs)
 
     def reset_ue_selection(self):
@@ -115,3 +119,44 @@ class Ns3Config(NetworkConfig):
     @ue_txpwr_ctrl.setter
     def ue_txpwr_ctrl(self, val):
         self._ue_txpwr_ctrl = val
+
+    @property
+    def pa_enabled(self):
+        return self._pa_enabled
+
+    @pa_enabled.setter
+    def pa_enabled(self, val):
+        self._pa_enabled = bool(val)
+
+    @property
+    def pa_ibo_db(self):
+        return self._pa_ibo_db
+
+    @pa_ibo_db.setter
+    def pa_ibo_db(self, val):
+        val = float(val)
+        if not np.isfinite(val):
+            raise ValueError("PA IBO must be finite.")
+        self._pa_ibo_db = val
+
+    @property
+    def pa_rho(self):
+        return self._pa_rho
+
+    @pa_rho.setter
+    def pa_rho(self, val):
+        val = float(val)
+        if not np.isfinite(val) or val <= 0.0:
+            raise ValueError("PA rho must be finite and positive.")
+        self._pa_rho = val
+
+    @property
+    def pa_model_version(self):
+        return self._pa_model_version
+
+    @pa_model_version.setter
+    def pa_model_version(self, val):
+        val = str(val)
+        if val != "rapp_v1":
+            raise ValueError("Unsupported PA model version.")
+        self._pa_model_version = val

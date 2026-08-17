@@ -300,6 +300,34 @@ def main() -> None:
     )
     parser.add_argument("--sync-phase-std-deg", type=float, default=0.0)
     parser.add_argument("--sync-timing-std-samples", type=float, default=0.0)
+    parser.add_argument("--sync-frequency-std-ppb", type=float, default=0.0)
+    parser.add_argument("--sync-initial-timing-std-ps", type=float, default=0.0)
+    parser.add_argument("--sync-initial-phase-std-deg", type=float, default=0.0)
+    parser.add_argument("--sync-phase-noise-s100-dbchz", type=float, default=None)
+    parser.add_argument(
+        "--feedback-delay-ms",
+        type=float,
+        choices=[4.0, 8.0],
+        default=4.0,
+    )
+    parser.add_argument(
+        "--sync-frequency-std-ppb-values",
+        type=float,
+        nargs="+",
+        default=[0.0, 1.0, 3.73, 10.0, 30.0],
+    )
+    parser.add_argument(
+        "--sync-initial-timing-std-ps-values",
+        type=float,
+        nargs="+",
+        default=[0.0, 30.0, 60.0, 70.0, 200.0],
+    )
+    parser.add_argument(
+        "--sync-phase-noise-s100-dbchz-values",
+        type=float,
+        nargs="+",
+        default=[-120.0, -110.0, -100.0, -90.0, -80.0],
+    )
     parser.add_argument(
         "--sync-phase-std-deg-values",
         type=float,
@@ -348,8 +376,11 @@ def main() -> None:
         channelmamba_all_drops=[],
         wesn_lite_readout_mode=args.wesn_lite_readout_mode,
         sync_errors=args.sync_errors,
-        sync_phase_std_deg=args.sync_phase_std_deg,
-        sync_timing_std_samples=args.sync_timing_std_samples,
+        sync_frequency_std_ppb=args.sync_frequency_std_ppb,
+        sync_initial_timing_std_ps=args.sync_initial_timing_std_ps,
+        sync_initial_phase_std_deg=args.sync_initial_phase_std_deg,
+        sync_phase_noise_s100_dbchz=args.sync_phase_noise_s100_dbchz,
+        feedback_delay_ms=args.feedback_delay_ms,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     loader = Phase1ResultLoader(cfg)
@@ -450,30 +481,55 @@ def main() -> None:
     )
 
     _plot_metric(
-        args.sync_timing_std_samples_values,
+        args.sync_initial_timing_std_ps_values,
         phase2_plotter.sync_throughput_series(
             Phase1ResultLoader,
             cfg,
             scenarios,
-            args.sync_timing_std_samples_values,
+            args.sync_initial_timing_std_ps_values,
             sweep="timing",
         ),
-        "Timing-error standard deviation (samples)",
+        "Initial timing-error standard deviation (ps)",
         "Throughput (Mbps)",
-        output_dir / "throughput_vs_sync_timing_std_samples_w_p1.png",
+        output_dir
+        / (
+            "throughput_vs_sync_initial_timing_std_ps_w_p1_"
+            f"fb_delay_ms_{phase2_plotter._filename_token(cfg.feedback_delay_ms)}.png"
+        ),
     )
     _plot_metric(
-        args.sync_phase_std_deg_values,
+        args.sync_frequency_std_ppb_values,
         phase2_plotter.sync_throughput_series(
             Phase1ResultLoader,
             cfg,
             scenarios,
-            args.sync_phase_std_deg_values,
-            sweep="phase",
+            args.sync_frequency_std_ppb_values,
+            sweep="frequency",
         ),
-        "Phase-error standard deviation (degrees)",
+        "Residual fractional-frequency standard deviation (ppb)",
         "Throughput (Mbps)",
-        output_dir / "throughput_vs_sync_phase_std_deg_w_p1.png",
+        output_dir
+        / (
+            "throughput_vs_sync_frequency_std_ppb_w_p1_"
+            f"fb_delay_ms_{phase2_plotter._filename_token(cfg.feedback_delay_ms)}.png"
+        ),
+    )
+    _plot_metric(
+        args.sync_phase_noise_s100_dbchz_values,
+        phase2_plotter.sync_throughput_series(
+            Phase1ResultLoader,
+            cfg,
+            scenarios,
+            args.sync_phase_noise_s100_dbchz_values,
+            sweep="phase_noise",
+        ),
+        r"Phase-noise level $S_{100}$ (dBc/Hz)",
+        "Throughput (Mbps)",
+        output_dir
+        / (
+            "throughput_vs_sync_phase_noise_s100_dbchz_w_p1_"
+            f"fb_delay_ms_{phase2_plotter._filename_token(cfg.feedback_delay_ms)}.png"
+        ),
     )
 
     _report_missing_pairs(

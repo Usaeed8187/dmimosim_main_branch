@@ -13,6 +13,7 @@ from sionna.ofdm import ResourceGrid
 
 from dmimo.config import Ns3Config
 from .ns3_channels import LoadNs3Channel
+from .pa_nonlinearity import apply_rapp_pa_frequency_grid
 
 
 class dMIMOChannels(Layer):
@@ -67,6 +68,14 @@ class dMIMOChannels(Layer):
         else:
             x, sidx, tx_mask, rx_mask = inputs
 
+        if bool(getattr(self._config, "pa_enabled", False)):
+            x = apply_rapp_pa_frequency_grid(
+                x,
+                ibo_db=self._config.pa_ibo_db,
+                rho=self._config.pa_rho,
+                model_version=self._config.pa_model_version,
+            )
+
         # x has shape [batch_size, num_tx, num_tx_ant, num_ofdm_sym, fft_size]
         batch_size = tf.shape(x)[0]
         total_tx_ant = tf.shape(x)[1] * tf.shape(x)[2]
@@ -77,7 +86,7 @@ class dMIMOChannels(Layer):
         # h_freq shape: [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_sym, fft_size]
         # rx_snr_db shape: [batch_size, 1, num_rx_ant, num_ofdm_sym]
         h_freq, rx_snr_db, rx_pwr_dbm = self._load_channel(self._channel_type, slot_idx=sidx, batch_size=batch_size)
-        h_freq_outdated_true_debug, _, _ = self._load_channel(self._channel_type, slot_idx=sidx-4, batch_size=batch_size)
+        # h_freq_outdated_true_debug, _, _ = self._load_channel(self._channel_type, slot_idx=sidx-4, batch_size=batch_size)
         
         # Prune data and channel subcarriers according to the resource grid
         if self._rg and x.shape[-1] != h_freq.shape[-1]:

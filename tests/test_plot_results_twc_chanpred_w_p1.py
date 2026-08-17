@@ -88,7 +88,8 @@ class Phase1ComparisonPlotTest(unittest.TestCase):
                 result = folder / (
                     f"mu_mimo_results_{phase_prefix}link_adapt_rx_UE_4_tx_UE_8_"
                     "prediction_kalman_filter_pmi_quantization_True_workers_8_"
-                    "sync_errors_True_phase_std_deg_0_timing_std_samples_0p2.npz"
+                    "sync_clock_v2_freq_std_ppb_0_timing0_std_ps_70_"
+                    "phase0_std_deg_0_pn_s100_dbchz_off.npz"
                 )
                 _write_result(result, throughput)
             cfg = self._config(base, scenarios)
@@ -97,7 +98,7 @@ class Phase1ComparisonPlotTest(unittest.TestCase):
                 plotter.Phase1ResultLoader,
                 cfg,
                 scenarios,
-                [0.2],
+                [70.0],
                 "timing",
             )
 
@@ -119,7 +120,8 @@ class Phase1ComparisonPlotTest(unittest.TestCase):
                 result = folder / (
                     f"mu_mimo_results_{phase_prefix}link_adapt_rx_UE_4_tx_UE_8_"
                     "prediction_kalman_filter_pmi_quantization_True_workers_8_"
-                    "sync_errors_False_phase_std_deg_0_timing_std_samples_0.npz"
+                    "sync_clock_v2_freq_std_ppb_0_timing0_std_ps_0_"
+                    "phase0_std_deg_0_pn_s100_dbchz_off.npz"
                 )
                 _write_result(result, throughput)
 
@@ -128,7 +130,7 @@ class Phase1ComparisonPlotTest(unittest.TestCase):
                 self._config(base, scenarios),
                 scenarios,
                 [0.0],
-                "phase",
+                "frequency",
             )
 
             np.testing.assert_allclose(

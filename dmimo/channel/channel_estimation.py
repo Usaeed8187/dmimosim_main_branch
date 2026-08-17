@@ -10,7 +10,11 @@ from sionna.ofdm import ResourceGrid, ResourceGridMapper, LSChannelEstimator
 from sionna.mapping import Mapper
 from sionna.utils import BinarySource, ebnodb2no
 
-from dmimo.utils import add_frequency_offset, add_timing_offset
+from dmimo.utils import (
+    add_frequency_offset,
+    add_synchronization_offsets,
+    add_timing_offset,
+)
 from .dmimo_channels import dMIMOChannels
 from .interpolation import LMMSELinearInterp
 
@@ -89,7 +93,7 @@ def estimate_freq_time_cov(dmimo_chans: dMIMOChannels, rg: ResourceGrid, start_s
 
 def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_idx, cache_slots=5, ebno_db=12.0,
                              cfo_vals=[0], sto_vals=[0], freq_cov_mat=None, lmmse_interpolator=None,
-                             use_rx_snr_for_nvar=True):
+                             use_rx_snr_for_nvar=True, sync_trajectory=None):
     # Only allow channel estimation from slot 1 onward
     assert slot_idx >= 0, "Current slot index must be a positive integer"
 
@@ -106,7 +110,11 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
         start_slot = slot_idx - cache_slots + 1
         if freq_cov_mat is None:
             freq_cov_mat = estimate_freq_cov(dmimo_chans, rg, start_slot=start_slot, total_slots=cache_slots)
-        lmmse_int = LMMSELinearInterp(rg.pilot_pattern, freq_cov_mat)
+        lmmse_int = LMMSELinearInterp(
+            rg.pilot_pattern,
+            freq_cov_mat,
+            share_rx_weights=True,
+        )
     else:
         lmmse_int = lmmse_interpolator
     end_time = time.time()
@@ -129,8 +137,18 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
     dx = mapper(bs)
     dx_rg = rg_mapper(dx)
 
-    # add CFO/STO to simulate synchronization errors
-    if np.any(np.not_equal(sto_vals, 0)):
+    # Apply the clock trajectory to pilots so CSI contains the same effective
+    # synchronization state as the data waveform.
+    if sync_trajectory is not None and sync_trajectory.enabled:
+        phase_rad, timing_samples = sync_trajectory.state_at(slot_idx)
+        dx_rg = add_synchronization_offsets(
+            dx_rg,
+            phase_rad,
+            timing_samples,
+            cp_len=rg.cyclic_prefix_length,
+            channel_type=dmimo_chans.channel_type,
+        )
+    elif np.any(np.not_equal(sto_vals, 0)):
         dx_rg = add_timing_offset(
             dx_rg,
             sto_vals,
@@ -138,7 +156,7 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
             cp_len=rg.cyclic_prefix_length,
             channel_type=dmimo_chans.channel_type,
         )
-    if np.any(np.not_equal(cfo_vals, 0)):
+    if sync_trajectory is None and np.any(np.not_equal(cfo_vals, 0)):
         dx_rg = add_frequency_offset(
             dx_rg,
             cfo_vals,
@@ -155,18 +173,26 @@ def lmmse_channel_estimation(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_
     #
     # LMMSE channel estimation
     #
-    num_rx_ant = ry.shape[2]
-    h_all = []
-    err_var_all = []
-    # loop for individual receiver antennas in each batch to reduce memory requirement
-    for idx in range(num_rx_ant):
-        ry1 = ry[:1, :1, idx:idx+1, :, :]
-        h_hat, err_var = ls_estimator([ry1, nvar])
-        h_all.append(h_hat)
-        err_var_all.append(err_var)
+    if getattr(lmmse_int, "share_rx_weights", False):
+        # nvar is scalar in this estimator, so every receive antenna has the
+        # same LS error variance and therefore the same LMMSE interpolation
+        # weights. Estimate all antennas together while solving for those
+        # weights only once.
+        h_all, evar_all = ls_estimator([ry[:1, :1, :, :, :], nvar])
+    else:
+        num_rx_ant = ry.shape[2]
+        h_all = []
+        err_var_all = []
+        # Retain the memory-conservative path for interpolators whose error
+        # variance can differ between receive antennas.
+        for idx in range(num_rx_ant):
+            ry1 = ry[:1, :1, idx:idx+1, :, :]
+            h_hat, err_var = ls_estimator([ry1, nvar])
+            h_all.append(h_hat)
+            err_var_all.append(err_var)
 
-    h_all = tf.concat(h_all, axis=2)
-    evar_all = tf.concat(err_var_all, axis=2)
+        h_all = tf.concat(h_all, axis=2)
+        evar_all = tf.concat(err_var_all, axis=2)
 
     # Guard subcarriers padding
     if np.sum(rg.num_guard_carriers) > 0:
@@ -185,7 +211,8 @@ def _trim_to_effective_subcarriers(ry, rg: ResourceGrid):
 
 
 def get_received_pilot_symbols(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slot_idx,
-                               cfo_vals=[0], sto_vals=[0], num_bits_per_symbol=2):
+                               cfo_vals=[0], sto_vals=[0], num_bits_per_symbol=2,
+                               sync_trajectory=None):
     """
     Simulate one slot and return received samples on pilot OFDM symbols.
 
@@ -205,7 +232,16 @@ def get_received_pilot_symbols(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slo
     dx = mapper(bs)
     dx_rg = rg_mapper(dx)
 
-    if np.any(np.not_equal(sto_vals, 0)):
+    if sync_trajectory is not None and sync_trajectory.enabled:
+        phase_rad, timing_samples = sync_trajectory.state_at(slot_idx)
+        dx_rg = add_synchronization_offsets(
+            dx_rg,
+            phase_rad,
+            timing_samples,
+            cp_len=rg.cyclic_prefix_length,
+            channel_type=dmimo_chans.channel_type,
+        )
+    elif np.any(np.not_equal(sto_vals, 0)):
         dx_rg = add_timing_offset(
             dx_rg,
             sto_vals,
@@ -213,7 +249,7 @@ def get_received_pilot_symbols(dmimo_chans: dMIMOChannels, rg: ResourceGrid, slo
             cp_len=rg.cyclic_prefix_length,
             channel_type=dmimo_chans.channel_type,
         )
-    if np.any(np.not_equal(cfo_vals, 0)):
+    if sync_trajectory is None and np.any(np.not_equal(cfo_vals, 0)):
         dx_rg = add_frequency_offset(
             dx_rg,
             cfo_vals,

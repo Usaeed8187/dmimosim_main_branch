@@ -5,6 +5,7 @@ import os
 
 from dmimo.config import Ns3Config, RCConfig
 from dmimo.channel.channel_estimation import lmmse_channel_estimation, get_received_pilot_symbols
+from dmimo.channel.pa_nonlinearity import pa_cache_suffix
 
 
 def _filename_token(value):
@@ -17,6 +18,7 @@ def synchronization_cache_suffix(
     drop_id=None,
     phase_std_deg=None,
     timing_std_samples=None,
+    sync_trajectory=None,
 ):
     """Return a safe cache suffix for one synchronization-error setting.
 
@@ -24,6 +26,9 @@ def synchronization_cache_suffix(
     not provide the complete cache metadata, return ``None`` so the disk cache
     is bypassed instead of risking reuse of an incompatible estimate.
     """
+
+    if sync_trajectory is not None:
+        return sync_trajectory.cache_suffix()
 
     has_cfo = np.any(np.not_equal(np.asarray(cfo_vals), 0))
     has_sto = np.any(np.not_equal(np.asarray(sto_vals), 0))
@@ -162,6 +167,7 @@ class standard_rc_pred_freq_mimo:
         sync_drop_id=None,
         sync_phase_std_deg=None,
         sync_timing_std_samples=None,
+        sync_trajectory=None,
     ):
         """Load a single channel estimate from disk or run LMMSE estimation."""
 
@@ -175,12 +181,21 @@ class standard_rc_pred_freq_mimo:
             drop_id=sync_drop_id,
             phase_std_deg=sync_phase_std_deg,
             timing_std_samples=sync_timing_std_samples,
+            sync_trajectory=sync_trajectory,
+        )
+        channel_config = getattr(dmimo_chans, "ns3_config", self.ns3_config)
+        pa_enabled = bool(getattr(channel_config, "pa_enabled", False))
+        pa_suffix = pa_cache_suffix(
+            pa_enabled,
+            getattr(channel_config, "pa_ibo_db", 6.5),
+            getattr(channel_config, "pa_rho", 3.0),
+            getattr(channel_config, "pa_model_version", "rapp_v1"),
         )
         file_path = (
             None
             if cache_suffix is None
             else "{}/dmimochans_{}{}".format(
-                folder_path, slot_idx, cache_suffix
+                folder_path, slot_idx, cache_suffix + pa_suffix
             )
         )
 
@@ -189,6 +204,21 @@ class standard_rc_pred_freq_mimo:
                 with np.load(f"{file_path}.npz") as data:
                     h_freq_csi = data["h_freq_csi"]
                     err_var_csi = data.get("err_var_csi")
+                    if sync_trajectory is not None:
+                        cached_version = str(data["sync_model_version"].item())
+                        if cached_version != sync_trajectory.model_version:
+                            raise ValueError("Synchronization cache model mismatch.")
+                    if pa_enabled:
+                        cached_pa_version = str(data["pa_model_version"].item())
+                        cached_pa_ibo = float(data["pa_ibo_db"].item())
+                        cached_pa_rho = float(data["pa_rho"].item())
+                        if (
+                            cached_pa_version
+                            != channel_config.pa_model_version
+                            or cached_pa_ibo != channel_config.pa_ibo_db
+                            or cached_pa_rho != channel_config.pa_rho
+                        ):
+                            raise ValueError("PA channel-estimate cache mismatch.")
                 if err_var_csi is not None:
                     return (
                         np.expand_dims(h_freq_csi, axis=0),
@@ -207,13 +237,33 @@ class standard_rc_pred_freq_mimo:
             freq_cov_mat=freq_cov_mat,
             lmmse_interpolator=lmmse_interpolator,
             use_rx_snr_for_nvar=use_rx_snr_for_nvar,
+            sync_trajectory=sync_trajectory,
         )
         if file_path is not None:
             os.makedirs(folder_path, exist_ok=True)
+            cache_metadata = (
+                sync_trajectory.metadata()
+                if sync_trajectory is not None
+                else {}
+            )
+            if pa_enabled:
+                cache_metadata.update(
+                    {
+                        "pa_enabled": np.asarray(True),
+                        "pa_ibo_db": np.asarray(
+                            channel_config.pa_ibo_db
+                        ),
+                        "pa_rho": np.asarray(channel_config.pa_rho),
+                        "pa_model_version": np.asarray(
+                            channel_config.pa_model_version
+                        ),
+                    }
+                )
             np.savez(
                 file_path,
                 h_freq_csi=h_freq_csi,
                 err_var_csi=err_var_csi,
+                **cache_metadata,
             )
 
         return np.expand_dims(h_freq_csi, axis=0), np.expand_dims(err_var_csi, axis=0)
@@ -233,6 +283,7 @@ class standard_rc_pred_freq_mimo:
         sync_drop_id=None,
         sync_phase_std_deg=None,
         sync_timing_std_samples=None,
+        sync_trajectory=None,
     ):
 
         first_csi_history_idx = first_slot_idx - (csi_delay * self.history_len)
@@ -252,6 +303,7 @@ class standard_rc_pred_freq_mimo:
                     sync_drop_id=sync_drop_id,
                     sync_phase_std_deg=sync_phase_std_deg,
                     sync_timing_std_samples=sync_timing_std_samples,
+                    sync_trajectory=sync_trajectory,
                 )
                 for slot_idx in channel_history_slots
             ]
@@ -275,6 +327,7 @@ class standard_rc_pred_freq_mimo:
                 sync_drop_id=sync_drop_id,
                 sync_phase_std_deg=sync_phase_std_deg,
                 sync_timing_std_samples=sync_timing_std_samples,
+                sync_trajectory=sync_trajectory,
             )
             self.csi_history_buffer = np.concatenate([self.csi_history_buffer[1:], new_entry[0]], axis=0)
             self.csi_err_var_history_buffer = np.concatenate([self.csi_err_var_history_buffer[1:], new_entry[1]], axis=0)
@@ -291,6 +344,7 @@ class standard_rc_pred_freq_mimo:
                 sync_drop_id=sync_drop_id,
                 sync_phase_std_deg=sync_phase_std_deg,
                 sync_timing_std_samples=sync_timing_std_samples,
+                sync_trajectory=sync_trajectory,
             )
             for slot_idx in channel_history_slots
         ]
@@ -303,7 +357,8 @@ class standard_rc_pred_freq_mimo:
         return self.csi_history_buffer, self.csi_err_var_history_buffer
     
     def _get_pilot_obs(
-        self, slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals
+        self, slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals,
+        sync_trajectory=None,
     ):
         """Generate pilot observations without a persistent disk cache."""
 
@@ -313,6 +368,7 @@ class standard_rc_pred_freq_mimo:
             slot_idx=slot_idx,
             cfo_vals=cfo_vals,
             sto_vals=sto_vals,
+            sync_trajectory=sync_trajectory,
         )
         return (
             np.expand_dims(np.asarray(rx_sig_pilot), axis=0),
@@ -320,7 +376,8 @@ class standard_rc_pred_freq_mimo:
         )
 
     def _get_pilot_history_internal(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans,
-                                    cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None):
+                                    cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None,
+                                    sync_trajectory=None):
         first_csi_history_idx = first_slot_idx - (csi_delay * self.history_len)
         history_slots = np.arange(first_csi_history_idx, first_slot_idx, csi_delay)
 
@@ -332,7 +389,8 @@ class standard_rc_pred_freq_mimo:
             y_list = []
             for slot_idx in history_slots:
                 y_entry, pilot_symbols = self._get_pilot_obs(
-                    slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals
+                    slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals,
+                    sync_trajectory=sync_trajectory,
                 )
                 y_list.append(y_entry)
                 self.pilot_symbols = pilot_symbols
@@ -346,7 +404,8 @@ class standard_rc_pred_freq_mimo:
         if np.array_equal(self.pilot_obs_history_slots[1:], history_slots[:-1]):
             newest_slot_idx = history_slots[-1]
             y_entry, pilot_symbols = self._get_pilot_obs(
-                newest_slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals
+                newest_slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals,
+                sync_trajectory=sync_trajectory,
             )
             self.pilot_obs_history_buffer = np.concatenate([self.pilot_obs_history_buffer[1:], y_entry], axis=0)
             self.pilot_obs_history_slots = history_slots
@@ -356,7 +415,8 @@ class standard_rc_pred_freq_mimo:
         y_list = []
         for slot_idx in history_slots:
             y_entry, pilot_symbols = self._get_pilot_obs(
-                slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals
+                slot_idx, rg_csi, dmimo_chans, cfo_vals, sto_vals,
+                sync_trajectory=sync_trajectory,
             )
             y_list.append(y_entry)
             self.pilot_symbols = pilot_symbols
@@ -379,6 +439,7 @@ class standard_rc_pred_freq_mimo:
         sync_drop_id=None,
         sync_phase_std_deg=None,
         sync_timing_std_samples=None,
+        sync_trajectory=None,
     ):
         h_freq_csi_history, _ = self._get_csi_history_internal(
             first_slot_idx,
@@ -394,6 +455,7 @@ class standard_rc_pred_freq_mimo:
             sync_drop_id=sync_drop_id,
             sync_phase_std_deg=sync_phase_std_deg,
             sync_timing_std_samples=sync_timing_std_samples,
+            sync_trajectory=sync_trajectory,
         )
         return h_freq_csi_history
 
@@ -412,6 +474,7 @@ class standard_rc_pred_freq_mimo:
         sync_drop_id=None,
         sync_phase_std_deg=None,
         sync_timing_std_samples=None,
+        sync_trajectory=None,
     ):
         return self._get_csi_history_internal(
             first_slot_idx,
@@ -427,9 +490,10 @@ class standard_rc_pred_freq_mimo:
             sync_drop_id=sync_drop_id,
             sync_phase_std_deg=sync_phase_std_deg,
             sync_timing_std_samples=sync_timing_std_samples,
+            sync_trajectory=sync_trajectory,
         )
     
-    def get_pilot_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None):
+    def get_pilot_history(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None, sync_trajectory=None):
         pilot_hist, _ = self._get_pilot_history_internal(
             first_slot_idx,
             csi_delay,
@@ -438,10 +502,11 @@ class standard_rc_pred_freq_mimo:
             cfo_vals=cfo_vals,
             sto_vals=sto_vals,
             estimated_channels_dir=estimated_channels_dir,
+            sync_trajectory=sync_trajectory,
         )
         return pilot_hist
 
-    def get_pilot_history_with_metadata(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None):
+    def get_pilot_history_with_metadata(self, first_slot_idx, csi_delay, rg_csi, dmimo_chans, cfo_vals=[0], sto_vals=[0], estimated_channels_dir=None, sync_trajectory=None):
         return self._get_pilot_history_internal(
             first_slot_idx,
             csi_delay,
@@ -450,6 +515,7 @@ class standard_rc_pred_freq_mimo:
             cfo_vals=cfo_vals,
             sto_vals=sto_vals,
             estimated_channels_dir=estimated_channels_dir,
+            sync_trajectory=sync_trajectory,
         )
     def get_ideal_csi_history(self, first_slot_idx, csi_delay, dmimo_chans, batch_size=1):
         

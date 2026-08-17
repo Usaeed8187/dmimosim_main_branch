@@ -9,8 +9,9 @@ figures, plus two residual-synchronization sweeps at fixed RX/TX counts:
 * Uncoded BER vs. number of UEs (fixed RUs, fixed MCS)
 * Throughput vs. number of RUs (fixed UEs, best MCS per point)
 * Throughput vs. number of UEs (fixed RUs, best MCS per point)
-* Throughput vs. timing-error standard deviation (zero phase error)
-* Throughput vs. phase-error standard deviation (zero timing error)
+* Throughput vs. residual fractional-frequency standard deviation
+* Throughput vs. initial timing-offset standard deviation
+* Throughput vs. oscillator phase-noise level
 
 For BER plots, the modulation order and code rate are fixed by the
 command-line arguments.  For throughput plots, the script selects, for
@@ -42,6 +43,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+SYNC_RESULT_MODEL_VERSION = "clock_v2"
+PA_RESULT_MODEL_VERSION = "rapp_v1"
 
 ################################################################################
 # Argument parsing
@@ -84,8 +87,15 @@ class PlotConfig:
     channelmamba_all_drops: Sequence[int]
     wesn_lite_readout_mode: str = "centered_ridge"
     sync_errors: bool = False
-    sync_phase_std_deg: float = 0.0
-    sync_timing_std_samples: float = 0.0
+    sync_frequency_std_ppb: float = 0.0
+    sync_initial_timing_std_ps: float = 0.0
+    sync_initial_phase_std_deg: float = 0.0
+    sync_phase_noise_s100_dbchz: Optional[float] = None
+    feedback_delay_ms: float = 4.0
+    pa_enabled: bool = False
+    pa_ibo_db: float = 6.5
+    pa_rho: float = 3.0
+    pa_model_version: str = PA_RESULT_MODEL_VERSION
 
 
 def _filename_token(value: float) -> str:
@@ -93,13 +103,59 @@ def _filename_token(value: float) -> str:
 
 
 def sync_result_suffix(
-    enabled: bool, phase_std_deg: float, timing_std_samples: float
+    frequency_std_ppb: float,
+    initial_timing_std_ps: float,
+    initial_phase_std_deg: float,
+    phase_noise_s100_dbchz: Optional[float],
 ) -> str:
-    return (
-        f"_sync_errors_{bool(enabled)}"
-        f"_phase_std_deg_{_filename_token(phase_std_deg)}"
-        f"_timing_std_samples_{_filename_token(timing_std_samples)}"
+    pn_token = (
+        "off"
+        if phase_noise_s100_dbchz is None
+        else _filename_token(phase_noise_s100_dbchz)
     )
+    return (
+        f"_sync_{SYNC_RESULT_MODEL_VERSION}"
+        f"_freq_std_ppb_{_filename_token(frequency_std_ppb)}"
+        f"_timing0_std_ps_{_filename_token(initial_timing_std_ps)}"
+        f"_phase0_std_deg_{_filename_token(initial_phase_std_deg)}"
+        f"_pn_s100_dbchz_{pn_token}"
+    )
+
+
+def pa_result_suffix(
+    enabled: bool,
+    ibo_db: float,
+    rho: float,
+    model_version: str,
+) -> str:
+    if not enabled:
+        return ""
+    return (
+        f"_pa_{model_version}"
+        f"_ibo_db_{_filename_token(ibo_db)}"
+        f"_rho_{_filename_token(rho)}"
+    )
+
+
+def feedback_delay_result_suffix(feedback_delay_ms: float) -> str:
+    return f"_fb_delay_ms_{_filename_token(feedback_delay_ms)}"
+
+
+def phase_noise_rms_deg(
+    s100_dbchz: float,
+    *,
+    duration_s: float,
+) -> float:
+    """RMS Wiener phase innovation over ``duration_s`` (Ngo--Larsson Eq. 23)."""
+
+    variance_rad2 = (
+        4.0
+        * np.pi**2
+        * (100e3) ** 2
+        * 10.0 ** (float(s100_dbchz) / 10.0)
+        * float(duration_s)
+    )
+    return float(np.rad2deg(np.sqrt(variance_rad2)))
 
 def _resolve_path(path: str, relative_to: Path) -> Path:
     """Resolve ``path`` against ``relative_to`` when not absolute."""
@@ -119,6 +175,27 @@ class DataPoint:
     uncoded_ber: float
     coded_ber: float
     throughput: float
+    channel_prediction_nmse: float = float("nan")
+
+
+@dataclass(frozen=True)
+class SyncThroughputStatistics:
+    """Mean throughput and paired 95% confidence half-widths."""
+
+    scenario: "Scenario"
+    means: Sequence[float]
+    ci95: Sequence[float]
+    counts: Sequence[int]
+
+
+@dataclass(frozen=True)
+class PaMetricStatistics:
+    """Per-IBO means and paired 95% confidence half-widths."""
+
+    scenario: "Scenario"
+    means: Sequence[float]
+    ci95: Sequence[float]
+    counts: Sequence[int]
 
 @dataclass(frozen=True)
 class Scenario:
@@ -246,28 +323,47 @@ class ResultLoader:
         candidates: List[str] = []
         suffixes = self._suffixes_for_scenario(scenario)
         sync_suffix = sync_result_suffix(
-            self.cfg.sync_errors,
-            self.cfg.sync_phase_std_deg,
-            self.cfg.sync_timing_std_samples,
+            self.cfg.sync_frequency_std_ppb,
+            self.cfg.sync_initial_timing_std_ps,
+            self.cfg.sync_initial_phase_std_deg,
+            self.cfg.sync_phase_noise_s100_dbchz,
         )
+        pa_suffix = pa_result_suffix(
+            self.cfg.pa_enabled,
+            self.cfg.pa_ibo_db,
+            self.cfg.pa_rho,
+            self.cfg.pa_model_version,
+        )
+        feedback_suffix = feedback_delay_result_suffix(
+            self.cfg.feedback_delay_ms
+        )
+        result_suffixes = [sync_suffix + pa_suffix + feedback_suffix]
+        # Legacy artifacts without a feedback-delay suffix all used the
+        # original 4 ms cycle. Never use them for an 8 ms request.
+        if np.isclose(self.cfg.feedback_delay_ms, 4.0):
+            result_suffixes.append(sync_suffix + pa_suffix)
         for pattern in patterns:
             for suffix in suffixes:
-                suffixed_pattern = self._append_suffix(
-                    pattern, suffix + sync_suffix
-                )
-                full_pattern = os.path.join(folder, suffixed_pattern)
-                if "*" in suffixed_pattern:
-                    matches = glob.glob(full_pattern)
-                    matches.sort()
-                    candidates.extend(matches)
-                else:
-                    candidates.append(full_pattern)
+                for result_suffix in result_suffixes:
+                    suffixed_pattern = self._append_suffix(
+                        pattern, suffix + result_suffix
+                    )
+                    full_pattern = os.path.join(folder, suffixed_pattern)
+                    if "*" in suffixed_pattern:
+                        matches = glob.glob(full_pattern)
+                        matches.sort()
+                        candidates.extend(matches)
+                    else:
+                        candidates.append(full_pattern)
         # Keep old zero-error artifacts readable while preferring the new,
         # explicitly parameterized filenames above.
         if (
             not self.cfg.sync_errors
-            and self.cfg.sync_phase_std_deg == 0
-            and self.cfg.sync_timing_std_samples == 0
+            and not self.cfg.pa_enabled
+            and self.cfg.sync_frequency_std_ppb == 0
+            and self.cfg.sync_initial_timing_std_ps == 0
+            and self.cfg.sync_initial_phase_std_deg == 0
+            and self.cfg.sync_phase_noise_s100_dbchz is None
             and not any(os.path.exists(candidate) for candidate in candidates)
         ):
             for pattern in patterns:
@@ -275,7 +371,11 @@ class ResultLoader:
                     legacy_pattern = self._append_suffix(pattern, suffix)
                     full_pattern = os.path.join(folder, legacy_pattern)
                     if "*" in legacy_pattern:
-                        candidates.extend(sorted(glob.glob(full_pattern)))
+                        candidates.extend(
+                            path
+                            for path in sorted(glob.glob(full_pattern))
+                            if "_sync_clock_" not in os.path.basename(path)
+                        )
                     else:
                         candidates.append(full_pattern)
         return candidates
@@ -328,11 +428,33 @@ class ResultLoader:
         )
         matches = glob.glob(pattern)
         required_sync_suffix = sync_result_suffix(
-            self.cfg.sync_errors,
-            self.cfg.sync_phase_std_deg,
-            self.cfg.sync_timing_std_samples,
+            self.cfg.sync_frequency_std_ppb,
+            self.cfg.sync_initial_timing_std_ps,
+            self.cfg.sync_initial_phase_std_deg,
+            self.cfg.sync_phase_noise_s100_dbchz,
         )
-        matches = [path for path in matches if required_sync_suffix in path]
+        required_pa_suffix = pa_result_suffix(
+            self.cfg.pa_enabled,
+            self.cfg.pa_ibo_db,
+            self.cfg.pa_rho,
+            self.cfg.pa_model_version,
+        )
+        required_feedback_suffix = feedback_delay_result_suffix(
+            self.cfg.feedback_delay_ms
+        )
+        matches = [
+            path
+            for path in matches
+            if required_sync_suffix in path
+            and required_pa_suffix in path
+            and (
+                required_feedback_suffix in path
+                or (
+                    np.isclose(self.cfg.feedback_delay_ms, 4.0)
+                    and "_fb_delay_ms_" not in path
+                )
+            )
+        ]
         if not matches:
             return None
 
@@ -421,8 +543,17 @@ class ResultLoader:
             uncoded_ber = self._uncoded_ber_from_npz(data)
             coded_ber = self._coded_ber_from_npz(data)
             throughput = self._scalar_from_array(np.atleast_1d(data.get("throughput", [])))
+            nmse_raw = data.get("chan_pred_nmse")
+            channel_prediction_nmse = (
+                float(np.nanmean(np.asarray(nmse_raw, dtype=float)))
+                if nmse_raw is not None and np.asarray(nmse_raw).size
+                else float("nan")
+            )
         return DataPoint(
-            uncoded_ber=uncoded_ber, coded_ber=coded_ber, throughput=throughput
+            uncoded_ber=uncoded_ber,
+            coded_ber=coded_ber,
+            throughput=throughput,
+            channel_prediction_nmse=channel_prediction_nmse,
         )
 
 
@@ -487,10 +618,19 @@ def _average_metric(
     return average_datapoints(points) if points else None
 
 def average_datapoints(points: Sequence[DataPoint]) -> DataPoint:
+    nmse_values = np.asarray(
+        [p.channel_prediction_nmse for p in points], dtype=np.float64
+    )
+    mean_nmse = (
+        float(np.nanmean(nmse_values))
+        if np.any(np.isfinite(nmse_values))
+        else float("nan")
+    )
     return DataPoint(
         uncoded_ber=float(np.nanmean([p.uncoded_ber for p in points])),
         coded_ber=float(np.nanmean([p.coded_ber for p in points])),
         throughput=float(np.nanmean([p.throughput for p in points])),
+        channel_prediction_nmse=mean_nmse,
     )
 
 def _default_scenarios(
@@ -679,14 +819,17 @@ def plot_metric(
     ylabel: str,
     title: str,
     output_path: str,
+    series_errors: Optional[Sequence[Tuple[str, Sequence[float]]]] = None,
+    x_tick_labels: Optional[Sequence[str]] = None,
+    top_tick_labels: Optional[Sequence[str]] = None,
+    top_xlabel: Optional[str] = None,
 ) -> None:
     fig, ax = plt.subplots(figsize=(5.6, 3.8))
+    errors_by_label = dict(series_errors or [])
 
     for label, y_values in series:
         st = _style_for_label(label)
-        ax.plot(
-            x_values,
-            y_values,
+        plot_kwargs = dict(
             marker=st["marker"],
             color=st.get("color", None),
             linestyle=st.get("linestyle", "-"),
@@ -696,9 +839,28 @@ def plot_metric(
             markeredgewidth=1.2,
             label=st["label"],
         )
+        if label in errors_by_label:
+            ax.errorbar(
+                x_values,
+                y_values,
+                yerr=errors_by_label[label],
+                capsize=2.0,
+                **plot_kwargs,
+            )
+        else:
+            ax.plot(x_values, y_values, **plot_kwargs)
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
+    if x_tick_labels is not None:
+        ax.set_xticks(x_values, labels=x_tick_labels)
+    if top_tick_labels is not None:
+        top_ax = ax.twiny()
+        top_ax.set_xlim(ax.get_xlim())
+        top_ax.set_xticks(x_values, labels=top_tick_labels)
+        top_ax.tick_params(direction="in", length=5)
+        if top_xlabel is not None:
+            top_ax.set_xlabel(top_xlabel)
     # ax.set_ylim(top=27)
     ax.grid(True, which="major", linestyle="-", linewidth=0.35, alpha=0.25)
     ax.minorticks_on()
@@ -791,36 +953,48 @@ def select_best_mcs(
     return best_throughput, best_mcs
 
 
-def sync_throughput_series(
+def sync_throughput_statistics(
     loader_type: type[ResultLoader],
     cfg: PlotConfig,
     scenarios: Sequence[Scenario],
-    sweep_values: Sequence[float],
+    sweep_values: Sequence[Optional[float]],
     sweep: str,
-) -> List[Tuple[Scenario, Sequence[float]]]:
-    """Build throughput curves for one residual-synchronization dimension.
+) -> List[SyncThroughputStatistics]:
+    """Build throughput means and paired confidence intervals for a sweep.
 
-    Both UE dimensions are fixed. A timing sweep forces phase error to zero;
-    a phase sweep forces timing error to zero. Each point is averaged over the
-    requested drops and uses the same best-MCS selection as the ordinary
-    throughput plots.
+    Both UE dimensions are fixed and all non-swept synchronization dimensions
+    are zero. For non-baseline points, the confidence interval is computed from
+    per-drop differences relative to the all-zero point. ``None`` denotes the
+    phase-noise-off baseline and is valid only for the phase-noise sweep.
     """
 
-    if sweep not in {"phase", "timing"}:
-        raise ValueError("sweep must be 'phase' or 'timing'")
+    if sweep not in {"frequency", "timing", "phase_noise"}:
+        raise ValueError("unsupported synchronization sweep")
 
-    values_by_scenario = {scenario: [] for scenario in scenarios}
+    samples_by_scenario = {scenario: [] for scenario in scenarios}
     for sweep_value in sweep_values:
-        sweep_value = float(sweep_value)
+        if sweep_value is None and sweep != "phase_noise":
+            raise ValueError("only the phase-noise sweep supports an off point")
+        numeric_value = 0.0 if sweep_value is None else float(sweep_value)
+        phase_noise_value = (
+            numeric_value
+            if sweep == "phase_noise" and sweep_value is not None
+            else None
+        )
         point_cfg = replace(
             cfg,
-            # The zero-error point is produced by twc_tput_across_tx.sh;
-            # twc_tput_across_sync.sh contains only nonzero error settings.
-            sync_errors=sweep_value != 0.0,
-            sync_phase_std_deg=sweep_value if sweep == "phase" else 0.0,
-            sync_timing_std_samples=(
-                sweep_value if sweep == "timing" else 0.0
+            # Sweep artifacts, including the explicit all-zero baseline, must
+            # come from the current versioned experiment. This deliberately
+            # disables the legacy zero-result fallback.
+            sync_errors=True,
+            sync_frequency_std_ppb=(
+                numeric_value if sweep == "frequency" else 0.0
             ),
+            sync_initial_timing_std_ps=(
+                numeric_value if sweep == "timing" else 0.0
+            ),
+            sync_initial_phase_std_deg=0.0,
+            sync_phase_noise_s100_dbchz=phase_noise_value,
         )
         point_loader = loader_type(point_cfg)
         aggregated = aggregate_metrics(
@@ -832,7 +1006,7 @@ def sync_throughput_series(
             cfg.code_rates,
         )
         for scenario in scenarios:
-            throughput, _ = select_best_mcs(
+            _, best_mcs = select_best_mcs(
                 aggregated,
                 scenario,
                 cfg.fixed_rx_for_tx_sweep,
@@ -840,13 +1014,182 @@ def sync_throughput_series(
                 cfg.modulation_orders,
                 cfg.code_rates,
             )
-            values_by_scenario[scenario].append(
-                throughput if throughput is not None else np.nan
-            )
+            mod_order, code_rate = best_mcs or (0, 0.0)
+            samples = {}
+            for drop_id in cfg.drops:
+                datapoint = point_loader.load_datapoint(
+                    drop_id,
+                    cfg.fixed_rx_for_tx_sweep,
+                    cfg.fixed_tx_for_rx_sweep,
+                    mod_order,
+                    code_rate,
+                    scenario,
+                )
+                if datapoint is not None:
+                    samples[int(drop_id)] = datapoint.throughput
+            samples_by_scenario[scenario].append(samples)
+
+    baseline_value = None if sweep == "phase_noise" else 0.0
+    baseline_idx = next(
+        (
+            idx
+            for idx, value in enumerate(sweep_values)
+            if value == baseline_value
+        ),
+        None,
+    )
+    statistics = []
+    for scenario in scenarios:
+        point_samples = samples_by_scenario[scenario]
+        baseline_samples = (
+            point_samples[baseline_idx] if baseline_idx is not None else {}
+        )
+        means, ci95, counts = [], [], []
+        for idx, samples in enumerate(point_samples):
+            values = np.asarray(list(samples.values()), dtype=float)
+            means.append(float(np.mean(values)) if values.size else np.nan)
+            counts.append(int(values.size))
+            if baseline_idx is not None and idx != baseline_idx:
+                common_drops = sorted(set(samples) & set(baseline_samples))
+                uncertainty_samples = np.asarray(
+                    [
+                        samples[drop_id] - baseline_samples[drop_id]
+                        for drop_id in common_drops
+                    ],
+                    dtype=float,
+                )
+            else:
+                uncertainty_samples = values
+            if uncertainty_samples.size > 1:
+                half_width = 1.96 * float(
+                    np.std(uncertainty_samples, ddof=1)
+                    / np.sqrt(uncertainty_samples.size)
+                )
+            elif uncertainty_samples.size == 1:
+                half_width = 0.0
+            else:
+                half_width = np.nan
+            ci95.append(half_width)
+        statistics.append(
+            SyncThroughputStatistics(scenario, means, ci95, counts)
+        )
+    return statistics
+
+
+def sync_throughput_series(
+    loader_type: type[ResultLoader],
+    cfg: PlotConfig,
+    scenarios: Sequence[Scenario],
+    sweep_values: Sequence[float],
+    sweep: str,
+) -> List[Tuple[Scenario, Sequence[float]]]:
+    """Backward-compatible mean-only view of synchronization statistics."""
 
     return [
-        (scenario, values_by_scenario[scenario]) for scenario in scenarios
+        (item.scenario, item.means)
+        for item in sync_throughput_statistics(
+            loader_type, cfg, scenarios, sweep_values, sweep
+        )
     ]
+
+
+def pa_metric_statistics(
+    loader_type: type[ResultLoader],
+    cfg: PlotConfig,
+    scenarios: Sequence[Scenario],
+    ibo_values: Sequence[float],
+    metric: str,
+) -> List[PaMetricStatistics]:
+    """Build per-IBO metric means and paired confidence intervals."""
+
+    if metric not in {
+        "throughput",
+        "uncoded_ber",
+        "coded_ber",
+        "channel_prediction_nmse",
+    }:
+        raise ValueError("unsupported PA-sweep metric")
+    if not ibo_values:
+        return []
+
+    samples_by_scenario = {scenario: [] for scenario in scenarios}
+    for ibo_db in ibo_values:
+        point_cfg = replace(
+            cfg,
+            pa_enabled=True,
+            pa_ibo_db=float(ibo_db),
+        )
+        point_loader = loader_type(point_cfg)
+        aggregated = aggregate_metrics(
+            point_loader,
+            scenarios,
+            [cfg.fixed_rx_for_tx_sweep],
+            [cfg.fixed_tx_for_rx_sweep],
+            cfg.modulation_orders,
+            cfg.code_rates,
+        )
+        for scenario in scenarios:
+            _, best_mcs = select_best_mcs(
+                aggregated,
+                scenario,
+                cfg.fixed_rx_for_tx_sweep,
+                cfg.fixed_tx_for_rx_sweep,
+                cfg.modulation_orders,
+                cfg.code_rates,
+            )
+            mod_order, code_rate = best_mcs or (0, 0.0)
+            samples = {}
+            for drop_id in cfg.drops:
+                datapoint = point_loader.load_datapoint(
+                    drop_id,
+                    cfg.fixed_rx_for_tx_sweep,
+                    cfg.fixed_tx_for_rx_sweep,
+                    mod_order,
+                    code_rate,
+                    scenario,
+                )
+                if datapoint is not None:
+                    samples[int(drop_id)] = float(getattr(datapoint, metric))
+            samples_by_scenario[scenario].append(samples)
+
+    reference_idx = int(np.argmax(np.asarray(ibo_values, dtype=float)))
+    statistics = []
+    for scenario in scenarios:
+        point_samples = samples_by_scenario[scenario]
+        reference_samples = point_samples[reference_idx]
+        means, ci95, counts = [], [], []
+        for idx, samples in enumerate(point_samples):
+            values = np.asarray(list(samples.values()), dtype=float)
+            finite_values = values[np.isfinite(values)]
+            means.append(
+                float(np.mean(finite_values)) if finite_values.size else np.nan
+            )
+            counts.append(int(finite_values.size))
+            if idx == reference_idx:
+                uncertainty_samples = finite_values
+            else:
+                common_drops = sorted(set(samples) & set(reference_samples))
+                uncertainty_samples = np.asarray(
+                    [
+                        samples[drop_id] - reference_samples[drop_id]
+                        for drop_id in common_drops
+                        if np.isfinite(samples[drop_id])
+                        and np.isfinite(reference_samples[drop_id])
+                    ],
+                    dtype=float,
+                )
+            if uncertainty_samples.size > 1:
+                half_width = 1.96 * float(
+                    np.std(uncertainty_samples, ddof=1)
+                    / np.sqrt(uncertainty_samples.size)
+                )
+            elif uncertainty_samples.size == 1:
+                half_width = 0.0
+            else:
+                half_width = np.nan
+            ci95.append(half_width)
+        statistics.append(PaMetricStatistics(scenario, means, ci95, counts))
+    return statistics
 
 
 ################################################################################
@@ -870,7 +1213,7 @@ def main() -> None:
         nargs="+",
         # default=[1, 2],
         # default=[3, 13, 14, 15, 19, 20], # good: 20, 3,  okay: 19, 15, not great: 14, 13
-        default=list(range(1, 11)),
+        default=list(range(1, 21)),
         help="Drop indices to average over (e.g., 1 2 3).",
     )
     parser.add_argument(
@@ -951,21 +1294,70 @@ def main() -> None:
         default=False,
         help="Load artifacts generated with residual synchronization errors.",
     )
-    parser.add_argument("--sync-phase-std-deg", type=float, default=0.0)
-    parser.add_argument("--sync-timing-std-samples", type=float, default=0.0)
+    parser.add_argument("--sync-frequency-std-ppb", type=float, default=0.0)
+    parser.add_argument("--sync-initial-timing-std-ps", type=float, default=0.0)
+    parser.add_argument("--sync-initial-phase-std-deg", type=float, default=0.0)
+    parser.add_argument("--sync-phase-noise-s100-dbchz", type=float, default=None)
     parser.add_argument(
-        "--sync-phase-std-deg-values",
+        "--feedback-delay-ms",
         type=float,
-        nargs="+",
-        default=[0.0, 3.6, 18.0, 36.0, 45.0, 90.0],
-        help="Phase/frequency synchronization errors for the phase sweep.",
+        choices=[4.0, 8.0],
+        default=4.0,
+        help="Load results generated with this one-cycle CSI feedback delay.",
     )
     parser.add_argument(
-        "--sync-timing-std-samples-values",
+        "--sync-frequency-std-ppb-values",
         type=float,
         nargs="+",
-        default=[0.0, 0.05, 0.1, 0.2, 0.5],
-        help="Normalized timing-error standard deviations for the timing sweep.",
+        default=[0.0, 1.0, 3.73, 10.0, 30.0],
+        help="Residual fractional-frequency standard deviations in ppb.",
+    )
+    parser.add_argument(
+        "--sync-initial-timing-std-ps-values",
+        type=float,
+        nargs="+",
+        default=[0.0, 30.0, 60.0, 70.0, 200.0],
+        help="Initial post-synchronization timing standard deviations in ps.",
+    )
+    parser.add_argument(
+        "--sync-phase-noise-s100-dbchz-values",
+        type=float,
+        nargs="+",
+        default=[-120.0, -110.0, -100.0, -90.0],
+        help="Phase-noise spectrum levels in dBc/Hz at 100 kHz offset.",
+    )
+    parser.add_argument(
+        "--sync-phase-innovation-delay-slots",
+        type=int,
+        default=None,
+        help=(
+            "Optional CSI-delay override for the phase-innovation secondary "
+            "axis. By default it is derived from --feedback-delay-ms."
+        ),
+    )
+    parser.add_argument(
+        "--sync-slot-duration-ms",
+        type=float,
+        default=1.0,
+        help="Slot duration used for the phase-innovation secondary axis.",
+    )
+    parser.add_argument(
+        "--plot-pa-sweep",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Generate channel-prediction comparison figures versus PA IBO.",
+    )
+    parser.add_argument(
+        "--pa-ibo-db-values",
+        type=float,
+        nargs="+",
+        default=[0.0, 3.0, 5.0, 6.5, 9.0],
+        help="PA input-back-off values in dB.",
+    )
+    parser.add_argument("--pa-rho", type=float, default=3.0)
+    parser.add_argument(
+        "--pa-model-version",
+        default=PA_RESULT_MODEL_VERSION,
     )
     parser.add_argument(
         "--output-dir",
@@ -1012,8 +1404,13 @@ def main() -> None:
         channelmamba_all_drops=args.channelmamba_all_drops,
         wesn_lite_readout_mode=args.wesn_lite_readout_mode,
         sync_errors=args.sync_errors,
-        sync_phase_std_deg=args.sync_phase_std_deg,
-        sync_timing_std_samples=args.sync_timing_std_samples,
+        sync_frequency_std_ppb=args.sync_frequency_std_ppb,
+        sync_initial_timing_std_ps=args.sync_initial_timing_std_ps,
+        sync_initial_phase_std_deg=args.sync_initial_phase_std_deg,
+        sync_phase_noise_s100_dbchz=args.sync_phase_noise_s100_dbchz,
+        feedback_delay_ms=args.feedback_delay_ms,
+        pa_rho=args.pa_rho,
+        pa_model_version=args.pa_model_version,
     )
     
     os.makedirs(cfg.output_dir, exist_ok=True)
@@ -1260,55 +1657,198 @@ def main() -> None:
         output_path=os.path.join(cfg.output_dir, "throughput_vs_rx_ues.png"),
     )
 
+    if args.plot_pa_sweep:
+        pa_scenarios = [
+            scenario
+            for scenario in cfg.scenarios
+            if scenario.prediction
+            and scenario.prediction_method != "channelmamba"
+        ]
+        pa_throughput = pa_metric_statistics(
+            ResultLoader,
+            cfg,
+            pa_scenarios,
+            args.pa_ibo_db_values,
+            metric="throughput",
+        )
+        plot_metric(
+            args.pa_ibo_db_values,
+            [(item.scenario.label, item.means) for item in pa_throughput],
+            xlabel="Input back-off (dB)",
+            ylabel="Throughput (Mbps)",
+            title=(
+                "Throughput vs PA input back-off "
+                f"(UEs={cfg.fixed_rx_for_tx_sweep + 2}, "
+                f"RUs={cfg.fixed_tx_for_rx_sweep + 1})"
+            ),
+            output_path=os.path.join(
+                cfg.output_dir, "throughput_vs_pa_ibo_db.png"
+            ),
+            series_errors=[
+                (item.scenario.label, item.ci95) for item in pa_throughput
+            ],
+        )
+
+        pa_nmse = pa_metric_statistics(
+            ResultLoader,
+            cfg,
+            pa_scenarios,
+            args.pa_ibo_db_values,
+            metric="channel_prediction_nmse",
+        )
+        semilogy_metric(
+            args.pa_ibo_db_values,
+            [(item.scenario.label, item.means) for item in pa_nmse],
+            xlabel="Input back-off (dB)",
+            ylabel="Channel-prediction NMSE",
+            title=(
+                "Channel-prediction NMSE vs PA input back-off "
+                f"(UEs={cfg.fixed_rx_for_tx_sweep + 2}, "
+                f"RUs={cfg.fixed_tx_for_rx_sweep + 1})"
+            ),
+            output_path=os.path.join(
+                cfg.output_dir, "channel_prediction_nmse_vs_pa_ibo_db.png"
+            ),
+        )
+
+        pa_ber = pa_metric_statistics(
+            ResultLoader,
+            cfg,
+            pa_scenarios,
+            args.pa_ibo_db_values,
+            metric="uncoded_ber",
+        )
+        semilogy_metric(
+            args.pa_ibo_db_values,
+            [(item.scenario.label, item.means) for item in pa_ber],
+            xlabel="Input back-off (dB)",
+            ylabel="Uncoded BER",
+            title=(
+                "Uncoded BER vs PA input back-off "
+                f"(UEs={cfg.fixed_rx_for_tx_sweep + 2}, "
+                f"RUs={cfg.fixed_tx_for_rx_sweep + 1})"
+            ),
+            output_path=os.path.join(
+                cfg.output_dir, "uncoded_ber_vs_pa_ibo_db.png"
+            ),
+        )
+
     sync_scenarios = [
         scenario
         for scenario in cfg.scenarios
         if scenario.prediction_method != "channelmamba"
     ]
+    timing_stats = sync_throughput_statistics(
+        ResultLoader,
+        cfg,
+        sync_scenarios,
+        args.sync_initial_timing_std_ps_values,
+        sweep="timing",
+    )
     plot_metric(
-        args.sync_timing_std_samples_values,
+        args.sync_initial_timing_std_ps_values,
         [
-            (scenario.label, values)
-            for scenario, values in sync_throughput_series(
-                ResultLoader,
-                cfg,
-                sync_scenarios,
-                args.sync_timing_std_samples_values,
-                sweep="timing",
-            )
+            (item.scenario.label, item.means) for item in timing_stats
         ],
-        xlabel="Timing-error standard deviation (samples)",
+        xlabel="Initial timing-error standard deviation (ps)",
         ylabel="Throughput (Mbps)",
         title=(
-            "Throughput vs timing synchronization error "
-            f"(phase error=0, UEs={cfg.fixed_rx_for_tx_sweep + 2}, "
+            "Throughput vs initial timing synchronization error "
+            f"(other sync errors=0, UEs={cfg.fixed_rx_for_tx_sweep + 2}, "
             f"RUs={cfg.fixed_tx_for_rx_sweep + 1})"
         ),
         output_path=os.path.join(
-            cfg.output_dir, "throughput_vs_sync_timing_std_samples.png"
+            cfg.output_dir,
+            "throughput_vs_sync_initial_timing_std_ps_"
+            f"fb_delay_ms_{_filename_token(cfg.feedback_delay_ms)}.png",
         ),
+        series_errors=[
+            (item.scenario.label, item.ci95) for item in timing_stats
+        ],
+    )
+    frequency_stats = sync_throughput_statistics(
+        ResultLoader,
+        cfg,
+        sync_scenarios,
+        args.sync_frequency_std_ppb_values,
+        sweep="frequency",
     )
     plot_metric(
-        args.sync_phase_std_deg_values,
+        args.sync_frequency_std_ppb_values,
         [
-            (scenario.label, values)
-            for scenario, values in sync_throughput_series(
-                ResultLoader,
-                cfg,
-                sync_scenarios,
-                args.sync_phase_std_deg_values,
-                sweep="phase",
-            )
+            (item.scenario.label, item.means) for item in frequency_stats
         ],
-        xlabel="Phase-error standard deviation (degrees)",
+        xlabel="Residual fractional-frequency standard deviation (ppb)",
         ylabel="Throughput (Mbps)",
         title=(
             "Throughput vs frequency synchronization error "
-            f"(timing error=0, UEs={cfg.fixed_rx_for_tx_sweep + 2}, "
+            f"(other sync errors=0, UEs={cfg.fixed_rx_for_tx_sweep + 2}, "
             f"RUs={cfg.fixed_tx_for_rx_sweep + 1})"
         ),
         output_path=os.path.join(
-            cfg.output_dir, "throughput_vs_sync_phase_std_deg.png"
+            cfg.output_dir,
+            "throughput_vs_sync_frequency_std_ppb_"
+            f"fb_delay_ms_{_filename_token(cfg.feedback_delay_ms)}.png",
+        ),
+        series_errors=[
+            (item.scenario.label, item.ci95) for item in frequency_stats
+        ],
+    )
+    phase_sweep_values: List[Optional[float]] = [
+        None,
+        *args.sync_phase_noise_s100_dbchz_values,
+    ]
+    phase_stats = sync_throughput_statistics(
+        ResultLoader,
+        cfg,
+        sync_scenarios,
+        phase_sweep_values,
+        sweep="phase_noise",
+    )
+    phase_off_x = min(args.sync_phase_noise_s100_dbchz_values) - 10.0
+    phase_x_values = [phase_off_x, *args.sync_phase_noise_s100_dbchz_values]
+    phase_tick_labels = [
+        "Off",
+        *(f"{value:g}" for value in args.sync_phase_noise_s100_dbchz_values),
+    ]
+    phase_delay_slots = (
+        args.sync_phase_innovation_delay_slots
+        if args.sync_phase_innovation_delay_slots is not None
+        else int(round(args.feedback_delay_ms / args.sync_slot_duration_ms))
+    )
+    phase_duration_s = phase_delay_slots * args.sync_slot_duration_ms * 1e-3
+    phase_innovation_labels = [
+        "0",
+        *(
+            f"{phase_noise_rms_deg(value, duration_s=phase_duration_s):.3g}"
+            for value in args.sync_phase_noise_s100_dbchz_values
+        ),
+    ]
+    plot_metric(
+        phase_x_values,
+        [
+            (item.scenario.label, item.means) for item in phase_stats
+        ],
+        xlabel=r"Phase-noise level $S_{100}$ (dBc/Hz)",
+        ylabel="Throughput (Mbps)",
+        title=(
+            "Throughput vs oscillator phase noise "
+            f"(other sync errors=0, UEs={cfg.fixed_rx_for_tx_sweep + 2}, "
+            f"RUs={cfg.fixed_tx_for_rx_sweep + 1})"
+        ),
+        output_path=os.path.join(
+            cfg.output_dir,
+            "throughput_vs_sync_phase_noise_s100_dbchz_"
+            f"fb_delay_ms_{_filename_token(cfg.feedback_delay_ms)}.png",
+        ),
+        series_errors=[
+            (item.scenario.label, item.ci95) for item in phase_stats
+        ],
+        x_tick_labels=phase_tick_labels,
+        top_tick_labels=phase_innovation_labels,
+        top_xlabel=(
+            "RMS phase innovation over "
+            f"{phase_delay_slots}-slot CSI delay (degrees)"
         ),
     )
 

@@ -20,6 +20,7 @@ stubbed_module_names = (
     "dmimo.config",
     "dmimo.channel",
     "dmimo.channel.channel_estimation",
+    "dmimo.channel.pa_nonlinearity",
     module_name,
 )
 missing_module = object()
@@ -42,6 +43,13 @@ estimation_module = types.ModuleType("dmimo.channel.channel_estimation")
 estimation_module.lmmse_channel_estimation = None
 estimation_module.get_received_pilot_symbols = None
 sys.modules["dmimo.channel.channel_estimation"] = estimation_module
+pa_module = types.ModuleType("dmimo.channel.pa_nonlinearity")
+pa_module.pa_cache_suffix = lambda enabled, ibo_db, rho, model_version: (
+    ""
+    if not enabled
+    else f"_pa_{model_version}_ibo_db_{ibo_db:g}_rho_{rho:g}"
+)
+sys.modules["dmimo.channel.pa_nonlinearity"] = pa_module
 
 module_path = (
     Path(__file__).resolve().parents[1]
@@ -213,6 +221,46 @@ class SynchronizationChannelCacheTest(unittest.TestCase):
                 )
             self.assertEqual(len(estimate_calls), 2)
             self.assertFalse(Path(f"{cache_base}_rx_12_tx_20").exists())
+
+    def test_clock_model_cache_saves_and_validates_model_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_base = Path(tmp) / "channel_estimates_drop_1"
+
+            class Trajectory:
+                enabled = True
+                model_version = "clock_v2"
+
+                @staticmethod
+                def cache_suffix():
+                    return "_sync_clock_v2_drop_1_freq_std_ppb_3p73"
+
+                @staticmethod
+                def metadata():
+                    return {"sync_model_version": np.asarray("clock_v2")}
+
+            estimate_calls = []
+
+            def estimate(*args, **kwargs):
+                estimate_calls.append(kwargs)
+                return np.array([4.0]), np.array([0.4])
+
+            trajectory = Trajectory()
+            first_h, _ = self._load(
+                cache_base,
+                np.zeros((1, 1)),
+                np.zeros((1, 1)),
+                estimate,
+                sync_trajectory=trajectory,
+            )
+            second_h, _ = self._load(
+                cache_base,
+                np.zeros((1, 1)),
+                np.zeros((1, 1)),
+                estimate,
+                sync_trajectory=trajectory,
+            )
+            np.testing.assert_array_equal(first_h, second_h)
+            self.assertEqual(len(estimate_calls), 1)
 
 
 if __name__ == "__main__":

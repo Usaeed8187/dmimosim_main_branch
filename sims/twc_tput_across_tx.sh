@@ -2,7 +2,7 @@
 
 # Array of arguments
 # declare -a mobilities=("low_mobility" "medium_mobility" "high_mobility")
-declare -a mobilities=("highest_mobility")
+declare -a mobilities=("higher_mobility")
 # declare -a drop_idx=("26" "27" "28" "29" "30" "31" "32" "33" "34" "35" "36" "37" "38" "39" "43" "44" "45")
 # declare -a drop_idx=("1")
 declare -a drop_idx=($(seq 1 20))
@@ -11,14 +11,15 @@ declare -a num_txue_sel_arr=("2" "4" "6" "8" "10")
 declare -a modulation_orders=("4")
 declare -a code_rates=("1/2")
 declare -a perfect_csi_arr=("False")
-declare -a channel_prediction_settings=("configured_wesn_balanced" "configured_wesn_balanced_lite" "kalman_filter" "steady_state_kalman_filter") # Phase-2 predictors; configured identically to the phase-2-only sweep.
+declare -a channel_prediction_settings=(
+    # "configured_wesn_balanced"
+    "configured_wesn_balanced_lite"
+    # "kalman_filter"
+    # "steady_state_kalman_filter"
+)
 declare -a csi_quantization_arr=("True")
 
-# Residual synchronization sweep. The values are standard deviations from the
-# paper: phase in degrees and timing in normalized baseband samples.
 declare -a sync_errors_arr=("False")
-declare -a sync_phase_std_deg_arr=("0")
-declare -a sync_timing_std_samples_arr=("0")
 
 link_adapt="True"
 
@@ -75,13 +76,8 @@ generate_args() {
                                         fi
 
                                         for sync_errors in "${sync_errors_arr[@]}"; do
-                                            if [[ "${sync_errors}" == "True" ]]; then
-                                                phase_values=("${sync_phase_std_deg_arr[@]}")
-                                                timing_values=("${sync_timing_std_samples_arr[@]}")
-                                            else
-                                                phase_values=("0")
-                                                timing_values=("0")
-                                            fi
+                                            phase_values=("0")
+                                            timing_values=("0")
                                             for phase_std_deg in "${phase_values[@]}"; do
                                                 for timing_std_samples in "${timing_values[@]}"; do
                                                     echo "Mobility: ${mobilities[$i]}, Drop idx: ${drop_idx[$j]}, Rx UEs: ${rx_ues_arr[$k]}, Modulation order: ${modulation_orders[$m]}, Code rate: ${code_rates[$c]}, num_txue_sel: ${num_txue_sel_arr[$t]}, perfect_csi: ${perfect_csi_arr[$pcsi]}, channel_prediction_setting: ${channel_prediction_setting}, csi_prediction: ${csi_prediction_enabled}, csi_quantization_on: ${csi_quantization_arr[$cquant]}, channel_prediction_method: ${channel_prediction_method}, link_adapt: ${link_adapt}, sync_errors: ${sync_errors}, phase_std_deg: ${phase_std_deg}, timing_std_samples: ${timing_std_samples}" >&2
@@ -114,8 +110,10 @@ run_scenario() {
     local timing_std_samples=${args[12]}
     env \
         DMIMO_GEN_SYNC_ERRORS="${sync_errors}" \
-        DMIMO_SYNC_PHASE_STD_DEG="${phase_std_deg}" \
-        DMIMO_SYNC_TIMING_STD_SAMPLES="${timing_std_samples}" \
+        DMIMO_SYNC_FREQ_STD_PPB="0" \
+        DMIMO_SYNC_INITIAL_TIMING_STD_PS="0" \
+        DMIMO_SYNC_INITIAL_PHASE_STD_DEG="0" \
+        DMIMO_SYNC_PHASE_NOISE_S100_DBCHZ="off" \
         python sims/sim_mu_mimo_testing_updates.py "${args[@]:0:10}"
 }
 

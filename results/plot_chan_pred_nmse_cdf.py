@@ -85,8 +85,11 @@ def _candidate_paths(
     quantization: bool,
     scenario: Scenario,
     sync_errors: bool = False,
-    sync_phase_std_deg: float = 0.0,
-    sync_timing_std_samples: float = 0.0,
+    sync_frequency_std_ppb: float = 0.0,
+    sync_initial_timing_std_ps: float = 0.0,
+    sync_initial_phase_std_deg: float = 0.0,
+    sync_phase_noise_s100_dbchz: Optional[float] = None,
+    feedback_delay_ms: float = 4.0,
 ) -> List[Path]:
     quant_str = str(quantization)
     if scenario.prediction:
@@ -128,27 +131,49 @@ def _candidate_paths(
 
     candidates: List[Path] = []
     token = lambda value: format(float(value), "g").replace("-", "m").replace(".", "p")
-    sync_suffix = (
-        f"_sync_errors_{bool(sync_errors)}"
-        f"_phase_std_deg_{token(sync_phase_std_deg)}"
-        f"_timing_std_samples_{token(sync_timing_std_samples)}"
+    pn_token = (
+        "off"
+        if sync_phase_noise_s100_dbchz is None
+        else token(sync_phase_noise_s100_dbchz)
     )
+    sync_suffix = (
+        "_sync_clock_v2"
+        f"_freq_std_ppb_{token(sync_frequency_std_ppb)}"
+        f"_timing0_std_ps_{token(sync_initial_timing_std_ps)}"
+        f"_phase0_std_deg_{token(sync_initial_phase_std_deg)}"
+        f"_pn_s100_dbchz_{pn_token}"
+    )
+    feedback_suffix = f"_fb_delay_ms_{token(feedback_delay_ms)}"
     for pattern in patterns:
         stem = pattern[:-4] if pattern.endswith(".npz") else pattern
         for suffix in suffixes:
             candidates.extend(
-                sorted(drop_folder.glob(f"{stem}{suffix}{sync_suffix}.npz"))
+                sorted(
+                    drop_folder.glob(
+                        f"{stem}{suffix}{sync_suffix}{feedback_suffix}.npz"
+                    )
+                )
             )
+            if np.isclose(feedback_delay_ms, 4.0):
+                candidates.extend(
+                    sorted(drop_folder.glob(f"{stem}{suffix}{sync_suffix}.npz"))
+                )
     if (
         not candidates
         and not sync_errors
-        and sync_phase_std_deg == 0
-        and sync_timing_std_samples == 0
+        and sync_frequency_std_ppb == 0
+        and sync_initial_timing_std_ps == 0
+        and sync_initial_phase_std_deg == 0
+        and sync_phase_noise_s100_dbchz is None
     ):
         for pattern in patterns:
             stem = pattern[:-4] if pattern.endswith(".npz") else pattern
             for suffix in suffixes:
-                candidates.extend(sorted(drop_folder.glob(f"{stem}{suffix}.npz")))
+                candidates.extend(
+                    path
+                    for path in sorted(drop_folder.glob(f"{stem}{suffix}.npz"))
+                    if "_sync_clock_" not in path.name
+                )
     return candidates
 
 
@@ -222,8 +247,11 @@ def _collect_nmse(
     scenarios: Sequence[Scenario],
     wesn_lite_readout_mode: str,
     sync_errors: bool = False,
-    sync_phase_std_deg: float = 0.0,
-    sync_timing_std_samples: float = 0.0,
+    sync_frequency_std_ppb: float = 0.0,
+    sync_initial_timing_std_ps: float = 0.0,
+    sync_initial_phase_std_deg: float = 0.0,
+    sync_phase_noise_s100_dbchz: Optional[float] = None,
+    feedback_delay_ms: float = 4.0,
 ) -> Dict[str, np.ndarray]:
     values_by_label: Dict[str, List[np.ndarray]] = {s.label: [] for s in scenarios}
 
@@ -237,8 +265,11 @@ def _collect_nmse(
                     quantization,
                     scenario,
                     sync_errors,
-                    sync_phase_std_deg,
-                    sync_timing_std_samples,
+                    sync_frequency_std_ppb,
+                    sync_initial_timing_std_ps,
+                    sync_initial_phase_std_deg,
+                    sync_phase_noise_s100_dbchz,
+                    feedback_delay_ms,
                 )
                 chosen = _choose_candidate(
                     candidates, scenario, wesn_lite_readout_mode
@@ -562,8 +593,16 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
     )
-    parser.add_argument("--sync-phase-std-deg", type=float, default=0.0)
-    parser.add_argument("--sync-timing-std-samples", type=float, default=0.0)
+    parser.add_argument("--sync-frequency-std-ppb", type=float, default=0.0)
+    parser.add_argument("--sync-initial-timing-std-ps", type=float, default=0.0)
+    parser.add_argument("--sync-initial-phase-std-deg", type=float, default=0.0)
+    parser.add_argument("--sync-phase-noise-s100-dbchz", type=float, default=None)
+    parser.add_argument(
+        "--feedback-delay-ms",
+        type=float,
+        choices=[4.0, 8.0],
+        default=4.0,
+    )
     parser.add_argument("--nmse-in-db", action="store_true", default=False)
     parser.add_argument(
         "--wesn-lite-readout-mode",
@@ -599,7 +638,9 @@ def main() -> None:
         )
 
     base_dir = _resolve_path(args.base_dir, SCRIPT_DIR)
-    output_path = _resolve_path(args.output_dir, SCRIPT_DIR)
+    output_path = _resolve_path(args.output_dir, SCRIPT_DIR) / (
+        f"fb_delay_ms_{token(args.feedback_delay_ms)}"
+    )
     mobilities = args.mobilities if args.mobilities else [args.mobility]
 
     scenarios = [
@@ -653,8 +694,11 @@ def main() -> None:
             scenarios=scenarios,
             wesn_lite_readout_mode=args.wesn_lite_readout_mode,
             sync_errors=args.sync_errors,
-            sync_phase_std_deg=args.sync_phase_std_deg,
-            sync_timing_std_samples=args.sync_timing_std_samples,
+            sync_frequency_std_ppb=args.sync_frequency_std_ppb,
+            sync_initial_timing_std_ps=args.sync_initial_timing_std_ps,
+            sync_initial_phase_std_deg=args.sync_initial_phase_std_deg,
+            sync_phase_noise_s100_dbchz=args.sync_phase_noise_s100_dbchz,
+            feedback_delay_ms=args.feedback_delay_ms,
         )
         per_mobility_nmse = _apply_outlier_filter(
             nmse_values=per_mobility_nmse,

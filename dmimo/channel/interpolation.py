@@ -360,13 +360,14 @@ class LMMSEInterpolator1D:
         The channel estimation error variances of the interpolated channel estimates.
     """
 
-    def __init__(self, pilot_mask, cov_mat, last_step):
+    def __init__(self, pilot_mask, cov_mat, last_step, share_rx_weights=False):
 
         self._cdtype = cov_mat.dtype
         assert self._cdtype in (tf.complex64, tf.complex128),\
             "`cov_mat` dtype must be one of tf.complex64 or tf.complex128"
         self._rdtype = self._cdtype.real_dtype
         self._rzero = tf.constant(0.0, self._rdtype)
+        self._share_rx_weights = bool(share_rx_weights)
 
         # Interpolation is performed along the inner dimension of
         # the resource grid, which may be either the subcarriers
@@ -520,7 +521,26 @@ class LMMSEInterpolator1D:
 
         batch_size = tf.shape(h_hat)[0]
         num_rx = tf.shape(h_hat)[1]
-        num_rx_ant = tf.shape(h_hat)[2]
+        output_num_rx_ant = tf.shape(h_hat)[2]
+        if self._share_rx_weights:
+            # LS error variance is identical across receive antennas when the
+            # caller uses a scalar noise variance. In that case, the LMMSE
+            # interpolation system A X = B is identical for every antenna.
+            # Solve it once and broadcast the resulting weights instead of
+            # repeating the robust (fast=False) least-squares solve.
+            shared_err_var = err_var[:, :, :1, ...]
+            tf.debugging.assert_equal(
+                err_var,
+                tf.broadcast_to(shared_err_var, tf.shape(err_var)),
+                message=(
+                    "share_rx_weights requires channel-estimation error "
+                    "variance to be identical across receive antennas"
+                ),
+            )
+            err_var = shared_err_var
+            num_rx_ant = tf.constant(1, dtype=tf.int32)
+        else:
+            num_rx_ant = output_num_rx_ant
         num_tx = tf.shape(h_hat)[3]
         num_tx_stream = tf.shape(h_hat)[4]
         outer_dim_size = self._outer_dim_size
@@ -692,6 +712,9 @@ class LMMSEInterpolator1D:
             err_var = tf.math.real(err_var)
             err_var = tf.maximum(err_var, self._rzero)
 
+        if self._share_rx_weights:
+            err_var = tf.broadcast_to(err_var, tf.shape(h_hat))
+
         return h_hat, err_var
 
 
@@ -739,10 +762,11 @@ class LMMSELinearInterp(BaseChannelInterpolator):
         for all transmitters and streams
     """
 
-    def __init__(self, pilot_pattern, cov_mat_freq):
+    def __init__(self, pilot_pattern, cov_mat_freq, share_rx_weights=False):
 
         self._num_ofdm_symbols = pilot_pattern.num_ofdm_symbols
         self._num_effective_subcarriers =pilot_pattern.num_effective_subcarriers
+        self._share_rx_weights = bool(share_rx_weights)
 
         # Build pilot masks for every stream
         pilot_mask = self._build_pilot_mask(pilot_pattern)
@@ -754,7 +778,12 @@ class LMMSELinearInterp(BaseChannelInterpolator):
         self._inputs_to_rg_indices = tf.cast(inputs_to_rg_indices, tf.int32)
 
         # Frequency-domain LMMSE interpolator
-        self._freq_interp = LMMSEInterpolator1D(pilot_mask, cov_mat_freq, last_step=False)
+        self._freq_interp = LMMSEInterpolator1D(
+            pilot_mask,
+            cov_mat_freq,
+            last_step=False,
+            share_rx_weights=self._share_rx_weights,
+        )
         pilot_mask = self._update_pilot_mask_interp(pilot_mask)
         self._freq_err_var_mask = tf.cast(pilot_mask == 1, cov_mat_freq.dtype.real_dtype)
 
@@ -764,6 +793,12 @@ class LMMSELinearInterp(BaseChannelInterpolator):
         pilot_mask = self._update_pilot_mask_interp(pilot_mask)
         pilot_mask = tf.transpose(pilot_mask, [0, 1, 3, 2])
         self._time_err_var_mask = tf.cast(pilot_mask == 1, cov_mat_freq.dtype.real_dtype)
+
+    @property
+    def share_rx_weights(self):
+        """Whether one frequency-LMMSE solve is shared by RX antennas."""
+
+        return self._share_rx_weights
 
     def _build_pilot_mask(self, pilot_pattern):
         """

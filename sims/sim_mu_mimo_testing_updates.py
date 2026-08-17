@@ -34,7 +34,12 @@ tf.get_logger().setLevel('ERROR')
 
 from sionna.ofdm import ResourceGrid
 
-from dmimo.channel import LMMSELinearInterp, dMIMOChannels, estimate_freq_cov
+from dmimo.channel import (
+    LMMSELinearInterp,
+    dMIMOChannels,
+    estimate_freq_cov,
+    pa_cache_suffix,
+)
 
 from dmimo.config import SimConfig, Ns3Config, RCConfig
 from dmimo.mu_mimo_testing_updates_v2 import sim_mu_mimo_all
@@ -99,7 +104,7 @@ csi_prediction = True
 channel_prediction_setting = "wesn_lite" # "None", "kalman_filter", "steady_state_kalman_filter", "configured_wesn", "configured_wesn_balanced", "configured_wesn_balanced_lite", "wesn_lite", "channelmamba", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
 channel_prediction_method = "wesn_lite" # None, "kalman_filter", "steady_state_kalman_filter", "configured_wesn", "configured_wesn_balanced", "configured_wesn_balanced_lite", "wesn_lite", "channelmamba", "two_mode", "weiner_filter", "two_mode_kalman_config", "pilot_obs"
 wesn_offline_ratio = 0.5  # Fraction of simulation cycles used for offline WESN configuration
-history_len = 4
+history_len = 8
 window_length = 2
 num_neurons = 16
 csi_quantization_on = True
@@ -115,7 +120,7 @@ esn_activation = "tanh"
 esn_ls_reg = 1e-4
 esn_diagnostics = True
 enable_skip_connections = True
-input_scale = 0.15
+input_scale = 0.5
 W_tran_radius = 0.1
 wesn_lite_residue_energy_threshold = float(
     os.environ.get("WESN_LITE_RESIDUE_ENERGY", "0.95")
@@ -311,14 +316,31 @@ def run_simulation():
     cfg = SimConfig()
     cfg.rb_size = 12            # resource block size (this parameter is  currently only being used for ZF_QUANTIZED_CSI)
     cfg.total_slots = 100       # total number of slots in ns-3 channels
-    cfg.start_slot_idx = 33     # starting slots (must be greater than csi_delay + 5)
+    cfg.start_slot_idx = int(os.environ.get("DMIMO_START_SLOT_IDX", "33"))
     if start_slot_idx_override is not None:
         cfg.start_slot_idx = int(start_slot_idx_override)
-    cfg.csi_delay = 4           # feedback delay in number of subframe
+    cfg.initial_start_slot_idx = int(cfg.start_slot_idx)
     cfg.phase_1_enabled = _parse_bool(os.environ.get("DMIMO_PHASE_1_ENABLED", "False"))
     cfg.enable_rxsquad = _parse_bool(os.environ.get("DMIMO_PHASE_3_ENABLED", "False"))
     cfg.num_slots_p1 = int(os.environ.get("DMIMO_NUM_SLOTS_P1", "2"))
     cfg.num_slots_p2 = int(os.environ.get("DMIMO_NUM_SLOTS_P2", "2"))
+    if cfg.num_slots_p1 <= 0 or cfg.num_slots_p2 <= 0:
+        raise ValueError("DMIMO_NUM_SLOTS_P1 and DMIMO_NUM_SLOTS_P2 must be positive.")
+    cfg.csi_delay = cfg.num_slots_p1 + cfg.num_slots_p2
+    requested_delay_ms = float(
+        os.environ.get(
+            "DMIMO_CSI_FEEDBACK_DELAY_MS",
+            cfg.csi_delay * cfg.slot_duration * 1e3,
+        )
+    )
+    derived_delay_ms = cfg.csi_delay * cfg.slot_duration * 1e3
+    if not np.isclose(requested_delay_ms, derived_delay_ms):
+        raise ValueError(
+            "CSI feedback must arrive after one complete D-MIMO cycle: "
+            f"requested {requested_delay_ms:g} ms, but P1+P2 gives "
+            f"{derived_delay_ms:g} ms."
+        )
+    cfg.feedback_delay_ms = float(derived_delay_ms)
     cfg.perfect_csi = perfect_csi
     cfg.rank_adapt = False      # enable/disable rank adaptation
     cfg.link_adapt = link_adapt      # enable/disable link adaptation,. .
@@ -333,6 +355,14 @@ def run_simulation():
     # cfg.ns3_folder = "ns3/channels/LowMobility/"
     ns3cfg = Ns3Config(data_folder=cfg.ns3_folder, total_slots=cfg.total_slots)
     cfg.estimated_channels_dir = "ns3/channel_estimates_" + mobility + "_drop_" + drop_idx
+    cfg.pa_enabled = _parse_bool(os.environ.get("DMIMO_PA_ENABLED", "False"))
+    cfg.pa_ibo_db = float(os.environ.get("DMIMO_PA_IBO_DB", "6.5"))
+    cfg.pa_rho = float(os.environ.get("DMIMO_PA_RHO", "3"))
+    cfg.pa_model_version = os.environ.get("DMIMO_PA_MODEL_VERSION", "rapp_v1")
+    ns3cfg.pa_enabled = cfg.pa_enabled
+    ns3cfg.pa_ibo_db = cfg.pa_ibo_db
+    ns3cfg.pa_rho = cfg.pa_rho
+    ns3cfg.pa_model_version = cfg.pa_model_version
     cfg.precoding_method = "ZF" # Options: "ZF", "DIRECT", "SLNR" for quantized CSI feedback
     cfg.csi_quantization_on = csi_quantization_on
     cfg.PMI_feedback_architecture = 'dMIMO_phase2_type_II_CB2' # 'dMIMO_phase2_rel_15_type_II', 'dMIMO_phase2_type_II_CB1', 'dMIMO_phase2_type_II_CB2', 'RVQ'
@@ -341,27 +371,28 @@ def run_simulation():
     cfg.gen_sync_errors = _parse_bool(
         os.environ.get("DMIMO_GEN_SYNC_ERRORS", "False")
     )
-    cfg.sync_phase_error_std_deg = float(
-        os.environ.get("DMIMO_SYNC_PHASE_STD_DEG", "0")
+    cfg.sync_frequency_std_ppb = float(
+        os.environ.get("DMIMO_SYNC_FREQ_STD_PPB", "0")
     )
-    cfg.sync_timing_error_std_samples = float(
-        os.environ.get("DMIMO_SYNC_TIMING_STD_SAMPLES", "0")
+    cfg.sync_initial_timing_std_ps = float(
+        os.environ.get("DMIMO_SYNC_INITIAL_TIMING_STD_PS", "0")
     )
-    if cfg.sync_phase_error_std_deg < 0 or cfg.sync_timing_error_std_samples < 0:
+    cfg.sync_initial_phase_std_deg = float(
+        os.environ.get("DMIMO_SYNC_INITIAL_PHASE_STD_DEG", "0")
+    )
+    phase_noise_raw = os.environ.get("DMIMO_SYNC_PHASE_NOISE_S100_DBCHZ", "off")
+    cfg.sync_phase_noise_s100_dbchz = (
+        None
+        if phase_noise_raw.strip().lower() in ("", "off", "none", "nan")
+        else float(phase_noise_raw)
+    )
+    if min(
+        cfg.sync_frequency_std_ppb,
+        cfg.sync_initial_timing_std_ps,
+        cfg.sync_initial_phase_std_deg,
+    ) < 0:
         raise ValueError("Synchronization-error standard deviations must be nonnegative.")
-    # The paper reports phase-error standard deviation. Under the residual-CFO
-    # model, choose sigma_f so one slot of phase accumulation has that std.
-    cfg.cfo_sigma = (
-        cfg.sync_phase_error_std_deg / (360.0 * cfg.slot_duration)
-        if cfg.gen_sync_errors
-        else 0.0
-    )
-    sample_duration = 1.0 / (cfg.subcarrier_spacing * cfg.fft_size)
-    cfg.sto_sigma = (
-        cfg.sync_timing_error_std_samples * sample_duration * 1e9
-        if cfg.gen_sync_errors
-        else 0.0
-    )
+    cfg.carrier_frequency_hz = 3.5e9
     cfg.print_lmmse_effective_snr = print_lmmse_effective_snr
     cfg.lmmse_use_rx_snr_for_nvar = lmmse_use_rx_snr_for_nvar
     cfg.return_first_slot_only = return_first_slot_only
@@ -384,7 +415,7 @@ def run_simulation():
     ns3cfg.num_txue_sel = num_txue_sel        
 
     folder_name = os.path.basename(os.path.abspath(cfg.ns3_folder))
-    print("Using channels in {}".format(folder_name))    
+    # print("Using channels in {}".format(folder_name))    
 
     rc_config = RCConfig()
     rc_config.enable_window = True
@@ -431,7 +462,9 @@ def run_simulation():
         rc_config.enable_kalman_weight_config = True
     else:
         rc_config.enable_kalman_weight_config = False
-    cfg.wesn_offline_ratio = wesn_offline_ratio
+    cfg.wesn_offline_ratio = float(
+        os.environ.get("DMIMO_WESN_OFFLINE_RATIO", wesn_offline_ratio)
+    )
     cfg.channelmamba_mode = channelmamba_mode
     cfg.channelmamba_checkpoint = channelmamba_checkpoint
     cfg.channelmamba_train_drop_indices = channelmamba_train_drop_indices
@@ -502,18 +535,27 @@ def run_simulation():
 
         dmimo_chans = dMIMOChannels(ns3cfg, "dMIMO", add_noise=True, return_channel=True)
         slot_idx = cfg.start_slot_idx - cfg.csi_delay
-        cache_slots = cfg.lmmse_cov_est_slots if slot_idx >= cfg.lmmse_cov_est_slots else slot_idx
+        if slot_idx < 0:
+            raise ValueError(
+                "start_slot_idx must leave at least one causal CSI slot: "
+                f"start_slot_idx={cfg.start_slot_idx}, csi_delay={cfg.csi_delay}."
+            )
+        cache_slots = min(cfg.lmmse_cov_est_slots, slot_idx + 1)
         start_slot = slot_idx - cache_slots + 1
 
         freq_cov_mat = estimate_freq_cov(
             dmimo_chans, rg_csi, start_slot=start_slot, total_slots=cache_slots
         )
-        lmmse_interpolator = LMMSELinearInterp(rg_csi.pilot_pattern, freq_cov_mat)
+        lmmse_interpolator = LMMSELinearInterp(
+            rg_csi.pilot_pattern,
+            freq_cov_mat,
+            share_rx_weights=True,
+        )
 
         cfg.freq_cov_mat = freq_cov_mat
         cfg.lmmse_interpolator = lmmse_interpolator
     end_time = time.time()
-    print("Time taken for pre-computing LMMSE resources: ", end_time - start_time)
+    # print("Time taken for pre-computing LMMSE resources: ", end_time - start_time)
 
     #############################################
     # Testing
@@ -613,22 +655,44 @@ def run_simulation():
         def filename_token(value):
             return format(float(value), "g").replace("-", "m").replace(".", "p")
 
+        phase_noise_token = (
+            "off"
+            if cfg.sync_trajectory.phase_noise_s100_dbchz is None
+            else filename_token(cfg.sync_trajectory.phase_noise_s100_dbchz)
+        )
         result_suffix += (
-            f"_sync_errors_{cfg.gen_sync_errors}"
-            f"_phase_std_deg_{filename_token(cfg.sync_phase_error_std_deg)}"
-            f"_timing_std_samples_{filename_token(cfg.sync_timing_error_std_samples)}"
+            f"_sync_{cfg.sync_trajectory.model_version}"
+            f"_freq_std_ppb_{filename_token(cfg.sync_trajectory.frequency_std_ppb)}"
+            f"_timing0_std_ps_{filename_token(cfg.sync_trajectory.initial_timing_std_ps)}"
+            f"_phase0_std_deg_{filename_token(cfg.sync_trajectory.initial_phase_std_deg)}"
+            f"_pn_s100_dbchz_{phase_noise_token}"
+        )
+        result_suffix += pa_cache_suffix(
+            cfg.pa_enabled,
+            cfg.pa_ibo_db,
+            cfg.pa_rho,
+            cfg.pa_model_version,
+        )
+        result_suffix += (
+            f"_fb_delay_ms_{filename_token(cfg.feedback_delay_ms)}"
         )
         sync_metadata = {
             "sync_errors_enabled": np.asarray(cfg.gen_sync_errors),
-            "sync_phase_error_std_deg": np.asarray(cfg.sync_phase_error_std_deg),
-            "sync_timing_error_std_samples": np.asarray(
-                cfg.sync_timing_error_std_samples
-            ),
-            "residual_cfo_hz": np.asarray(cfg.random_cfo_vals),
-            "residual_timing_offset_samples": np.asarray(
-                cfg.random_sto_vals_samples
-            ),
-            "residual_timing_offset_ns": np.asarray(cfg.random_sto_vals),
+            **cfg.sync_trajectory.metadata(),
+        }
+        pa_metadata = {
+            "pa_enabled": np.asarray(cfg.pa_enabled),
+            "pa_ibo_db": np.asarray(cfg.pa_ibo_db),
+            "pa_rho": np.asarray(cfg.pa_rho),
+            "pa_model_version": np.asarray(cfg.pa_model_version),
+        }
+        feedback_metadata = {
+            "csi_feedback_delay_ms": np.asarray(cfg.feedback_delay_ms),
+            "csi_delay_slots": np.asarray(cfg.csi_delay),
+            "num_slots_p1": np.asarray(cfg.num_slots_p1),
+            "num_slots_p2": np.asarray(cfg.num_slots_p2),
+            "start_slot_idx": np.asarray(cfg.initial_start_slot_idx),
+            "wesn_offline_ratio": np.asarray(cfg.wesn_offline_ratio),
         }
 
         if cfg.csi_prediction:
@@ -666,7 +730,11 @@ def run_simulation():
                     balanced_hankel_energy_threshold=np.asarray(
                         float(rc_config.balanced_hankel_energy_threshold)
                     ),
-                    **sync_metadata)
+                    esn_m=np.asarray(int(rc_config.esn_m)),
+                    esn_k=np.asarray(int(rc_config.esn_k)),
+                    **sync_metadata,
+                    **pa_metadata,
+                    **feedback_metadata)
         else:
             if cfg.scheduling:
                 file_path = os.path.join(folder_path, "mu_mimo_results_{}_scheduling_tx_UE_{}_perfect_CSI_{}_pmi_quantization_{}{}.npz".format(MCS_string, num_txue_sel, cfg.perfect_csi, cfg.csi_quantization_on, result_suffix))
@@ -677,7 +745,9 @@ def run_simulation():
                     ns3cfg=ns3cfg, ber=ber, ldpc_ber=ldpc_ber, goodput=goodput, throughput=throughput, bitrate=bitrate, 
                     nodewise_goodput=rst_zf[5], nodewise_throughput=rst_zf[6], nodewise_bitrate=rst_zf[7], 
                     ranks=rst_zf[8], uncoded_ber_list=rst_zf[9], ldpc_ber_list=rst_zf[10], sinr_dB=rst_zf[11], snr_dB=rst_zf[12], per_step_throughput=rst_zf[13],
-                    **sync_metadata)
+                    **sync_metadata,
+                    **pa_metadata,
+                    **feedback_metadata)
 
 
 if __name__ == "__main__":
